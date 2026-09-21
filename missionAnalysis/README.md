@@ -158,6 +158,7 @@ the full mechanism.
 | File | Purpose |
 |---|---|
 | `mission_config.py` | All mission constants, orbit design (incl. the RAAN-for-LTDN solve), satellite definitions. Pure `numpy`/stdlib, importable without Basilisk. |
+| `configure_mission.py` | CLI to edit spacecraft/orbit parameters in `mission_config.py` from the command line instead of hand-editing it -- see below. |
 | `generate_space_weather_placeholder.py` | Builds a synthetic multi-year F10.7/Ap table (CelesTrak CSV layout) covering the mission window -- see below for why this has to be synthetic. |
 | `constellation_controllers.py` | The two `SysModel` controllers (altitude keeping, phasing keeping). |
 | `communications.py` | Per-satellite EO data generation, on-board storage, ground downlink, and the eclipse-gated instrument duty cycle -- drives the Vizard comm-rings visualization. |
@@ -225,6 +226,47 @@ it:
   Architecture decision #3), so there's no wall-clock-paced moment for a
   live viewer to watch frame by frame. The saved-file path is the intended
   way to inspect this mission in Vizard.
+
+### Changing spacecraft/orbit parameters
+
+`mission_config.py` is the single source of truth for every spacecraft and
+orbit parameter -- `run_constellation_mission.py`, `constellation_controllers.py`,
+and `communications.py` all read their constants from it, so editing it (by
+hand or with the tool below) is the only place you need to change a value.
+
+`configure_mission.py` edits the common ones from the command line instead
+of hand-editing the file, and regenerates the space-weather placeholder
+file afterward if you changed the epoch or mission duration (its date range
+depends on those):
+
+```bash
+# preview changes without writing anything
+python3 configure_mission.py --dry-run --altitude-km 600
+
+# bump SSO altitude and give it a bigger propellant budget
+python3 configure_mission.py --altitude-km 600 --propellant-kg 50
+
+# move the epoch and shorten the mission for a quick study
+python3 configure_mission.py --epoch 2030-01-01 --mission-years 2
+
+# retarget the mid-inclination plane once its coverage RAAN is chosen
+python3 configure_mission.py --midinc-raan-deg 42.5
+```
+
+Run with `--help` for the full list (bus mass/Cd/Cr/areas, propulsion
+thrust/Isp/propellant, SSO and mid-inclination orbit elements, epoch,
+mission duration, altitude deadband, phasing tolerance, gravity degree).
+It only rewrites the specific `NAME = <value>` line(s) you pass a flag for
+-- every comment, docstring, and the derived-value formulas
+(`A_NOMINAL_M`, `SSO_RAAN_DEG`, `ORBIT_PERIOD_S`, the `SATELLITES` list,
+...) are left as Python expressions in the file and recompute correctly
+the next time it's imported; you never set those directly. It prints the
+old value, the new value, and the field's current inline comment for each
+change so you can spot a comment that now reads as stale (e.g. one that
+names the old value in words) and fix it by hand -- comments are not
+rewritten, only the value is. Settings this tool doesn't cover (station
+-keeping deadband timing beyond altitude/phasing, task rates, comms/ground
+-station settings) can still be edited directly in `mission_config.py`.
 
 ## Assumptions and placeholders to replace
 
