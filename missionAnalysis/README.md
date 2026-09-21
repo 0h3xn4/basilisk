@@ -359,6 +359,12 @@ a few this implementation had to introduce:
   LEO SSO station-keeping + phasing timeline at 10 mN/1500 s Isp; replace
   once a real propulsion budget/tank sizing exists.
   (`mission_config.PROPELLANT_MASS_BOL_KG`)
+* **`PROPULSION_TYPE`** ("Hall-effect thruster (placeholder pending hardware
+  selection)") is a free-text label you can set via `setup_wizard.py` or
+  `configure_mission.py --propulsion-type`, carried only into
+  `mission_config.py`'s own text -- it documents which hardware assumption
+  `THRUST_N`/`ISP_S`/`PROPELLANT_MASS_BOL_KG` correspond to but does not
+  itself affect the simulation.
 - **Mid-inclination satellite orbit** -- RAAN, eccentricity, and AOP are all
   placeholders (`0`, `0`, `0`) per the mission statement's own "currently a
   placeholder" / "coverage-driven" framing. (`mission_config.MIDINC_*`)

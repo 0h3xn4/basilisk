@@ -90,11 +90,16 @@ PROPELLANT_MASS_BOL_KG = 20.0  # [kg]
 
 # ---------------------------------------------------------------------------
 # Propulsion: electric only, placeholder Hall-effect-class values pending
-# actual hardware selection
+# actual hardware selection. THRUST_N/ISP_S drive the physics (rocket
+# equation + force magnitude in constellation_controllers.py);
+# PROPULSION_TYPE is a free-text label carried into logs/summaries only --
+# it does not affect the simulation, it just documents which hardware
+# assumption THRUST_N/ISP_S/PROPELLANT_MASS_BOL_KG correspond to.
 # ---------------------------------------------------------------------------
+PROPULSION_TYPE = "Hall-effect thruster (placeholder pending hardware selection)"  # [-] descriptive only
 THRUST_N = 10.0e-3  # [N] ~10 mN
 ISP_S = 1500.0  # [s]
-G0_MPS2 = 9.80665  # [m/s^2] standard gravity, for the rocket equation
+G0_MPS2 = 9.80665  # [m/s^2] standard gravity, for the rocket equation (not mission-specific -- not user-configurable)
 
 # ---------------------------------------------------------------------------
 # Constellation orbit design
@@ -170,8 +175,10 @@ DOWNLINK_PACKET_SIZE_BITS = 1.0e6  # [bit] PLACEHOLDER downlink packet/buffer si
 DOWNLINK_NUM_BUFFERS = 2  # [-] PLACEHOLDER
 DATA_STORAGE_CAPACITY_BITS = 256.0e9  # [bit] PLACEHOLDER on-board storage capacity (~32 GB)
 
-# Eclipse threshold: shadow factor above this counts as "in sunlight" for
-# thrust-enable gating (electric propulsion pauses off battery-only power).
+# Eclipse threshold: shadow factor above this counts as "in sunlight". Shared
+# by two independent gates: electric-propulsion thrust-enable (the thruster
+# pauses off battery-only power -- see constellation_controllers.py) and the
+# EO instrument's data-collection duty cycle (communications.py).
 ECLIPSE_SUNLIT_THRESHOLD = 0.99  # [-]
 
 

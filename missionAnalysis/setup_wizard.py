@@ -22,8 +22,10 @@ hand-editing ``mission_config.py`` or using ``configure_mission.py``'s CLI
 flags. Prompts (Enter accepts the default shown in ``[brackets]``) for:
 
 * Epoch and mission duration
-* Spacecraft bus (mass, Cd, Cr, drag/SRP areas, propellant) and electric
-  propulsion (thrust, Isp)
+* Spacecraft bus (mass, Cd, Cr, drag/SRP areas) and electric propulsion
+  (a free-text system/thruster description, thrust, Isp, propellant mass,
+  and the sunlit shadow-factor threshold that gates both thrust-enable and
+  the EO instrument's duty cycle)
 * The SSO constellation plane: altitude, inclination, eccentricity, AOP,
   local time of descending node, and satellite COUNT (evenly phased in
   mean anomaly; each gets independent altitude station-keeping, and for
@@ -150,17 +152,28 @@ def ask_bus_and_propulsion():
     srp_coeff = ask_float("SRP reflectivity coefficient Cr [-]", mc.SRP_COEFF, lambda v: v > 0 or "must be > 0")
     drag_area = ask_float("Drag cross-sectional area [m^2]", mc.DRAG_AREA_M2, lambda v: v > 0 or "must be > 0")
     srp_area = ask_float("SRP cross-sectional area [m^2]", mc.SRP_AREA_M2, lambda v: v > 0 or "must be > 0")
+
+    section("Electric propulsion")
+    propulsion_type = ask(
+        "Thruster/propulsion system description (for your own records -- doesn't affect the simulation)",
+        mc.PROPULSION_TYPE,
+    )
+    thrust_mn = ask_float("Thrust [mN]", mc.THRUST_N * 1000.0, lambda v: v > 0 or "must be > 0")
+    isp_s = ask_float("Specific impulse Isp [s]", mc.ISP_S, lambda v: v > 0 or "must be > 0")
     propellant = ask_float(
         "Propellant mass, beginning-of-life [kg]", mc.PROPELLANT_MASS_BOL_KG, lambda v: v >= 0 or "must be >= 0"
     )
-
-    section("Electric propulsion")
-    thrust_mn = ask_float("Thrust [mN]", mc.THRUST_N * 1000.0, lambda v: v > 0 or "must be > 0")
-    isp_s = ask_float("Specific impulse Isp [s]", mc.ISP_S, lambda v: v > 0 or "must be > 0")
+    eclipse_sunlit_threshold = ask_float(
+        "Sunlit shadow-factor threshold [-, 0-1] (gates both thrust-enable and the EO "
+        "instrument's duty cycle -- higher means less of a partial-shadow margin before "
+        "treating the spacecraft as eclipsed)",
+        mc.ECLIPSE_SUNLIT_THRESHOLD, lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]",
+    )
 
     return dict(
         dry_mass=dry_mass, drag_coeff=drag_coeff, srp_coeff=srp_coeff, drag_area=drag_area,
-        srp_area=srp_area, propellant=propellant, thrust_mn=thrust_mn, isp_s=isp_s,
+        srp_area=srp_area, propulsion_type=propulsion_type, thrust_mn=thrust_mn, isp_s=isp_s,
+        propellant=propellant, eclipse_sunlit_threshold=eclipse_sunlit_threshold,
     )
 
 
@@ -314,9 +327,11 @@ def main() -> int:
         "--srp-coeff", str(bus["srp_coeff"]),
         "--drag-area-m2", str(bus["drag_area"]),
         "--srp-area-m2", str(bus["srp_area"]),
-        "--propellant-kg", str(bus["propellant"]),
+        "--propulsion-type", bus["propulsion_type"],
         "--thrust-mn", str(bus["thrust_mn"]),
         "--isp-s", str(bus["isp_s"]),
+        "--propellant-kg", str(bus["propellant"]),
+        "--eclipse-sunlit-threshold", str(bus["eclipse_sunlit_threshold"]),
         "--alt-deadband-km", str(alt_deadband_km),
         "--phasing-tolerance-deg", str(phasing_tolerance_deg),
         "--earth-grav-degree", str(grav_degree),

@@ -169,6 +169,10 @@ def _num(x: str) -> float:
     return float(x)
 
 
+def _str(x: str) -> str:
+    return x
+
+
 def _lit(x: Any) -> str:
     return repr(x)
 
@@ -180,12 +184,17 @@ FIELDS = [
     Field("--srp-coeff", "srp_coeff", "SRP_COEFF", _num, _lit, "SRP reflectivity coefficient Cr [-]"),
     Field("--drag-area-m2", "drag_area_m2", "DRAG_AREA_M2", _num, _lit, "drag cross-sectional area [m^2]"),
     Field("--srp-area-m2", "srp_area_m2", "SRP_AREA_M2", _num, _lit, "SRP cross-sectional area [m^2]"),
-    Field("--propellant-kg", "propellant_kg", "PROPELLANT_MASS_BOL_KG", _num, _lit,
-          "beginning-of-life propellant mass [kg]"),
     # --- Propulsion ------------------------------------------------------
+    Field("--propulsion-type", "propulsion_type", "PROPULSION_TYPE", _str, _lit,
+          "propulsion system/thruster description [-] (descriptive only, does not affect the simulation)"),
     Field("--thrust-mn", "thrust_mn", "THRUST_N", _num, lambda x: _lit(x * 1.0e-3),
           "electric thruster thrust [mN]"),
     Field("--isp-s", "isp_s", "ISP_S", _num, _lit, "thruster specific impulse [s]"),
+    Field("--propellant-kg", "propellant_kg", "PROPELLANT_MASS_BOL_KG", _num, _lit,
+          "beginning-of-life propellant mass [kg]"),
+    Field("--eclipse-sunlit-threshold", "eclipse_sunlit_threshold", "ECLIPSE_SUNLIT_THRESHOLD", _num, _lit,
+          "shadow factor above which the spacecraft counts as sunlit [-, 0-1] "
+          "(gates both thrust-enable and the EO instrument's duty cycle)"),
     # --- Constellation orbit ----------------------------------------------
     Field("--altitude-km", "altitude_km", "ALT_NOMINAL_M", _num, lambda x: _lit(x * 1.0e3),
           "default altitude used to build the SSO plane and standalone satellite [km] "
@@ -225,9 +234,11 @@ _VALIDATORS = {
     "srp_coeff": lambda v: v > 0 or "must be > 0",
     "drag_area_m2": lambda v: v > 0 or "must be > 0",
     "srp_area_m2": lambda v: v > 0 or "must be > 0",
+    "propulsion_type": lambda v: bool(v.strip()) or "must not be empty",
     "propellant_kg": lambda v: v >= 0 or "must be >= 0",
     "thrust_mn": lambda v: v > 0 or "must be > 0",
     "isp_s": lambda v: v > 0 or "must be > 0",
+    "eclipse_sunlit_threshold": lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]",
     "altitude_km": lambda v: v > 100 or "must be > 100 km (else drag will deorbit it almost immediately)",
     "sso_inclination_deg": lambda v: 0 <= v <= 180 or "must be in [0, 180] deg",
     "sso_ecc": lambda v: 0 <= v < 1 or "must be in [0, 1) (elliptical orbit)",
