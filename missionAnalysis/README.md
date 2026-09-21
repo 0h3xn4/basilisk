@@ -177,6 +177,23 @@ python3 run_constellation_mission.py               # full 5-year run
 python3 run_constellation_mission.py --years 0.05 --vizard-save mission_playback
 ```
 
+**"Built Basilisk package" means a build of *this checkout*.** This script
+uses a few modules that are new/fork-specific here (`simHelpers`,
+`spaceWeatherData`), so a Basilisk build from a different, older checkout on
+the same machine will fail with import errors like
+`ImportError: cannot import name 'simHelpers' from 'Basilisk.utilities'`. If
+that happens, check which package Python is actually resolving:
+
+```bash
+python3 -c "import Basilisk; print(Basilisk.__file__)"
+```
+
+If that path isn't under *this* checkout's `dist3/` (e.g. it points at a
+different clone you built previously), build from this checkout instead
+(`python3 conanfile.py` from the repo root -- see `docs/source/Build.rst`)
+and make sure that build, not the older one, is what's on your `PYTHONPATH`
+or active virtualenv.
+
 `run_constellation_mission.build_simulation()` returns every Basilisk object
 (spacecraft, effectors, controllers, recorders, and the `viz` handle when
 Vizard is enabled) for interactive post-processing if the CLI script's
