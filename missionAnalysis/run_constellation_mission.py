@@ -17,17 +17,26 @@
 #
 
 r"""
-5-year, 3-satellite Earth-observation constellation mission-analysis
-simulation, built on Basilisk's orbital-dynamics stack only (no attitude/GNC
-loop -- see ``README.md`` for the full architecture rationale).
+Multi-year Earth-observation constellation mission-analysis simulation,
+built on Basilisk's orbital-dynamics stack only (no attitude/GNC loop --
+see ``README.md`` for the full architecture rationale).
 
 Constellation
 -------------
-* SSO-1, SSO-2: shared sun-synchronous frozen orbit at 570 km altitude,
-  i=97.6704 deg, e=0.0011, AOP=90 deg, RAAN tuned for ~10:30 LTDN, phased
-  180 deg apart in mean anomaly.
-* MIDINC-1: 53 deg inclination, same altitude, independent (placeholder)
-  RAAN.
+Built from ``mission_config.SATELLITES`` (see that module's docstring, or
+just run ``setup_wizard.py``):
+
+* An SSO plane of N satellites (N configurable, including 0) sharing one
+  sun-synchronous frozen orbit, evenly phased in mean anomaly, each with
+  independent altitude/SMA station-keeping and, for N > 1, in-plane
+  phasing ("constellation-keeping") against a chief satellite.
+* Any number of additional standalone satellites, each independent (no
+  phasing partner), with their own inclination/RAAN/altitude/eccentricity.
+
+The default configuration (no ``constellation_setup.json`` present) is 2
+SSO satellites at 570 km altitude, i=97.6704 deg, e=0.0011, AOP=90 deg,
+RAAN tuned for ~10:30 LTDN, 180 deg apart, plus 1 standalone 53 deg
+-inclination satellite at the same altitude.
 
 Perturbations modeled: Earth spherical-harmonics gravity (degree/order per
 ``mission_config.EARTH_GRAV_DEGREE``), Sun/Moon third-body point-mass
@@ -39,8 +48,8 @@ Relativistic (Schwarzschild) correction is implemented but OFF by default;
 see ``README.md``.
 
 Automated maintenance: independent altitude/SMA station-keeping per
-satellite and in-plane phasing ("constellation-keeping") between the two SSO
-satellites, both via :mod:`constellation_controllers`.
+satellite and in-plane phasing ("constellation-keeping") within any
+multi-satellite plane, both via :mod:`constellation_controllers`.
 
 Communications: per-satellite EO data generation, on-board storage, and
 ground-station downlink (see :mod:`communications`), driving Vizard's
@@ -283,21 +292,34 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         comms[name]["instrumentGate"].eclipseInMsg.subscribeTo(eclipseObject.eclipseOutMsgs[sat["index"]])
 
     # ------------------------------------------------------------------
-    # Controllers (coarse control task)
+    # Controllers (coarse control task). Each satellite gets its own
+    # altitude/SMA station-keeping controller, sized from ITS OWN orbit
+    # (different planes/satellites may have different altitudes -- see
+    # mission_config.SATELLITES). Satellites sharing a "plane" (built by
+    # mission_config._build_satellites(): the SSO plane's N evenly-phased
+    # satellites, or a lone standalone satellite in a singleton plane of
+    # its own) additionally get one PhasingKeepingController per follower,
+    # referenced to the first satellite in that plane (the chief, left
+    # unmaneuvered for phasing) at that follower's assigned mean-anomaly
+    # offset. A plane with only one member gets no phasing controller.
     # ------------------------------------------------------------------
+    def _orbit_period_s(a_m):
+        return 2.0 * np.pi * np.sqrt(a_m**3 / mu)
+
     altControllers = {}
     for name, sat in satellites.items():
+        satDef = sat["definition"]
         ctrl = AltitudeKeepingController(
             name=f"{name}AltCtrl",
             mu=mu,
-            nominal_alt_m=mc.ALT_NOMINAL_M,
+            nominal_alt_m=satDef["a_m"] - earth.radEquator,
             deadband_m=mc.ALT_DEADBAND_M,
             r_planet_m=earth.radEquator,
             thrust_n=mc.THRUST_N,
             isp_s=mc.ISP_S,
             dry_mass_kg=mc.DRY_MASS_KG,
             propellant_kg=mc.PROPELLANT_MASS_BOL_KG,
-            orbit_period_s=mc.ORBIT_PERIOD_S,
+            orbit_period_s=_orbit_period_s(satDef["a_m"]),
             eclipse_sunlit_threshold=mc.ECLIPSE_SUNLIT_THRESHOLD,
         )
         ctrl.scStateInMsg.subscribeTo(sat["scObject"].scStateOutMsg)
@@ -307,32 +329,49 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         scSim.AddModelToTask(ctrlTaskName, ctrl)
         altControllers[name] = ctrl
 
-    satA, satB = satellites["SSO-1"], satellites["SSO-2"]
-    phaseCtrl = PhasingKeepingController(
-        name="SSOPhaseCtrl",
-        mu=mu,
-        nominal_a_m=mc.A_NOMINAL_M,
-        tolerance_deg=mc.PHASING_TOLERANCE_DEG,
-        restore_tolerance_deg=mc.PHASING_RESTORE_TOLERANCE_DEG,
-        correction_window_days=mc.PHASING_CORRECTION_WINDOW_DAYS,
-        max_drift_days=mc.PHASING_MAX_DRIFT_DAYS,
-        max_delta_a_m=mc.PHASING_MAX_DELTA_A_M,
-        thrust_n=mc.THRUST_N,
-        isp_s=mc.ISP_S,
-        dry_mass_kg=mc.DRY_MASS_KG,
-        propellant_kg=mc.PROPELLANT_MASS_BOL_KG,
-        orbit_period_s=mc.ORBIT_PERIOD_S,
-        eclipse_sunlit_threshold=mc.ECLIPSE_SUNLIT_THRESHOLD,
-    )
-    phaseCtrl.scStateInMsgA.subscribeTo(satA["scObject"].scStateOutMsg)
-    phaseCtrl.scStateInMsgB.subscribeTo(satB["scObject"].scStateOutMsg)
-    phaseCtrl.eclipseInMsgB.subscribeTo(eclipseObject.eclipseOutMsgs[satB["index"]])
-    phaseCtrl.extForceEffectorB = satB["thrustEffector"]
-    phaseCtrl.scObjectB = satB["scObject"]
-    # Thruster-arbitration link: phasing pauses while SSO-2's own altitude
-    # controller is actively reboosting (see constellation_controllers.py).
-    phaseCtrl.altitudeControllerB = altControllers["SSO-2"]
-    scSim.AddModelToTask(ctrlTaskName, phaseCtrl)
+    planeMembers = {}
+    for name, sat in satellites.items():
+        planeMembers.setdefault(sat["definition"]["plane"], []).append(name)
+
+    phaseControllers = {}
+    for planeName, members in planeMembers.items():
+        if len(members) < 2:
+            continue
+        chiefName = members[0]
+        chief = satellites[chiefName]
+        chiefMeanAnomDeg = chief["definition"]["mean_anom_deg"]
+        chiefA_m = chief["definition"]["a_m"]
+        for followerName in members[1:]:
+            follower = satellites[followerName]
+            targetSeparationDeg = (follower["definition"]["mean_anom_deg"] - chiefMeanAnomDeg) % 360.0
+            phaseCtrl = PhasingKeepingController(
+                name=f"{followerName}PhaseCtrl",
+                mu=mu,
+                nominal_a_m=chiefA_m,
+                target_separation_deg=targetSeparationDeg,
+                tolerance_deg=mc.PHASING_TOLERANCE_DEG,
+                restore_tolerance_deg=mc.PHASING_RESTORE_TOLERANCE_DEG,
+                correction_window_days=mc.PHASING_CORRECTION_WINDOW_DAYS,
+                max_drift_days=mc.PHASING_MAX_DRIFT_DAYS,
+                max_delta_a_m=mc.PHASING_MAX_DELTA_A_M,
+                thrust_n=mc.THRUST_N,
+                isp_s=mc.ISP_S,
+                dry_mass_kg=mc.DRY_MASS_KG,
+                propellant_kg=mc.PROPELLANT_MASS_BOL_KG,
+                orbit_period_s=_orbit_period_s(chiefA_m),
+                eclipse_sunlit_threshold=mc.ECLIPSE_SUNLIT_THRESHOLD,
+            )
+            phaseCtrl.scStateInMsgA.subscribeTo(chief["scObject"].scStateOutMsg)
+            phaseCtrl.scStateInMsgB.subscribeTo(follower["scObject"].scStateOutMsg)
+            phaseCtrl.eclipseInMsgB.subscribeTo(eclipseObject.eclipseOutMsgs[follower["index"]])
+            phaseCtrl.extForceEffectorB = follower["thrustEffector"]
+            phaseCtrl.scObjectB = follower["scObject"]
+            # Thruster-arbitration link: phasing pauses while the
+            # follower's own altitude controller is actively reboosting
+            # (see constellation_controllers.py).
+            phaseCtrl.altitudeControllerB = altControllers[followerName]
+            scSim.AddModelToTask(ctrlTaskName, phaseCtrl)
+            phaseControllers[followerName] = phaseCtrl
 
     # ------------------------------------------------------------------
     # Coarse state recorders for trajectory-level plots/exports (separate
@@ -466,7 +505,7 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         gravFactory=gravFactory,
         satellites=satellites,
         altControllers=altControllers,
-        phaseCtrl=phaseCtrl,
+        phaseControllers=phaseControllers,
         groundStations=groundStations,
         comms=comms,
         stateRecorders=stateRecorders,
@@ -557,9 +596,9 @@ def run(mission_years=mc.MISSION_DURATION_YEARS, make_plots=True, enable_vizard=
         print(f"  {name}: ~{dutyCyclePct:.1f}% reboost duty cycle, cumulative station-keeping dV "
               f"~{finalDv:.2f} m/s, propellant remaining ~{finalProp:.3f} kg")
 
-    phaseCtrl = sim["phaseCtrl"]
-    finalDvPhase = phaseCtrl.deltaVLog[-1] if phaseCtrl.deltaVLog else 0.0
-    print(f"  Phasing (SSO-2): cumulative phasing dV ~{finalDvPhase:.2f} m/s")
+    for name, phaseCtrl in sim["phaseControllers"].items():
+        finalDvPhase = phaseCtrl.deltaVLog[-1] if phaseCtrl.deltaVLog else 0.0
+        print(f"  Phasing ({name}): cumulative phasing dV ~{finalDvPhase:.2f} m/s")
 
     for name, recorder in sim["storageRecorders"].items():
         if len(recorder.storageLevel) == 0:
@@ -579,24 +618,33 @@ def _make_plots(sim):
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(3, 1, figsize=(9, 9.5), sharex=True)
+    plottedNominalAlts = set()
     for name, ctrl in sim["altControllers"].items():
         if not ctrl.tLog:
             continue
         tDays = np.array(ctrl.tLog) / 86400.0
-        axes[0].plot(tDays, np.array(ctrl.smoothAltLog) / 1000.0, label=name)
-    axes[0].axhline(mc.ALT_NOMINAL_M / 1000.0, color="k", linestyle="--", linewidth=0.8, label="nominal")
-    axes[0].axhline((mc.ALT_NOMINAL_M - mc.ALT_DEADBAND_M) / 1000.0, color="r", linestyle=":", linewidth=0.8,
-                     label="deadband")
-    axes[0].set_ylabel("smoothed altitude [km]")
+        line, = axes[0].plot(tDays, np.array(ctrl.smoothAltLog) / 1000.0, label=name)
+        # Each satellite may have its own nominal altitude/deadband (see
+        # build_simulation()); draw a reference line per unique value
+        # rather than assuming one shared altitude for the whole plot.
+        key = round(ctrl.nominalAlt, 3)
+        if key not in plottedNominalAlts:
+            plottedNominalAlts.add(key)
+            axes[0].axhline(ctrl.nominalAlt / 1000.0, color=line.get_color(), linestyle="--", linewidth=0.8)
+            axes[0].axhline((ctrl.nominalAlt - ctrl.deadband) / 1000.0, color=line.get_color(), linestyle=":",
+                             linewidth=0.8)
+    axes[0].set_ylabel("smoothed altitude [km]\n(dashed: nominal, dotted: deadband)")
     axes[0].legend(fontsize=8)
 
-    phaseCtrl = sim["phaseCtrl"]
-    if phaseCtrl.tLog:
-        tDays = np.array(phaseCtrl.tLog) / 86400.0
-        axes[1].plot(tDays, phaseCtrl.errorDegLog)
+    for name, phaseCtrl in sim["phaseControllers"].items():
+        if phaseCtrl.tLog:
+            tDays = np.array(phaseCtrl.tLog) / 86400.0
+            axes[1].plot(tDays, phaseCtrl.errorDegLog, label=name)
     axes[1].axhline(mc.PHASING_TOLERANCE_DEG, color="r", linestyle=":", linewidth=0.8)
     axes[1].axhline(-mc.PHASING_TOLERANCE_DEG, color="r", linestyle=":", linewidth=0.8)
-    axes[1].set_ylabel("SSO mean-anomaly\nphasing error [deg]")
+    axes[1].set_ylabel("mean-anomaly\nphasing error [deg]")
+    if sim["phaseControllers"]:
+        axes[1].legend(fontsize=8)
 
     # Hourly-sampled storage level (see build_simulation()'s comment on the
     # logTask rate): this shows the mission-long trend, not individual

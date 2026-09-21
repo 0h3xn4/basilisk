@@ -24,8 +24,8 @@ maintenance behaviors requested for this mission:
    -keeping per spacecraft (reboost via a finite low-thrust burn whenever
    altitude decays past a deadband).
 #. :class:`PhasingKeepingController` -- in-plane phasing / constellation
-   -keeping between the two SSO spacecraft (a drift-orbit maneuver: temporary
-   SMA offset, drift, restore).
+   -keeping between two co-planar spacecraft at an arbitrary target
+   separation (a drift-orbit maneuver: temporary SMA offset, drift, restore).
 
 Both act on an :ref:`extForceTorque` dynamic effector by writing its
 ``extForce_N`` (inertial-frame force) directly, rather than by commanding a
@@ -201,15 +201,21 @@ class AltitudeKeepingController(sysModel.SysModel):
 
 
 class PhasingKeepingController(sysModel.SysModel):
-    """In-plane phasing / constellation-keeping between the two SSO satellites.
+    """In-plane phasing / constellation-keeping between two co-planar satellites.
 
-    Holds the 180 deg mean-anomaly separation between a reference satellite A
-    and a maneuvering satellite B to within ``tolerance_deg`` using a
-    "drift-orbit" maneuver: a small, temporary tangential burn changes B's
-    semimajor axis (and hence mean motion) just enough that, over
-    ``correction_window_days`` of natural drift, the accumulated
-    mean-anomaly difference removes the phase error; a second burn then
-    restores B's nominal SMA.
+    Holds the mean-anomaly separation between a reference satellite A and a
+    maneuvering satellite B at ``target_separation_deg`` (to within
+    ``tolerance_deg``) using a "drift-orbit" maneuver: a small, temporary
+    tangential burn changes B's semimajor axis (and hence mean motion) just
+    enough that, over ``correction_window_days`` of natural drift, the
+    accumulated mean-anomaly difference removes the phase error; a second
+    burn then restores B's nominal SMA.
+
+    For an N-satellite plane evenly spaced in mean anomaly, instantiate one
+    of these per follower (satellites 2..N), all referencing the same chief
+    (satellite 1) with ``target_separation_deg = k * 360/N`` for the k-th
+    follower -- see ``run_constellation_mission.py``, which builds one
+    controller per (chief, follower) pair for every multi-satellite plane.
 
     This mirrors, at mission-design fidelity, the classic drift-orbit
     technique that a differential corrector (e.g. GMAT's Target/Vary/Achieve)
@@ -243,6 +249,7 @@ class PhasingKeepingController(sysModel.SysModel):
         name: str,
         mu: float,
         nominal_a_m: float,
+        target_separation_deg: float,
         tolerance_deg: float,
         restore_tolerance_deg: float,
         correction_window_days: float,
@@ -272,6 +279,7 @@ class PhasingKeepingController(sysModel.SysModel):
 
         self.mu = mu  # [m^3/s^2]
         self.aNom = nominal_a_m  # [m]
+        self.targetSeparationRad = np.radians(target_separation_deg)  # [rad]
         self.tolRad = np.radians(tolerance_deg)  # [rad]
         self.restoreTolRad = np.radians(restore_tolerance_deg)  # [rad]
         self.correctionWindowS = correction_window_days * 86400.0  # [s]
@@ -282,21 +290,22 @@ class PhasingKeepingController(sysModel.SysModel):
         self.g0 = g0_mps2  # [m/s^2]
         self.dryMass = dry_mass_kg  # [kg]
         # Fallback propellant tracker, used only if altitudeControllerB is
-        # never set. Normally this controller shares SSO-2's ONE physical
-        # tank with its AltitudeKeepingController (see _mass_and_deplete())
-        # rather than keeping an independent belief about how much
-        # propellant is left -- two controllers commanding the same
-        # extForceTorque effector must not track two different masses for
-        # the same tank.
+        # never set. Normally this controller shares satellite B's ONE
+        # physical tank with its AltitudeKeepingController (see
+        # _propellant_tracker()) rather than keeping an independent belief
+        # about how much propellant is left -- two controllers commanding
+        # the same extForceTorque effector must not track two different
+        # masses for the same tank.
         self.propellant = propellant_kg  # [kg]
         self.sunlitThreshold = eclipse_sunlit_threshold  # [-]
         self.logDecimation = max(1, int(log_decimation))
         self._tickCount = 0
 
         # Phase error is computed from OSCULATING mean anomaly, which carries
-        # J2 short-period oscillation (satellites 180 deg apart sample very
-        # different points of that oscillation at any instant even when
-        # their MEAN elements match exactly). Smoothing over one orbital
+        # J2 short-period oscillation (co-planar satellites separated in
+        # mean anomaly sample very different points of that oscillation at
+        # any instant even when their MEAN elements match exactly). Smoothing
+        # over one orbital
         # period rejects that noise so the controller reacts to real secular
         # drift only -- the same reasoning as AltitudeKeepingController's
         # altitude smoothing, applied to the error signal here.
@@ -352,13 +361,13 @@ class PhasingKeepingController(sysModel.SysModel):
         _, mA = self._mean_anomaly(self.mu, rA, vA)
         _, mB = self._mean_anomaly(self.mu, rB, vB)
 
-        # error > 0 means B's phase leads the nominal 180 deg separation
-        # (B is "too far ahead" of A); error < 0 means B trails. Smoothed
-        # over one orbital period to reject J2 short-period osculating
-        # -element noise (see the smoothingWindowS comment in __init__) --
-        # using the raw, un-smoothed value here would make the controller
-        # chase that noise once per orbit instead of real secular drift.
-        rawError = _wrap_pm_pi((mB - mA) - np.pi)  # [rad]
+        # error > 0 means B's phase leads the target separation (B is "too
+        # far ahead" of A); error < 0 means B trails. Smoothed over one
+        # orbital period to reject J2 short-period osculating-element noise
+        # (see the smoothingWindowS comment in __init__) -- using the raw,
+        # un-smoothed value here would make the controller chase that noise
+        # once per orbit instead of real secular drift.
+        rawError = _wrap_pm_pi((mB - mA) - self.targetSeparationRad)  # [rad]
         self._errorHistory.append((t, rawError))
         while self._errorHistory and (t - self._errorHistory[0][0]) > self.smoothingWindowS:
             self._errorHistory.pop(0)

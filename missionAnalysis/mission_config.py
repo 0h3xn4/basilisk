@@ -17,9 +17,9 @@
 #
 
 """
-Mission and constellation design parameters for a 3-satellite Earth-observation
-constellation, mirroring the companion GMAT mission script so the two tools are
-directly comparable.
+Mission and constellation design parameters for an Earth-observation
+constellation, mirroring the companion GMAT mission script so the two tools
+are directly comparable.
 
 This module is intentionally dependency-light (``numpy`` + the standard library
 only) so the orbit-design math -- in particular the sun-synchronous RAAN-for-LTDN
@@ -27,11 +27,28 @@ solve -- can be inspected and unit tested without a built Basilisk installation.
 All Basilisk-specific simulation setup (gravity bodies, dynamic effectors,
 controllers) lives in ``run_constellation_mission.py``.
 
+Two ways to change what's in this file:
+
+* ``configure_mission.py`` edits a single scalar constant at a time (bus
+  mass, Cd/Cr/areas, propulsion, epoch, mission duration, altitude
+  deadband, phasing tolerance, gravity degree) directly in this file's
+  source, in place.
+* ``setup_wizard.py`` is an interactive front end for everything, including
+  the *structural* things a single scalar can't express -- how many
+  satellites are in the constellation, each one's own orbit, and how many
+  ground stations there are, at what locations. It writes those to
+  ``constellation_setup.json`` next to this file, which -- if present --
+  *replaces* the ``SSO_PLANE`` / ``CUSTOM_SATELLITES`` / ``GROUND_STATIONS``
+  built from the scalar defaults below (see ``_load_constellation_setup()``).
+  Run ``python3 setup_wizard.py`` rather than hand-writing that JSON file.
+
 See ``README.md`` in this folder for the architecture write-up and a full list
 of assumptions/placeholders.
 """
 
+import json
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -81,10 +98,18 @@ G0_MPS2 = 9.80665  # [m/s^2] standard gravity, for the rocket equation
 
 # ---------------------------------------------------------------------------
 # Constellation orbit design
+#
+# These are the DEFAULTS used to build SSO_PLANE/CUSTOM_SATELLITES below when
+# constellation_setup.json (see module docstring) is not present. Once that
+# file exists it is the actual source of truth for the constellation's
+# satellite count and every satellite's orbit -- these scalars stop being
+# read for that purpose (configure_mission.py can still edit them, but the
+# edits are then inert until/unless constellation_setup.json is removed).
 # ---------------------------------------------------------------------------
 ALT_NOMINAL_M = 570.0e3  # [m]
 A_NOMINAL_M = R_EARTH_EQ + ALT_NOMINAL_M  # [m] nominal semimajor axis
 
+SSO_SATELLITE_COUNT = 2  # [-] satellites in the shared SSO plane, evenly phased
 SSO_INCLINATION_DEG = 97.6704  # [deg]
 SSO_ECC = 0.0011  # [-]
 SSO_AOP_DEG = 90.0  # [deg] frozen-orbit condition (nulls the J3 secular e-vector drift)
@@ -128,9 +153,12 @@ EARTH_GRAV_DEGREE = 10
 # real-world reference points chosen for plausibility (a high-latitude site
 # sees an SSO pass almost every orbit; Boulder matches the placeholder site
 # already used elsewhere in Basilisk's own examples) -- not a claim about
-# the actual ground network for this mission.
+# the actual ground network for this mission. This default list is only used
+# when constellation_setup.json (see module docstring) is absent -- that
+# file's "ground_stations" list otherwise replaces it entirely, at whatever
+# count and locations you gave setup_wizard.py.
 # ---------------------------------------------------------------------------
-GROUND_STATIONS = [
+_DEFAULT_GROUND_STATIONS = [
     dict(name="Svalbard", lat_deg=78.2300, lon_deg=15.3894, alt_m=0.0, min_elevation_deg=5.0),
     dict(name="Boulder", lat_deg=40.009971, lon_deg=-105.243895, alt_m=1624.0, min_elevation_deg=10.0),
 ]
@@ -202,41 +230,118 @@ def raan_for_ltdn_deg(epoch_utc: datetime, ltdn_hours: float) -> float:
     return float(raan_deg % 360.0)
 
 
-SSO_RAAN_DEG = raan_for_ltdn_deg(EPOCH_UTC, SSO_LTDN_HOURS)  # [deg]
+SSO_RAAN_DEG = raan_for_ltdn_deg(EPOCH_UTC, SSO_LTDN_HOURS)  # [deg] (default SSO_PLANE only; see below)
 
 
 # ---------------------------------------------------------------------------
-# Satellite definitions consumed by run_constellation_mission.py
+# Constellation structure: SSO_PLANE (a group of satellites evenly phased in
+# mean anomaly, sharing one orbit plane/shape) + CUSTOM_SATELLITES (each
+# independent, no phasing partner) + GROUND_STATIONS. Built from the scalar
+# defaults above, unless constellation_setup.json (see module docstring)
+# exists, in which case ITS "sso_plane" / "custom_satellites" /
+# "ground_stations" entries are used instead (falling back to the default
+# for any key the file omits). Run setup_wizard.py to create/edit that file
+# interactively rather than hand-writing it.
 # ---------------------------------------------------------------------------
-SATELLITES = [
-    dict(
-        name="SSO-1",
-        role="sso",
-        a_m=A_NOMINAL_M,
-        e=SSO_ECC,
-        i_deg=SSO_INCLINATION_DEG,
-        raan_deg=SSO_RAAN_DEG,
+CONSTELLATION_SETUP_PATH = Path(__file__).resolve().parent / "constellation_setup.json"
+
+
+def _default_sso_plane() -> dict:
+    return dict(
+        count=SSO_SATELLITE_COUNT,
+        altitude_km=ALT_NOMINAL_M / 1000.0,
+        inclination_deg=SSO_INCLINATION_DEG,
+        ecc=SSO_ECC,
         aop_deg=SSO_AOP_DEG,
-        mean_anom_deg=0.0,  # [deg] phasing reference
-    ),
-    dict(
-        name="SSO-2",
-        role="sso",
-        a_m=A_NOMINAL_M,
-        e=SSO_ECC,
-        i_deg=SSO_INCLINATION_DEG,
-        raan_deg=SSO_RAAN_DEG,
-        aop_deg=SSO_AOP_DEG,
-        mean_anom_deg=180.0,  # [deg] 180 deg phased from SSO-1
-    ),
-    dict(
-        name="MIDINC-1",
-        role="midinc",
-        a_m=A_NOMINAL_M,
-        e=MIDINC_ECC,
-        i_deg=MIDINC_INCLINATION_DEG,
-        raan_deg=MIDINC_RAAN_DEG,
-        aop_deg=MIDINC_AOP_DEG,
-        mean_anom_deg=MIDINC_MEAN_ANOM_DEG,
-    ),
-]
+        ltdn_hours=SSO_LTDN_HOURS,
+    )
+
+
+def _default_custom_satellites() -> list:
+    return [
+        dict(
+            name="MIDINC-1",
+            altitude_km=ALT_NOMINAL_M / 1000.0,
+            inclination_deg=MIDINC_INCLINATION_DEG,
+            ecc=MIDINC_ECC,
+            aop_deg=MIDINC_AOP_DEG,
+            raan_deg=MIDINC_RAAN_DEG,
+            mean_anom_deg=MIDINC_MEAN_ANOM_DEG,
+        )
+    ]
+
+
+def _load_constellation_setup() -> tuple:
+    """(sso_plane, custom_satellites, ground_stations), from
+    constellation_setup.json when present (falling back to the hardcoded
+    default for any of the three keys it doesn't include), otherwise from
+    the hardcoded defaults alone.
+    """
+    sso_plane = _default_sso_plane()
+    custom_satellites = _default_custom_satellites()
+    ground_stations = list(_DEFAULT_GROUND_STATIONS)
+    if CONSTELLATION_SETUP_PATH.exists():
+        with open(CONSTELLATION_SETUP_PATH) as f:
+            setup = json.load(f)
+        sso_plane = setup.get("sso_plane", sso_plane)
+        custom_satellites = setup.get("custom_satellites", custom_satellites)
+        ground_stations = setup.get("ground_stations", ground_stations)
+    return sso_plane, custom_satellites, ground_stations
+
+
+SSO_PLANE, CUSTOM_SATELLITES, GROUND_STATIONS = _load_constellation_setup()
+
+
+def _build_satellites(sso_plane: dict, custom_satellites: list) -> list:
+    """Expand SSO_PLANE into `count` satellites evenly spaced in mean
+    anomaly (all sharing one RAAN/inclination/altitude/eccentricity, i.e.
+    one physical orbit plane) plus each independent CUSTOM_SATELLITES
+    entry. Every satellite dict carries a "plane" key: satellites sharing
+    a "plane" value are phased against each other by
+    run_constellation_mission.py (one PhasingKeepingController per
+    follower, referenced to the first satellite added to that plane as
+    chief); a plane with only one member gets no phasing controller.
+    """
+    satellites = []
+
+    count = max(0, int(sso_plane.get("count", 0)))
+    if count > 0:
+        sso_a_m = R_EARTH_EQ + sso_plane["altitude_km"] * 1000.0
+        sso_raan_deg = raan_for_ltdn_deg(EPOCH_UTC, sso_plane["ltdn_hours"])
+        for k in range(count):
+            satellites.append(
+                dict(
+                    name=f"SSO-{k + 1}",
+                    plane="SSO",
+                    a_m=sso_a_m,
+                    e=sso_plane["ecc"],
+                    i_deg=sso_plane["inclination_deg"],
+                    raan_deg=sso_raan_deg,
+                    aop_deg=sso_plane["aop_deg"],
+                    mean_anom_deg=k * 360.0 / count,  # [deg] evenly spaced
+                )
+            )
+
+    for sat in custom_satellites:
+        satellites.append(
+            dict(
+                name=sat["name"],
+                plane=sat["name"],  # standalone -- no phasing partner
+                a_m=R_EARTH_EQ + sat["altitude_km"] * 1000.0,
+                e=sat["ecc"],
+                i_deg=sat["inclination_deg"],
+                raan_deg=sat["raan_deg"],
+                aop_deg=sat["aop_deg"],
+                mean_anom_deg=sat["mean_anom_deg"],
+            )
+        )
+
+    if not satellites:
+        raise ValueError(
+            "Constellation has zero satellites (SSO_PLANE count is 0 and CUSTOM_SATELLITES "
+            "is empty) -- add at least one in constellation_setup.json or via setup_wizard.py."
+        )
+    return satellites
+
+
+SATELLITES = _build_satellites(SSO_PLANE, CUSTOM_SATELLITES)
