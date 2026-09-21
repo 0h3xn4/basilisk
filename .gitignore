@@ -79,3 +79,9 @@ build/
 /src/**/target/
 /src/**/Cargo.lock
 !/src/Cargo.lock
+
+# missionAnalysis/setup_wizard.py output: a user's local constellation
+# choice, not a repo default (mission_config.py's hardcoded fallback is)
+missionAnalysis/constellation_setup.json
+missionAnalysis/mission_summary.png
+missionAnalysis/_VizFiles/

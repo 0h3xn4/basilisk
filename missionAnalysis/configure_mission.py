@@ -20,6 +20,14 @@ r"""
 Command-line front end for editing this mission's spacecraft/orbit
 parameters, without hand-editing ``mission_config.py``.
 
+This tool only edits single scalar values (bus, propulsion, epoch,
+duration, altitude deadband, phasing tolerance, gravity degree) -- it does
+NOT change how many satellites or ground stations there are, or give
+individual satellites their own orbits. For that, use ``setup_wizard.py``
+instead, which is interactive and covers everything this script does plus
+the constellation's structure (satellite count, per-satellite orbits,
+ground station locations), written to ``constellation_setup.json``.
+
 Why editing ``mission_config.py`` *is* "updating all the relevant scripts"
 ----------------------------------------------------------------------------
 ``mission_config.py`` is the single source of truth for every spacecraft and
@@ -85,7 +93,15 @@ CONFIG_PATH = SCRIPT_DIR / "mission_config.py"
 # Surgical text editing of mission_config.py
 # ---------------------------------------------------------------------------
 def _constant_pattern(name: str) -> re.Pattern:
-    return re.compile(rf"^({re.escape(name)}\s*=\s*)([^#\n]+?)(\s*#.*)?$", re.MULTILINE)
+    # Every \s* here is deliberately [ \t]* instead: \s matches newlines too,
+    # so on a constant with NO trailing comment of its own, followed by a
+    # blank line and then a comment (a common section-boundary pattern in
+    # mission_config.py), a \s* before "#" would silently cross the blank
+    # line and glom the NEXT section's comment onto this constant -- not
+    # just a display bug, but real file corruption on write (confirmed:
+    # EARTH_GRAV_DEGREE, with no comment of its own, ate the "communications"
+    # section-header comment two lines below it).
+    return re.compile(rf"^({re.escape(name)}[ \t]*=[ \t]*)([^#\n]+?)([ \t]*#.*)?$", re.MULTILINE)
 
 
 def _current_value(text: str, name: str) -> str:
@@ -172,7 +188,8 @@ FIELDS = [
     Field("--isp-s", "isp_s", "ISP_S", _num, _lit, "thruster specific impulse [s]"),
     # --- Constellation orbit ----------------------------------------------
     Field("--altitude-km", "altitude_km", "ALT_NOMINAL_M", _num, lambda x: _lit(x * 1.0e3),
-          "nominal altitude for all three satellites [km]"),
+          "default altitude used to build the SSO plane and standalone satellite [km] "
+          "(only when constellation_setup.json is absent -- see setup_wizard.py for per-satellite altitudes)"),
     Field("--sso-inclination-deg", "sso_inclination_deg", "SSO_INCLINATION_DEG", _num, _lit,
           "SSO plane inclination [deg]"),
     Field("--sso-ecc", "sso_ecc", "SSO_ECC", _num, _lit, "SSO plane eccentricity [-]"),
