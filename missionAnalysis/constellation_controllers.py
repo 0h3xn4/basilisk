@@ -252,6 +252,7 @@ class PhasingKeepingController(sysModel.SysModel):
         isp_s: float,
         dry_mass_kg: float,
         propellant_kg: float,
+        orbit_period_s: float,
         eclipse_sunlit_threshold: float = 0.99,
         g0_mps2: float = 9.80665,
         log_decimation: int = 12,
@@ -280,10 +281,27 @@ class PhasingKeepingController(sysModel.SysModel):
         self.ispS = isp_s  # [s]
         self.g0 = g0_mps2  # [m/s^2]
         self.dryMass = dry_mass_kg  # [kg]
+        # Fallback propellant tracker, used only if altitudeControllerB is
+        # never set. Normally this controller shares SSO-2's ONE physical
+        # tank with its AltitudeKeepingController (see _mass_and_deplete())
+        # rather than keeping an independent belief about how much
+        # propellant is left -- two controllers commanding the same
+        # extForceTorque effector must not track two different masses for
+        # the same tank.
         self.propellant = propellant_kg  # [kg]
         self.sunlitThreshold = eclipse_sunlit_threshold  # [-]
         self.logDecimation = max(1, int(log_decimation))
         self._tickCount = 0
+
+        # Phase error is computed from OSCULATING mean anomaly, which carries
+        # J2 short-period oscillation (satellites 180 deg apart sample very
+        # different points of that oscillation at any instant even when
+        # their MEAN elements match exactly). Smoothing over one orbital
+        # period rejects that noise so the controller reacts to real secular
+        # drift only -- the same reasoning as AltitudeKeepingController's
+        # altitude smoothing, applied to the error signal here.
+        self.smoothingWindowS = orbit_period_s  # [s]
+        self._errorHistory = []  # list of (t [s], rawError [rad])
 
         self.state = self.IDLE
         self._lastT = None  # [s]
@@ -313,6 +331,14 @@ class PhasingKeepingController(sysModel.SysModel):
         meanAnom = orbitalMotion.E2M(eccAnom, oe.e)
         return oe.a, meanAnom
 
+    @staticmethod
+    def _circular_mean(angles_rad):
+        # Mean of a circular (wrapped) quantity via the resultant vector,
+        # correct near the +/-pi wrap boundary -- a plain arithmetic mean
+        # is not (e.g. averaging +179 deg and -179 deg should give +/-180
+        # deg, not 0).
+        return float(np.arctan2(np.mean(np.sin(angles_rad)), np.mean(np.cos(angles_rad))))
+
     def UpdateState(self, CurrentSimNanos):
         t = CurrentSimNanos * macros.NANO2SEC  # [s]
         dt = t - self._lastT if self._lastT is not None else 0.0  # [s]
@@ -327,8 +353,16 @@ class PhasingKeepingController(sysModel.SysModel):
         _, mB = self._mean_anomaly(self.mu, rB, vB)
 
         # error > 0 means B's phase leads the nominal 180 deg separation
-        # (B is "too far ahead" of A); error < 0 means B trails.
-        error = _wrap_pm_pi((mB - mA) - np.pi)  # [rad]
+        # (B is "too far ahead" of A); error < 0 means B trails. Smoothed
+        # over one orbital period to reject J2 short-period osculating
+        # -element noise (see the smoothingWindowS comment in __init__) --
+        # using the raw, un-smoothed value here would make the controller
+        # chase that noise once per orbit instead of real secular drift.
+        rawError = _wrap_pm_pi((mB - mA) - np.pi)  # [rad]
+        self._errorHistory.append((t, rawError))
+        while self._errorHistory and (t - self._errorHistory[0][0]) > self.smoothingWindowS:
+            self._errorHistory.pop(0)
+        error = self._circular_mean(np.array([e for _, e in self._errorHistory]))  # [rad]
 
         inSun = True
         if self.eclipseInMsgB.isLinked():
@@ -346,7 +380,7 @@ class PhasingKeepingController(sysModel.SysModel):
                 self.tLog.append(t)
                 self.errorDegLog.append(np.degrees(error))
                 self.stateLog.append(self.state)
-                self.propellantLog.append(self.propellant)
+                self.propellantLog.append(self._propellant_tracker().propellant)
                 self.deltaVLog.append(self._cumulativeDv)
             return
 
@@ -389,17 +423,18 @@ class PhasingKeepingController(sysModel.SysModel):
                 self.state = self.IDLE
                 thrustMag = 0.0
 
-        currentMass = self.dryMass + self.propellant  # [kg]
+        tracker = self._propellant_tracker()
+        currentMass = self.dryMass + tracker.propellant  # [kg]
 
         if thrustMag > 0.0:
             accel = thrustMag / currentMass  # [m/s^2]
             self._accumDv += accel * dt
             self._cumulativeDv += accel * dt
             mDot = thrustMag / (self.ispS * self.g0)  # [kg/s]
-            self.propellant = max(0.0, self.propellant - mDot * dt)
+            tracker.propellant = max(0.0, tracker.propellant - mDot * dt)
 
         if self.scObjectB is not None:
-            self.scObjectB.hub.mHub = self.dryMass + self.propellant
+            self.scObjectB.hub.mHub = self.dryMass + tracker.propellant
 
         forceVec = np.zeros(3)
         if thrustMag > 0.0:
@@ -414,5 +449,14 @@ class PhasingKeepingController(sysModel.SysModel):
             self.tLog.append(t)
             self.errorDegLog.append(np.degrees(error))
             self.stateLog.append(self.state)
-            self.propellantLog.append(self.propellant)
+            self.propellantLog.append(tracker.propellant)
             self.deltaVLog.append(self._cumulativeDv)
+
+    def _propellant_tracker(self):
+        # Satellite B's thruster (and hence its one physical propellant
+        # tank) is shared with its own AltitudeKeepingController (see the
+        # thruster-arbitration check above); track mass through that same
+        # object when it is available rather than keeping an independent
+        # second belief about how much propellant is left. Falls back to
+        # this controller's own tracker only if none was wired up.
+        return self.altitudeControllerB if self.altitudeControllerB is not None else self

@@ -321,6 +321,7 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         isp_s=mc.ISP_S,
         dry_mass_kg=mc.DRY_MASS_KG,
         propellant_kg=mc.PROPELLANT_MASS_BOL_KG,
+        orbit_period_s=mc.ORBIT_PERIOD_S,
         eclipse_sunlit_threshold=mc.ECLIPSE_SUNLIT_THRESHOLD,
     )
     phaseCtrl.scStateInMsgA.subscribeTo(satA["scObject"].scStateOutMsg)

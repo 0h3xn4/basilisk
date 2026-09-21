@@ -272,10 +272,26 @@ a few this implementation had to introduce:
   cap** (90 days) are reasonable-guess tuning parameters, not derived from a
   requirement; adjust in `mission_config.py` if the real ops concept has a
   target response time.
-- **This script has not been executed** -- see Architecture decision #3.
-  It has been checked line-by-line against the actual module source in this
-  checkout, but treat the first `--years 0.1` run as the real validation
-  step, not this document.
+- **First real `--years 0.1` run surfaced a phasing-controller bug, now
+  fixed**: the phasing error was computed from *osculating* mean anomaly,
+  which carries J2 short-period oscillation that two satellites 180 deg
+  apart sample very differently at any given instant even when their mean
+  elements match exactly. That noise was large enough to spuriously cross
+  the 1 deg trigger threshold roughly once per orbit, so the controller was
+  "correcting" phasing error that wasn't secularly real -- ~31.89 m/s of
+  phasing dV in 36.5 days for a pair that started exactly 180 deg apart on
+  identical orbits, versus a few cm/s expected. `PhasingKeepingController`
+  now smooths its error signal over one orbital period (circular mean, to
+  handle the +/-180 deg wrap correctly), the same fix already applied to
+  `AltitudeKeepingController`'s altitude signal for the same reason. Fixing
+  this also surfaced a second issue: SSO-2's altitude and phasing
+  controllers were each keeping an independent belief about how much
+  propellant was left in its one physical tank; they now share a single
+  tracker (see `PhasingKeepingController._propellant_tracker()`). Re-run
+  `--years 0.1` after pulling this fix and compare the phasing dV -- it
+  should now be orders of magnitude smaller. This script has otherwise only
+  been run this once; treat every number here as provisional until you've
+  run your own validation.
 - **Communications/data-handling values are all placeholders**: EO payload
   data rate (50 Mbps), downlink rate (150 Mbps), on-board storage capacity
   (~32 GB), and the two-station ground network (Svalbard + Boulder) are all
