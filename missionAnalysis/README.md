@@ -129,13 +129,39 @@ profile. It's included for GMAT-comparability if you want it, not because
 it matters at this fidelity level. Pass `enable_relativistic_correction=True`
 to `build_simulation()`.
 
+### 5. Communications / data downlink (Vizard comm rings)
+
+Added on top of the original design: each satellite gets an EO instrument
+(`simpleInstrument`, data generation gated on/off by the existing eclipse
+module -- an EO payload only images sunlit ground), an on-board storage
+unit (`partitionedStorageUnit`), and a downlink transmitter
+(`spaceToGroundTransmitter`) with access to a small placeholder ground
+network (`GroundLocation`), following the same wiring as Basilisk's own
+`scenarioGroundDownlink` example. This is standard onboard-data-handling
+infrastructure, independent of the orbital-dynamics-only vs. 6-DOF choice
+in decision #1 above -- it needs no attitude model.
+
+When `--vizard`/`--vizard-save` is enabled, each satellite's antenna is
+rendered as a `vizInterface.Transceiver` fed by *both* the instrument's and
+the transmitter's data-node messages. Basilisk's own convention (see
+`vizInterface.cpp`) is: a data node reporting a positive baud rate ("data
+provided") shows as receiving (purple rings), negative ("data consumed")
+shows as sending (green rings). The EO instrument is always positive when
+active and the transmitter is always negative, so this reproduces exactly
+the two-color behavior described in the feature request, plus a
+`GenericStorage` HUD panel per satellite tracking the storage level those
+two events raise and lower. See `communications.py`'s module docstring for
+the full mechanism.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `mission_config.py` | All mission constants, orbit design (incl. the RAAN-for-LTDN solve), satellite definitions. Pure `numpy`/stdlib, importable without Basilisk. |
+| `configure_mission.py` | CLI to edit spacecraft/orbit parameters in `mission_config.py` from the command line instead of hand-editing it -- see below. |
 | `generate_space_weather_placeholder.py` | Builds a synthetic multi-year F10.7/Ap table (CelesTrak CSV layout) covering the mission window -- see below for why this has to be synthetic. |
 | `constellation_controllers.py` | The two `SysModel` controllers (altitude keeping, phasing keeping). |
+| `communications.py` | Per-satellite EO data generation, on-board storage, ground downlink, and the eclipse-gated instrument duty cycle -- drives the Vizard comm-rings visualization. |
 | `run_constellation_mission.py` | Builds and runs the full Basilisk simulation; `python3 run_constellation_mission.py` is the entry point. |
 | `data/placeholder_space_weather.csv` | Generated output of the space-weather script (regenerate with `python3 generate_space_weather_placeholder.py`). |
 
@@ -151,6 +177,23 @@ python3 run_constellation_mission.py               # full 5-year run
 # Vizard visualization (requires a Vizard-enabled Basilisk build):
 python3 run_constellation_mission.py --years 0.05 --vizard-save mission_playback
 ```
+
+**"Built Basilisk package" means a build of *this checkout*.** This script
+uses a few modules that are new/fork-specific here (`simHelpers`,
+`spaceWeatherData`), so a Basilisk build from a different, older checkout on
+the same machine will fail with import errors like
+`ImportError: cannot import name 'simHelpers' from 'Basilisk.utilities'`. If
+that happens, check which package Python is actually resolving:
+
+```bash
+python3 -c "import Basilisk; print(Basilisk.__file__)"
+```
+
+If that path isn't under *this* checkout's `dist3/` (e.g. it points at a
+different clone you built previously), build from this checkout instead
+(`python3 conanfile.py` from the repo root -- see `docs/source/Build.rst`)
+and make sure that build, not the older one, is what's on your `PYTHONPATH`
+or active virtualenv.
 
 `run_constellation_mission.build_simulation()` returns every Basilisk object
 (spacecraft, effectors, controllers, recorders, and the `viz` handle when
@@ -183,6 +226,47 @@ it:
   Architecture decision #3), so there's no wall-clock-paced moment for a
   live viewer to watch frame by frame. The saved-file path is the intended
   way to inspect this mission in Vizard.
+
+### Changing spacecraft/orbit parameters
+
+`mission_config.py` is the single source of truth for every spacecraft and
+orbit parameter -- `run_constellation_mission.py`, `constellation_controllers.py`,
+and `communications.py` all read their constants from it, so editing it (by
+hand or with the tool below) is the only place you need to change a value.
+
+`configure_mission.py` edits the common ones from the command line instead
+of hand-editing the file, and regenerates the space-weather placeholder
+file afterward if you changed the epoch or mission duration (its date range
+depends on those):
+
+```bash
+# preview changes without writing anything
+python3 configure_mission.py --dry-run --altitude-km 600
+
+# bump SSO altitude and give it a bigger propellant budget
+python3 configure_mission.py --altitude-km 600 --propellant-kg 50
+
+# move the epoch and shorten the mission for a quick study
+python3 configure_mission.py --epoch 2030-01-01 --mission-years 2
+
+# retarget the mid-inclination plane once its coverage RAAN is chosen
+python3 configure_mission.py --midinc-raan-deg 42.5
+```
+
+Run with `--help` for the full list (bus mass/Cd/Cr/areas, propulsion
+thrust/Isp/propellant, SSO and mid-inclination orbit elements, epoch,
+mission duration, altitude deadband, phasing tolerance, gravity degree).
+It only rewrites the specific `NAME = <value>` line(s) you pass a flag for
+-- every comment, docstring, and the derived-value formulas
+(`A_NOMINAL_M`, `SSO_RAAN_DEG`, `ORBIT_PERIOD_S`, the `SATELLITES` list,
+...) are left as Python expressions in the file and recompute correctly
+the next time it's imported; you never set those directly. It prints the
+old value, the new value, and the field's current inline comment for each
+change so you can spot a comment that now reads as stale (e.g. one that
+names the old value in words) and fix it by hand -- comments are not
+rewritten, only the value is. Settings this tool doesn't cover (station
+-keeping deadband timing beyond altitude/phasing, task rates, comms/ground
+-station settings) can still be edited directly in `mission_config.py`.
 
 ## Assumptions and placeholders to replace
 
@@ -230,7 +314,35 @@ a few this implementation had to introduce:
   cap** (90 days) are reasonable-guess tuning parameters, not derived from a
   requirement; adjust in `mission_config.py` if the real ops concept has a
   target response time.
-- **This script has not been executed** -- see Architecture decision #3.
-  It has been checked line-by-line against the actual module source in this
-  checkout, but treat the first `--years 0.1` run as the real validation
-  step, not this document.
+- **First real `--years 0.1` run surfaced a phasing-controller bug, now
+  fixed**: the phasing error was computed from *osculating* mean anomaly,
+  which carries J2 short-period oscillation that two satellites 180 deg
+  apart sample very differently at any given instant even when their mean
+  elements match exactly. That noise was large enough to spuriously cross
+  the 1 deg trigger threshold roughly once per orbit, so the controller was
+  "correcting" phasing error that wasn't secularly real -- ~31.89 m/s of
+  phasing dV in 36.5 days for a pair that started exactly 180 deg apart on
+  identical orbits, versus a few cm/s expected. `PhasingKeepingController`
+  now smooths its error signal over one orbital period (circular mean, to
+  handle the +/-180 deg wrap correctly), the same fix already applied to
+  `AltitudeKeepingController`'s altitude signal for the same reason. Fixing
+  this also surfaced a second issue: SSO-2's altitude and phasing
+  controllers were each keeping an independent belief about how much
+  propellant was left in its one physical tank; they now share a single
+  tracker (see `PhasingKeepingController._propellant_tracker()`). Re-run
+  `--years 0.1` after pulling this fix and compare the phasing dV -- it
+  should now be orders of magnitude smaller. This script has otherwise only
+  been run this once; treat every number here as provisional until you've
+  run your own validation.
+- **Communications/data-handling values are all placeholders**: EO payload
+  data rate (50 Mbps), downlink rate (150 Mbps), on-board storage capacity
+  (~32 GB), and the two-station ground network (Svalbard + Boulder) are all
+  guesses for plausibility, not a real link budget or ground-segment plan.
+  (`mission_config.GROUND_STATIONS`, `EO_INSTRUMENT_BAUD_RATE_BPS`,
+  `DOWNLINK_BAUD_RATE_BPS`, `DATA_STORAGE_CAPACITY_BITS`)
+- **Instrument antenna placement/geometry for Vizard** (`transceiver.r_SB_B`,
+  `fieldOfView`, `normalVector` in `run_constellation_mission.py`) is a
+  placeholder -- there is no bus layout in this study, and since attitude
+  isn't modeled the antenna's orientation on screen isn't physically
+  meaningful anyway; only the ring color/timing (from the data-node baud
+  sign) is.

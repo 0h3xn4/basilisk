@@ -42,6 +42,13 @@ Automated maintenance: independent altitude/SMA station-keeping per
 satellite and in-plane phasing ("constellation-keeping") between the two SSO
 satellites, both via :mod:`constellation_controllers`.
 
+Communications: per-satellite EO data generation, on-board storage, and
+ground-station downlink (see :mod:`communications`), driving Vizard's
+antenna-ring visualization when ``--vizard``/``--vizard-save`` is used --
+purple rings while a satellite is collecting data, green rings while it is
+downlinking, with an on-screen storage-level panel rising and falling to
+match.
+
 Usage::
 
     python3 run_constellation_mission.py [--years 5] [--no-plots]
@@ -62,7 +69,9 @@ import numpy as np
 
 import mission_config as mc
 from constellation_controllers import AltitudeKeepingController, PhasingKeepingController
+import communications
 
+from Basilisk.architecture import messaging
 from Basilisk.simulation import (
     spacecraft,
     dragDynamicEffector,
@@ -73,6 +82,7 @@ from Basilisk.simulation import (
     eclipse,
     extForceTorque,
     svIntegrators,
+    vizInterface,
 )
 from Basilisk.utilities import (
     SimulationBaseClass,
@@ -112,9 +122,11 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
     recorders) for running and post-processing.
 
     Args:
-        enable_vizard: if True, wire up vizSupport.enableUnityVisualization()
-            (see the comment near its call site for the frame-rate/blocking
-            -call caveats specific to a multi-year run).
+        enable_vizard: if True, wire up vizSupport.enableUnityVisualization(),
+            including the per-satellite comm-rings/data-storage-panel
+            visualization from communications.py (see the comment near the
+            call site for the frame-rate/blocking-call caveats specific to
+            a multi-year run).
         viz_save_file: path (without extension) to write a Vizard playback
             file to; None (default) writes nothing.
         viz_live_stream: forwarded to enableUnityVisualization(); see the
@@ -261,6 +273,16 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         )
 
     # ------------------------------------------------------------------
+    # Communications: EO data generation, on-board storage, ground downlink
+    # (see communications.py -- this is what drives the Vizard "comm rings"
+    # visualization below).
+    # ------------------------------------------------------------------
+    groundStations = communications.build_ground_stations(scSim, dynTaskName, spiceObject, earthIdx, satellites)
+    comms = communications.build_communications(scSim, dynTaskName, ctrlTaskName, satellites, groundStations)
+    for name, sat in satellites.items():
+        comms[name]["instrumentGate"].eclipseInMsg.subscribeTo(eclipseObject.eclipseOutMsgs[sat["index"]])
+
+    # ------------------------------------------------------------------
     # Controllers (coarse control task)
     # ------------------------------------------------------------------
     altControllers = {}
@@ -299,6 +321,7 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         isp_s=mc.ISP_S,
         dry_mass_kg=mc.DRY_MASS_KG,
         propellant_kg=mc.PROPELLANT_MASS_BOL_KG,
+        orbit_period_s=mc.ORBIT_PERIOD_S,
         eclipse_sunlit_threshold=mc.ECLIPSE_SUNLIT_THRESHOLD,
     )
     phaseCtrl.scStateInMsgA.subscribeTo(satA["scObject"].scStateOutMsg)
@@ -320,10 +343,15 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
     logRate_s = 3600.0  # [s] hourly trajectory samples over 5 years (~43800 pts/sat)
     logProcess.addTask(scSim.CreateNewTask(logTaskName, macros.sec2nano(logRate_s)))
     stateRecorders = {}
+    storageRecorders = {}
     for name, sat in satellites.items():
         recorder = sat["scObject"].scStateOutMsg.recorder()
         scSim.AddModelToTask(logTaskName, recorder)
         stateRecorders[name] = recorder
+
+        storageRecorder = comms[name]["storageUnit"].storageUnitDataOutMsg.recorder()
+        scSim.AddModelToTask(logTaskName, storageRecorder)
+        storageRecorders[name] = storageRecorder
 
     # ------------------------------------------------------------------
     # Optional Vizard visualization. The vizInterface module is added to
@@ -351,18 +379,72 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         else:
             scObjList = [sat["scObject"] for sat in satellites.values()]
             orbitColors = [vizSupport.toRGBA255(c) for c in ("teal", "orange", "purple")]
-            # saveFile defaults to None (no file written) so an automated/CI
-            # run of this script never silently drops a playback file on
-            # disk; pass viz_save_file="mission_playback" (or similar) to
-            # opt in.
+
+            # Comm rings + data-storage panel per satellite: a Transceiver
+            # fed by BOTH the EO instrument's and the downlink transmitter's
+            # nodeDataOutMsg reproduces the video's two-color behavior --
+            # purple rings while the instrument reports a positive baud
+            # rate (data being generated), green rings while the
+            # transmitter reports a negative one (data being sent) -- see
+            # communications.py's module docstring and vizInterface.cpp's
+            # sending/receiving convention.
+            transceiverList = []
+            genericStorageList = []
+            for name, sat in satellites.items():
+                comm = comms[name]
+
+                transceiver = vizInterface.Transceiver()
+                transceiver.r_SB_B = [0.0, 0.0, 0.0]  # [m] PLACEHOLDER antenna location (no bus layout defined)
+                transceiver.fieldOfView = np.radians(80.0)  # [rad] PLACEHOLDER antenna half-cone angle
+                transceiver.normalVector = [1.0, 0.0, 0.0]
+                transceiver.label = "Comm"
+                instrumentStateInMsg = messaging.DataNodeUsageMsgReader()
+                instrumentStateInMsg.subscribeTo(comm["instrument"].nodeDataOutMsg)
+                transmitterStateInMsg = messaging.DataNodeUsageMsgReader()
+                transmitterStateInMsg.subscribeTo(comm["transmitter"].nodeDataOutMsg)
+                transceiver.transceiverStateInMsgs.push_back(instrumentStateInMsg)
+                transceiver.transceiverStateInMsgs.push_back(transmitterStateInMsg)
+
+                storagePanel = vizInterface.GenericStorage()
+                storagePanel.label = "Data Storage"
+                storagePanel.type = "Hard Drive"
+                storagePanel.units = "bits"
+                storagePanel.color = vizInterface.IntVector(
+                    vizSupport.toRGBA255("blue") + vizSupport.toRGBA255("red")
+                )
+                storagePanel.thresholds = vizInterface.IntVector([90])
+                storageStateInMsg = messaging.DataStorageStatusMsgReader()
+                storageStateInMsg.subscribeTo(comm["storageUnit"].storageUnitDataOutMsg)
+                storagePanel.dataStorageStateInMsg = storageStateInMsg
+
+                transceiverList.append([transceiver])
+                genericStorageList.append([storagePanel])
+
             viz = vizSupport.enableUnityVisualization(
                 scSim, logTaskName, scObjList,
                 saveFile=viz_save_file,
                 oscOrbitColorList=orbitColors,
                 liveStream=viz_live_stream,
+                transceiverList=transceiverList,
+                genericStorageList=genericStorageList,
             )
             viz.settings.orbitLinesOn = 1  # osculating orbit lines relative to the parent body (Earth)
             viz.settings.spacecraftCSon = -1  # no attitude is modeled/controlled here; hide the (meaningless) body frame
+            viz.settings.showTransceiverLabels = 1
+            for name, sat in satellites.items():
+                vizSupport.setInstrumentGuiSetting(viz, spacecraftName=sat["scObject"].ModelTag,
+                                                   showGenericStoragePanel=True)
+
+            for gsDef, gs in zip(mc.GROUND_STATIONS, [g["module"] for g in groundStations]):
+                vizSupport.addLocation(
+                    viz,
+                    stationName=gsDef["name"],
+                    parentBodyName=earth.displayName,
+                    r_GP_P=simHelpers.EigenVector3d2list(gs.r_LP_P_Init),
+                    fieldOfView=np.radians(2.0 * (90.0 - gsDef["min_elevation_deg"])),
+                    color="pink",
+                    range=mc.GROUND_STATION_MAX_RANGE_M,
+                )
 
     scSim.InitializeSimulation()
 
@@ -377,7 +459,10 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         satellites=satellites,
         altControllers=altControllers,
         phaseCtrl=phaseCtrl,
+        groundStations=groundStations,
+        comms=comms,
         stateRecorders=stateRecorders,
+        storageRecorders=storageRecorders,
         stopTimeS=stopTimeS,
         viz=viz,
     )
@@ -464,6 +549,14 @@ def run(mission_years=mc.MISSION_DURATION_YEARS, make_plots=True, enable_vizard=
     finalDvPhase = phaseCtrl.deltaVLog[-1] if phaseCtrl.deltaVLog else 0.0
     print(f"  Phasing (SSO-2): cumulative phasing dV ~{finalDvPhase:.2f} m/s")
 
+    for name, recorder in sim["storageRecorders"].items():
+        if len(recorder.storageLevel) == 0:
+            continue
+        finalLevel = recorder.storageLevel[-1]
+        peakLevel = np.max(recorder.storageLevel)
+        print(f"  {name}: data on-board at end of run ~{finalLevel / 8e9:.2f} GB "
+              f"(peak ~{peakLevel / 8e9:.2f} GB of {mc.DATA_STORAGE_CAPACITY_BITS / 8e9:.0f} GB capacity)")
+
     if make_plots:
         _make_plots(sim)
 
@@ -473,7 +566,7 @@ def run(mission_years=mc.MISSION_DURATION_YEARS, make_plots=True, enable_vizard=
 def _make_plots(sim):
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(9, 9.5), sharex=True)
     for name, ctrl in sim["altControllers"].items():
         if not ctrl.tLog:
             continue
@@ -492,7 +585,19 @@ def _make_plots(sim):
     axes[1].axhline(mc.PHASING_TOLERANCE_DEG, color="r", linestyle=":", linewidth=0.8)
     axes[1].axhline(-mc.PHASING_TOLERANCE_DEG, color="r", linestyle=":", linewidth=0.8)
     axes[1].set_ylabel("SSO mean-anomaly\nphasing error [deg]")
-    axes[1].set_xlabel("mission elapsed time [days]")
+
+    # Hourly-sampled storage level (see build_simulation()'s comment on the
+    # logTask rate): this shows the mission-long trend, not individual
+    # downlink passes -- rerun with a short --years window to see those.
+    for name, recorder in sim["storageRecorders"].items():
+        if len(recorder.times()) == 0:
+            continue
+        tDays = recorder.times() * macros.NANO2SEC / 86400.0
+        axes[2].plot(tDays, recorder.storageLevel / 8.0e9, label=name)
+    axes[2].axhline(mc.DATA_STORAGE_CAPACITY_BITS / 8.0e9, color="k", linestyle="--", linewidth=0.8, label="capacity")
+    axes[2].set_ylabel("on-board data [GB]")
+    axes[2].set_xlabel("mission elapsed time [days]")
+    axes[2].legend(fontsize=8)
 
     fig.tight_layout()
     outPath = os.path.join(SCRIPT_DIR, "mission_summary.png")
