@@ -147,11 +147,42 @@ cd missionAnalysis
 python3 generate_space_weather_placeholder.py   # only needed once, or to regenerate
 python3 run_constellation_mission.py --years 0.1   # smoke test first
 python3 run_constellation_mission.py               # full 5-year run
+
+# Vizard visualization (requires a Vizard-enabled Basilisk build):
+python3 run_constellation_mission.py --years 0.05 --vizard-save mission_playback
 ```
 
 `run_constellation_mission.build_simulation()` returns every Basilisk object
-(spacecraft, effectors, controllers, recorders) for interactive
-post-processing if the CLI script's summary print + plot isn't enough.
+(spacecraft, effectors, controllers, recorders, and the `viz` handle when
+Vizard is enabled) for interactive post-processing if the CLI script's
+summary print + plot isn't enough.
+
+### Vizard visualization
+
+`--vizard` wires up `vizSupport.enableUnityVisualization()`; `--vizard-save
+PATH` does the same and also writes a `<PATH>_UnityViz.bin` playback file
+(under `_VizFiles/`) you can open in the Vizard app afterwards. It's off by
+default, and deliberately scoped down from how most Basilisk examples use
+it:
+
+* No attitude is modeled or controlled in this study (see Architecture
+  decision #1), so there's no meaningful body frame or pointing to show --
+  `viz.settings.spacecraftCSon` is set to hide it, and there are no RW/
+  thruster-plume effector lists (this script commands thrust as a direct
+  inertial-frame force, not through a body-mounted `thrusterDynamicEffector`,
+  so there's no thruster geometry for Vizard to render anyway).
+* The vizInterface module runs on the same hourly `logTask` as the state
+  recorders, not the fast 60 s dynamics task -- a full 5-year run at 60 s
+  would be ~2.6M frames per spacecraft, impractical to write or play back.
+  Hourly sampling is coarse for Vizard's usual few-orbit-scale use case but
+  fine for checking overall constellation/phasing geometry and ground
+  tracks. For a smooth, detailed playback, run a short `--years` window
+  (e.g. `0.05`, about 18 days) instead of the full mission.
+* `liveStream` is exposed (`--vizard-live`) but is of limited use here: the
+  whole run executes as one blocking call into compiled Basilisk code (see
+  Architecture decision #3), so there's no wall-clock-paced moment for a
+  live viewer to watch frame by frame. The saved-file path is the intended
+  way to inspect this mission in Vizard.
 
 ## Assumptions and placeholders to replace
 

@@ -45,10 +45,14 @@ satellites, both via :mod:`constellation_controllers`.
 Usage::
 
     python3 run_constellation_mission.py [--years 5] [--no-plots]
+    python3 run_constellation_mission.py --years 0.05 --vizard-save mission_playback
 
 Requires a built Basilisk Python package (``pip install .`` from the repo
 root, or the Basilisk Docker image) -- this script cannot run against an
-unbuilt checkout.
+unbuilt checkout. Vizard visualization (``--vizard``/``--vizard-save``) also
+requires a Vizard-enabled Basilisk build; see the "Optional Vizard
+visualization" comment in ``build_simulation()`` for why a short ``--years``
+window is recommended over a full 5-year Vizard run.
 """
 
 import argparse
@@ -76,6 +80,7 @@ from Basilisk.utilities import (
     orbitalMotion,
     simIncludeGravBody,
     simHelpers,
+    vizSupport,
 )
 from Basilisk.utilities.supportDataTools.dataFetcher import get_path, DataFile
 
@@ -100,10 +105,20 @@ def _mean_anom_to_rv(mu, sat):
 
 
 def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=mc.EARTH_GRAV_DEGREE,
-                      enable_relativistic_correction=False):
+                      enable_relativistic_correction=False, enable_vizard=False,
+                      viz_save_file=None, viz_live_stream=False):
     """Assemble the full Basilisk simulation. Returns a dict of every object
     a caller might want a handle on (sim, per-satellite objects, controllers,
     recorders) for running and post-processing.
+
+    Args:
+        enable_vizard: if True, wire up vizSupport.enableUnityVisualization()
+            (see the comment near its call site for the frame-rate/blocking
+            -call caveats specific to a multi-year run).
+        viz_save_file: path (without extension) to write a Vizard playback
+            file to; None (default) writes nothing.
+        viz_live_stream: forwarded to enableUnityVisualization(); see the
+            docstring note on why this is of limited use for a 5-year run.
     """
     scSim = SimulationBaseClass.SimBaseClass()
     scSim.SetProgressBar(True)
@@ -310,6 +325,45 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         scSim.AddModelToTask(logTaskName, recorder)
         stateRecorders[name] = recorder
 
+    # ------------------------------------------------------------------
+    # Optional Vizard visualization. The vizInterface module is added to
+    # the same hourly logTask as the state recorders above, NOT the fast
+    # (60 s) dynamics task: a 5-year run at 60 s would be ~2.6M frames per
+    # spacecraft, which is impractical to write out or play back. Hourly
+    # sampling (~43800 frames/spacecraft over 5 years) is coarse compared to
+    # Vizard's usual few-orbit GNC-video use case, but is enough to inspect
+    # overall constellation/phasing geometry and ground tracks. For a
+    # smooth, detailed playback, run a short window instead (e.g.
+    # ``--years 0.05 --vizard``).
+    #
+    # This also means "live" Vizard streaming isn't really meaningful here:
+    # the entire multi-year run executes as one blocking call into compiled
+    # Basilisk code (see the fast/coarse task-rate split above), so there is
+    # no wall-clock-paced moment for a live viewer to watch it happen frame
+    # by frame. ``viz_save_file``, not ``liveStream``, is the intended way
+    # to use this: it writes a "<viz_save_file>_UnityViz.bin" playback file
+    # (under a _VizFiles/ subdirectory) to open in the Vizard app after the
+    # run completes.
+    viz = None
+    if enable_vizard:
+        if not vizSupport.vizFound:
+            print("vizSupport: this Basilisk build does not include the Vizard interface; skipping.")
+        else:
+            scObjList = [sat["scObject"] for sat in satellites.values()]
+            orbitColors = [vizSupport.toRGBA255(c) for c in ("teal", "orange", "purple")]
+            # saveFile defaults to None (no file written) so an automated/CI
+            # run of this script never silently drops a playback file on
+            # disk; pass viz_save_file="mission_playback" (or similar) to
+            # opt in.
+            viz = vizSupport.enableUnityVisualization(
+                scSim, logTaskName, scObjList,
+                saveFile=viz_save_file,
+                oscOrbitColorList=orbitColors,
+                liveStream=viz_live_stream,
+            )
+            viz.settings.orbitLinesOn = 1  # osculating orbit lines relative to the parent body (Earth)
+            viz.settings.spacecraftCSon = -1  # no attitude is modeled/controlled here; hide the (meaningless) body frame
+
     scSim.InitializeSimulation()
 
     stopTimeS = mission_years * 365.25 * 86400.0  # [s]
@@ -325,6 +379,7 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         phaseCtrl=phaseCtrl,
         stateRecorders=stateRecorders,
         stopTimeS=stopTimeS,
+        viz=viz,
     )
 
 
@@ -384,13 +439,18 @@ def _add_relativistic_correction(scSim, dynTaskName, ctrlTaskName, scObject, mu)
     return dict(module=relModule, effector=relEffector)
 
 
-def run(mission_years=mc.MISSION_DURATION_YEARS, make_plots=True):
-    sim = build_simulation(mission_years=mission_years)
+def run(mission_years=mc.MISSION_DURATION_YEARS, make_plots=True, enable_vizard=False,
+        viz_save_file=None, viz_live_stream=False):
+    sim = build_simulation(mission_years=mission_years, enable_vizard=enable_vizard,
+                            viz_save_file=viz_save_file, viz_live_stream=viz_live_stream)
     scSim = sim["scSim"]
 
     scSim.ExecuteSimulation()
 
     print("Simulation complete.")
+    if sim["viz"] is not None and viz_save_file:
+        print(f"Wrote Vizard playback file under {os.path.dirname(viz_save_file) or '.'}/_VizFiles/ "
+              f"(open it with the Vizard app)")
     for name, ctrl in sim["altControllers"].items():
         # burnLog is decimated telemetry (see AltitudeKeepingController), so
         # this duty cycle is an approximation, not an exact on-time fraction.
@@ -445,6 +505,19 @@ if __name__ == "__main__":
     parser.add_argument("--years", type=float, default=mc.MISSION_DURATION_YEARS,
                          help="mission duration to simulate [years]")
     parser.add_argument("--no-plots", action="store_true", help="skip matplotlib summary plot")
+    parser.add_argument("--vizard", action="store_true",
+                         help="wire up vizSupport.enableUnityVisualization() (requires a Vizard-enabled Basilisk build)")
+    parser.add_argument("--vizard-save", type=str, default=None, metavar="PATH",
+                         help="write a Vizard playback file (implies --vizard); e.g. --vizard-save mission_playback")
+    parser.add_argument("--vizard-live", action="store_true",
+                         help="also enable Vizard liveStream (implies --vizard); of limited use for a multi-year "
+                              "blocking run -- see the enable_vizard note in build_simulation()")
     args = parser.parse_args()
 
-    run(mission_years=args.years, make_plots=not args.no_plots)
+    run(
+        mission_years=args.years,
+        make_plots=not args.no_plots,
+        enable_vizard=args.vizard or args.vizard_save is not None or args.vizard_live,
+        viz_save_file=args.vizard_save,
+        viz_live_stream=args.vizard_live,
+    )
