@@ -11,34 +11,58 @@ mission requirements. The constellation's satellite count, individual orbits,
 and ground-station network are all configurable; see `setup_wizard.py` under
 **Changing spacecraft/orbit parameters** below.
 
+On top of the original orbital-dynamics/station-keeping/downlink design,
+this now also includes: a single-loop attitude pointing controller (antenna
+at the ground station during a downlink pass, else solar panel at the sun --
+**Architecture decision #7**), a per-satellite power budget that depends on
+that real controlled attitude (**#8**), a reported RF downlink link-margin
+estimate (**#9**), a smoother/wider-view Vizard visualization with battery
++ data-storage HUD panels (**Vizard visualization** below), and a fuller
+end-of-run report (delta-V broken out by cause, attitude pointing duty
+cycle/error, power/battery, and the link-margin estimate).
+
 ## Architecture decisions
 
 This is the "before we lock in the approach" discussion the code follows.
 
-### 1. Orbital dynamics only, not full 6-DOF
+### 1. Orbital dynamics fully modeled; attitude is one pointing loop, not a full FSW/GNC stack
 
 Basilisk's `spacecraft.Spacecraft()` hub always integrates both translational
 and rotational states -- there is no built-in flag to disable attitude
-integration entirely. But nothing requires attaching an attitude
-determination/control loop (reaction wheels, star trackers, MRP control,
-FSW stack) to it, and this study doesn't need one: none of the four
-deliverables (independent SMA station-keeping, in-plane phasing, drag/SRP
-accumulation, propellant bookkeeping) depend on attitude.
+integration entirely. Originally nothing in this study needed a real
+attitude loop (independent SMA station-keeping, in-plane phasing, drag/SRP
+accumulation, and propellant bookkeeping are all attitude-independent), so
+attitude was simply left uncontrolled/unobserved. That has since changed:
+solar-panel sun-pointing and antenna-at-ground-station pointing are now
+real, physically meaningful requirements (they gate the power budget and,
+conceptually, the downlink), so attitude is now actively controlled -- see
+**#7** below and `attitude_controllers.py`.
 
-So the spacecraft's attitude is simply left uncontrolled/unobserved (initial
-attitude states default to zero and free-drift for the whole run -- this is
-never read or acted on by anything in the script). The real fidelity choice
-is in how thrust is applied: rather than pointing a body-fixed thruster
-(which would require closing an attitude loop to actually work), each
-spacecraft gets an [`extForceTorque`](../src/simulation/dynamics/extForceTorque)
-dynamic effector and the station-keeping/phasing controllers write directly
+This is still a deliberately narrow slice of "real" GNC, not a full FSW
+stack: one body-fixed vector is pointed at a time (a priority choice between
+the antenna and the panel normal, not a two-target/gimbaled solution), there
+is no reaction wheel array (control torque is applied directly, the same
+idealized-actuator philosophy already used for thrust -- see below), no
+sensor models (attitude/rate are read directly off the truth state, not
+through a `simpleNav`-style noise model), and no imaging/nadir-pointing mode
+(the EO instrument's duty cycle is still gated by eclipse/sunlit state only,
+independent of attitude, as before). This is enough to make the power
+budget's cosine losses and eclipse dependence physically real without taking
+on full 6-DOF FSW fidelity -- see **#7** for the reasoning and its limits.
+
+Station-keeping/phasing thrust is unaffected by any of this and remains
+its own separate fidelity choice: rather than pointing a body-fixed
+thruster (which would couple every station-keeping burn to a slew maneuver),
+each spacecraft's [`extForceTorque`](../src/simulation/dynamics/extForceTorque)
+dynamic effector has the station-keeping/phasing controllers write directly
 into its `extForce_N` (an inertial-frame force) along the instantaneous
-velocity direction. This is exactly the "tangential burn" abstraction a
-mission-design tool like GMAT already uses for impulsive/finite maneuvers --
-it does not assume or require any particular attitude, and every other
-perturbation (gravity, drag, SRP, third-body) is fully physical and
-attitude-independent already. This was the single biggest fidelity/runtime
-lever available and is why the rest of the architecture is tractable.
+velocity direction -- modeled as if through a gimbaled thruster that holds
+that direction regardless of body attitude. This is exactly the "tangential
+burn" abstraction a mission-design tool like GMAT already uses for
+impulsive/finite maneuvers, and every other perturbation (gravity, drag,
+SRP, third-body) is fully physical and attitude-independent already. This
+decoupling is why adding attitude control for pointing did not also require
+reworking the station-keeping/phasing controllers.
 
 ### 2. Custom Python control loop around Basilisk's dynamics modules
 
@@ -86,12 +110,14 @@ phasing just waits.
 ### 3. Keeping a 3-year x 4-spacecraft run tractable
 
 The key structural decision is **decoupling the fast numerical integration
-from the (comparatively expensive) Python control logic**, via two Basilisk
-processes running at two different rates:
+from the (comparatively expensive) Python control logic**, via several
+Basilisk processes/tasks running at different rates:
 
 * A **fast dynamics process** (default 60 s task rate) holds SPICE, gravity,
-  atmosphere/space-weather, drag, SRP, eclipse, and every spacecraft +
-  `extForceTorque` effector. All of this executes as compiled C++ during
+  atmosphere/space-weather, drag, SRP, eclipse, every spacecraft +
+  `extForceTorque` effector, and the power-budget objects (solar panel,
+  battery, load sinks -- see **#8**; these are also compiled C++ with no
+  per-call Python overhead). All of this executes as compiled C++ during
   `ExecuteSimulation()` with zero Python callbacks per step. Each spacecraft
   also gets its own `svIntegratorRKF78` adaptive-step integrator (rather
   than fixed-step RK4): the 60 s task rate is a message-passing/reporting
@@ -99,11 +125,20 @@ processes running at two different rates:
   dynamics actually demand it (e.g. tighter near a reboost burn), which
   buys back a lot of the accuracy that a strictly fixed step would need a
   much smaller step size to get.
-* A **coarse control process** (default 300 s task rate) holds only the two
-  Python controllers, i.e. the only code that pays a real per-call Python
-  overhead. At 300 s over 3 years that's ~316,000 calls per controller --
-  perfectly tractable -- versus tens of millions if control logic ran on the
-  fast task.
+* A **coarse control process** (default 300 s task rate) holds the
+  station-keeping/phasing Python controllers and the power-budget load gate,
+  i.e. the code that pays a real per-call Python overhead but does not need
+  to react faster than an orbital timescale. At 300 s over 3 years that's
+  ~316,000 calls per controller -- perfectly tractable -- versus tens of
+  millions if control logic ran on the fast task.
+* A **separate, finer attitude-control task** (default 30 s, same process,
+  see `mission_config.ATTITUDE_CONTROL_TASK_RATE_S`) holds only
+  `AttitudePointingController` (**#7**). Attitude dynamics settle much
+  faster than orbital station-keeping/phasing corrections do, so reusing the
+  300 s cadence above would under-sample the attitude loop; a dedicated
+  finer task keeps that loop responsive without forcing every other
+  controller onto the same (much more expensive, over a whole mission)
+  cadence.
 
 Everything else that keeps this affordable is really just consequences of
 that split:
@@ -154,8 +189,11 @@ unit (`partitionedStorageUnit`), and a downlink transmitter
 (`spaceToGroundTransmitter`) with access to a small placeholder ground
 network (`GroundLocation`), following the same wiring as Basilisk's own
 `scenarioGroundDownlink` example. This is standard onboard-data-handling
-infrastructure, independent of the orbital-dynamics-only vs. 6-DOF choice
-in decision #1 above -- it needs no attitude model.
+infrastructure and needs no attitude model itself (the transmitter's
+data throughput/access gating is a range/elevation check on `GroundLocation`,
+not a pointing constraint) -- attitude only enters the picture via the
+*separate* antenna-pointing controller in decision #7, which does not
+change anything here.
 
 When `--vizard`/`--vizard-save` is enabled, each satellite's antenna is
 rendered as a `vizInterface.Transceiver` fed by *both* the instrument's and
@@ -208,6 +246,113 @@ is fine; no payload-activity conflict"):
   maneuvers without PL activity" required no code change -- the two were
   already decoupled.
 
+### 7. Attitude pointing (antenna vs. sun, one target at a time)
+
+Added per updated requirements: point the antenna at the ground station
+whenever a downlink pass is possible, else point the solar panel at the sun.
+`AttitudePointingController` (`attitude_controllers.py`, one instance per
+satellite) decides between the two and drives toward whichever is active:
+
+* **Target selection**: every tick, it checks each configured ground
+  station's `GroundLocation.accessOutMsgs` for this satellite; if one or
+  more report `hasAccess`, it picks the highest-elevation one and targets
+  the antenna boresight (`mission_config.ANTENNA_BORESIGHT_B`) at it (via
+  that station's `currentGroundStateOutMsg` position). Otherwise it targets
+  the solar panel normal (`PANEL_NORMAL_B`) at the sun (from the SPICE sun
+  ephemeris already used for SRP/eclipse). This priority is why the
+  requirement reads "sun-pointing whenever possible" rather than "always":
+  a downlink pass is short, scheduled, and valuable enough to interrupt
+  sun-pointing for; the panels get the rest of the time.
+* **Guidance math**: the same eigen-axis / `-tan(phi/4)` MRP tracking-error
+  construction Basilisk's own [`locationPointing`](../src/fswAlgorithms/attGuidance/locationPointing)
+  module documents, reimplemented directly in Python (`_mrp_to_dcm` +
+  the eigen-axis computation in `AttitudePointingController.UpdateState`)
+  rather than wiring that C module plus a second instance for the sun plus
+  a message-level mode-arbitration router -- one controller owns the whole
+  antenna-vs-sun decision directly, keeping the same "custom Python control
+  loop" pattern already used for station-keeping/phasing (decision #2).
+  Verified against hand-computed cases (aligned/orthogonal/anti-parallel
+  pointing vectors) since Basilisk isn't built in this environment -- see
+  the "not executed end to end" note in decision #3.
+* **Control law**: the textbook simple MRP regulator,
+  `torque = -K*sigma_BR - P*omega_BR_B`, the same law Basilisk's own
+  [`mrpFeedback`](../src/fswAlgorithms/attControl/mrpFeedback) reduces to
+  with no reaction wheels, no reference angular rate, and no integral term.
+  Applied as an idealized external torque
+  (`extForceTorque.extTorquePntB_B`, direct assignment, clamped to
+  `ATTITUDE_CONTROL_MAX_TORQUE_NM`) on the SAME effector object the
+  station-keeping/phasing controllers already use for thrust -- force and
+  torque are independent fields on that effector, so there is no conflict,
+  and no second dynamic effector is needed per satellite.
+* **No reaction wheels, no sensor noise, no imaging mode**: this is a
+  deliberately narrow slice of real GNC -- see decision #1 for the full
+  scope/limits discussion (one target at a time, idealized torque actuator,
+  truth-state attitude/rate rather than a `simpleNav`-style noisy estimate,
+  no nadir-pointing imaging mode).
+
+### 8. Power budget (solar panel + battery + loads, attitude/eclipse -dependent)
+
+Added per updated requirements ("compute the power budget as well"). Uses
+Basilisk's `simplePower*` subsystem (`simpleSolarPanel`, `simpleBattery`,
+`simplePowerSink` -- the same modules and wiring as
+`examples/scenarioPowerDemo.py`), one full set per satellite, in
+`power_budget.py`:
+
+* **Generation**: `simpleSolarPanel` computes generated power from the
+  panel area/efficiency (`mission_config.SOLAR_PANEL_AREA_M2`/
+  `SOLAR_PANEL_EFFICIENCY`), the real cosine loss between `PANEL_NORMAL_B`
+  and the sun direction (driven by the *actual controlled* attitude from
+  decision #7, not a flat average), and the same eclipse shadow factor
+  everything else in this script uses -- so a satellite genuinely generates
+  less power while sun-pointing is being interrupted for a downlink pass,
+  or while eclipsed.
+* **Loads**: three separate `simplePowerSink` instances per satellite so
+  each shows up independently in the reported budget -- a static always-on
+  bus load (`BUS_IDLE_POWER_W`), the EO instrument
+  (`EO_INSTRUMENT_POWER_W`, gated on exactly when
+  `communications.InstrumentEclipseGate` has the instrument actually
+  collecting data), and the downlink transmitter (`DOWNLINK_TX_POWER_W`,
+  gated on exactly when `AttitudePointingController` reports it is
+  antenna-pointing -- see `power_budget.PowerLoadGate`).
+* **Storage**: one `simpleBattery` per satellite (`BATTERY_CAPACITY_WH`,
+  initial state of charge `BATTERY_INITIAL_SOC`) nets all four power nodes
+  and tracks stored energy over the mission; the end-of-run report and
+  summary plot both show state of charge, and flag if a satellite's battery
+  was ever fully depleted.
+* **No attitude power draw is modeled** (e.g. reaction-wheel/torque-rod
+  power) -- consistent with decision #7 not modeling reaction wheels at
+  all; the idealized torque actuator is treated as free, folded into the
+  flat bus idle load if you want to account for it.
+
+### 9. RF downlink link-margin estimate (reported only, does not affect the simulated downlink)
+
+Added per updated requirements ("accept inputs for RF parameters"). A
+simplified free-space-path-loss link budget
+(`run_constellation_mission._rf_link_margin_db`), computed once per
+satellite at the end of a run from its own altitude and the loosest
+configured ground-station elevation mask (worst-case slant range via the
+standard spherical-Earth elevation-range relation,
+`_worst_case_slant_range_m`):
+
+```
+EIRP = TX power + TX antenna gain - implementation loss
+FSPL = 20*log10(4*pi*range*frequency / c)
+Eb/N0 = EIRP - FSPL + ground antenna gain - 10*log10(k*T_noise) - 10*log10(data rate)
+margin = Eb/N0 - required Eb/N0
+```
+
+This is a genuine, if simplified, link budget (no atmosphere/rain,
+pointing-loss beyond the flat `RF_IMPLEMENTATION_LOSS_DB` term, or
+coding-gain modeling) -- with the placeholder RF parameters this ships
+with, it reports a slightly *negative* margin at worst-case range, which is
+a real and useful finding: 150 Mbps X-band at 15 W / 6 dBi against a 45 dBi
+/ 500 K ground station does not actually close at ~2200 km slant range, and
+either the data rate needs to drop, the TX power/antenna gain needs to go
+up, or the ground segment needs a bigger/quieter receiver. It is reported
+only -- it does **not** affect `DOWNLINK_BAUD_RATE_BPS`, the simulated
+downlink data flow, or any access gating anywhere else in this script; the
+downlink transmitter has no concept of link margin.
+
 ## Files
 
 | File | Purpose |
@@ -217,7 +362,9 @@ is fine; no payload-activity conflict"):
 | `configure_mission.py` | Non-interactive CLI to edit *scalar* spacecraft/orbit parameters in `mission_config.py` one at a time -- see below. Doesn't touch satellite count or ground stations; use the wizard for that. |
 | `constellation_setup.json` | Generated by `setup_wizard.py` (git-ignored, not committed): the SSO plane + standalone satellites + ground stations actually used, overriding `mission_config.py`'s hardcoded defaults when present. |
 | `generate_space_weather_placeholder.py` | Builds a synthetic multi-year F10.7/Ap table (CelesTrak CSV layout) covering the mission window -- see below for why this has to be synthetic. |
-| `constellation_controllers.py` | The two `SysModel` controllers (altitude keeping, phasing keeping). |
+| `constellation_controllers.py` | The two orbital `SysModel` controllers (altitude keeping, phasing keeping) plus `SeparationSchedule`. |
+| `attitude_controllers.py` | `AttitudePointingController` -- antenna-at-ground-station-else-sun-pointing attitude control (see Architecture decision #7). |
+| `power_budget.py` | Per-satellite solar panel + battery + load power budget, and the load-gating `PowerLoadGate` (see Architecture decision #8). |
 | `communications.py` | Per-satellite EO data generation, on-board storage, ground downlink, and the eclipse-gated instrument duty cycle -- drives the Vizard comm-rings visualization. |
 | `run_constellation_mission.py` | Builds and runs the full Basilisk simulation; `python3 run_constellation_mission.py` is the entry point. |
 | `data/placeholder_space_weather.csv` | Generated output of the space-weather script (regenerate with `python3 generate_space_weather_placeholder.py`). |
@@ -269,22 +416,42 @@ summary print + plot isn't enough.
 `--vizard` wires up `vizSupport.enableUnityVisualization()`; `--vizard-save
 PATH` does the same and also writes a `<PATH>_UnityViz.bin` playback file
 (under `_VizFiles/`) you can open in the Vizard app afterwards. It's off by
-default, and deliberately scoped down from how most Basilisk examples use
-it:
+default. A few things worth knowing about how it's set up:
 
-* No attitude is modeled or controlled in this study (see Architecture
-  decision #1), so there's no meaningful body frame or pointing to show --
-  `viz.settings.spacecraftCSon` is set to hide it, and there are no RW/
-  thruster-plume effector lists (this script commands thrust as a direct
-  inertial-frame force, not through a body-mounted `thrusterDynamicEffector`,
-  so there's no thruster geometry for Vizard to render anyway).
-* The vizInterface module runs on the same hourly `logTask` as the state
-  recorders, not the fast 60 s dynamics task -- a full 3-year run at 60 s
-  would be ~1.6M frames per spacecraft, impractical to write or play back.
-  Hourly sampling is coarse for Vizard's usual few-orbit-scale use case but
-  fine for checking overall constellation/phasing geometry and ground
-  tracks. For a smooth, detailed playback, run a short `--years` window
-  (e.g. `0.05`, about 18 days) instead of the full mission.
+* **Attitude is now shown** (`viz.settings.spacecraftCSon = 1`): since
+  Architecture decision #7 added a real, actively-controlled attitude, the
+  body frame drawn on each spacecraft is now physically meaningful -- watch
+  it swing to track the ground station during a pass and back to sun
+  -pointing afterward. There is still no thruster-plume effector list (this
+  script commands station-keeping/phasing thrust as a direct inertial-frame
+  force, not through a body-mounted `thrusterDynamicEffector`, so there is
+  no thruster geometry for Vizard to render) and no reaction-wheel geometry
+  (none is modeled -- see decision #7).
+* **The whole constellation is shown by default, not a close-up of one
+  satellite**: `viz.settings.mainCameraTarget` is set to Earth's display
+  name. Without this, Vizard's own default startup camera locks onto a
+  close-up view of the first spacecraft added, which is the "why is it
+  zoomed in on one satellite" behavior this fixes -- zoom/pan freely from
+  there in the Vizard app itself.
+* **Playback is smooth, not choppy/fast-looking**: the vizInterface module
+  now runs on its own dedicated task at `--vizard-rate-s` (default
+  `mission_config.VIZARD_RECORD_RATE_S`, 60 s), not the hourly `logTask`
+  the trajectory/storage/power recorders use. Hourly frames used to mean
+  each spacecraft only advanced through the visualization ~1.6 times per
+  orbit between recorded points -- at a 570 km SSO altitude that is a
+  ~28,000 km jump between frames, which is what actually caused the
+  "sped up, laggy, jumping around" playback this replaces: Vizard had
+  nothing smooth to interpolate between. A finer dedicated task fixes that,
+  at the cost of a bigger output file for a long run, which is why a short
+  `--years` window (e.g. `0.05`, about 18 days) is still recommended for
+  Vizard rather than the full mission -- use `--vizard-rate-s` to trade
+  smoothness against file size.
+* **Live data on screen**: each satellite gets two `GenericStorage` HUD
+  panels -- "Data Storage" (on-board data, from decision #5) and "Battery"
+  (state of charge, from decision #8's power budget, via a small message
+  -shape adapter, `_BatteryVizAdapter` in `run_constellation_mission.py`,
+  since Vizard's storage-panel type only understands the data-storage
+  message shape). Both update live as the playback runs.
 * `liveStream` is exposed (`--vizard-live`) but is of limited use here: the
   whole run executes as one blocking call into compiled Basilisk code (see
   Architecture decision #3), so there's no wall-clock-paced moment for a
@@ -310,11 +477,11 @@ This writes `_VizFiles/mission_playback_UnityViz.bin` next to the script
    that `.bin` file.
 3. Click **Start Visualization**.
 4. Use the slider at the bottom to scrub through the run, the play/pause
-   button to run it, and the +/- buttons to change playback speed. Vizard
-   starts in spacecraft-centric view; zoom out (or double-click a
-   spacecraft) to switch to planet-centric view, which is what shows the
-   full constellation and its ground tracks around Earth -- probably what
-   you want here.
+   button to run it, and the +/- buttons to change playback speed. It opens
+   in a planet-centric view showing the full constellation and its ground
+   tracks around Earth (see the "whole constellation is shown by default"
+   note above); double-click a spacecraft to switch to a close-up
+   spacecraft-centric view of it instead.
 
 On macOS you can skip steps 1-2 and launch straight into a file from the
 terminal:
@@ -348,9 +515,9 @@ covering two different kinds of change:
 Use this for anything that changes the *shape* of the constellation: how
 many satellites, their individual orbits, how many ground stations and
 where. It also asks for the same scalar settings `configure_mission.py`
-covers (bus, propulsion, epoch, duration, deadband, phasing tolerance,
-gravity degree), applying them through that script so both tools stay
-consistent.
+covers (bus, propulsion, epoch, duration, power budget, RF/downlink link
+budget, attitude control, deadband, phasing tolerance, gravity degree),
+applying them through that script so both tools stay consistent.
 
 ```bash
 python3 setup_wizard.py
@@ -371,8 +538,9 @@ confirm the new setup actually builds and runs.
 #### `configure_mission.py` -- non-interactive, scalars only
 
 For quickly changing one or two *scalar* values (bus mass, Cd/Cr/areas,
-propulsion, epoch, mission duration, altitude deadband, phasing tolerance,
-gravity degree) without going through every wizard prompt:
+propulsion, epoch, mission duration, power budget, RF/downlink link budget,
+attitude control, altitude deadband, phasing tolerance, gravity degree)
+without going through every wizard prompt:
 
 ```bash
 # preview changes without writing anything
@@ -434,8 +602,13 @@ a few this implementation had to introduce:
   default (mission statement's 10-20 range, low end for run-time headroom).
   (`mission_config.EARTH_GRAV_DEGREE`)
 - **Spacecraft inertia** (`IHubPntBc_B`) is an arbitrary generic small-sat
-  placeholder -- irrelevant to every output this study produces (attitude is
-  not modeled/controlled) but is a required hub property.
+  placeholder -- no real bus layout exists in this study. Unlike before, it
+  IS now physically exercised: `attitude_controllers.py` actively controls
+  attitude against this inertia, and its gains
+  (`ATTITUDE_CONTROL_K`/`ATTITUDE_CONTROL_P`) are tuned against this
+  specific placeholder value. Retune those gains (or re-derive them from
+  the standard MRP-regulator natural-frequency/damping relations) if this
+  inertia is ever replaced with real values.
 - **Propellant-mass bookkeeping** is an explicit-Euler rocket-equation
   integration done in the Python controllers (updating `hub.mHub` directly),
   not Basilisk's `fuelTank` state effector. That effector is normally driven
@@ -499,8 +672,33 @@ a few this implementation had to introduce:
   (`mission_config.GROUND_STATIONS`, `EO_INSTRUMENT_BAUD_RATE_BPS`,
   `DOWNLINK_BAUD_RATE_BPS`, `DATA_STORAGE_CAPACITY_BITS`)
 - **Instrument antenna placement/geometry for Vizard** (`transceiver.r_SB_B`,
-  `fieldOfView`, `normalVector` in `run_constellation_mission.py`) is a
-  placeholder -- there is no bus layout in this study, and since attitude
-  isn't modeled the antenna's orientation on screen isn't physically
-  meaningful anyway; only the ring color/timing (from the data-node baud
-  sign) is.
+  `fieldOfView` in `run_constellation_mission.py`) is a placeholder -- there
+  is no bus layout in this study. `normalVector` is now set from
+  `mission_config.ANTENNA_BORESIGHT_B`, so the drawn antenna direction *is*
+  now consistent with what `AttitudePointingController` is actually
+  pointing (unlike before); the ring color/timing itself still comes from
+  the data-node baud sign, unaffected by any of this.
+- **Power budget** (panel area/efficiency, bus/instrument/downlink power
+  draws, battery capacity/initial state of charge) is entirely placeholder
+  -- no EPS design was given in the mission statement. Set real values via
+  `setup_wizard.py`'s "Power budget" section or `configure_mission.py`'s
+  `--panel-*`/`--bus-idle-power-w`/`--instrument-power-w`/
+  `--downlink-tx-power-w`/`--battery-*` flags.
+  (`mission_config.SOLAR_PANEL_AREA_M2` and neighbors)
+- **RF link budget parameters** (antenna gains, system noise temperature,
+  implementation loss, required Eb/N0, carrier frequency) are placeholders
+  feeding the *reported* link-margin estimate only (Architecture decision
+  #9) -- they do not affect the simulated downlink. With the shipped
+  defaults the estimate comes out slightly negative at worst-case range;
+  see decision #9 for why that is a legitimate finding, not a bug, and set
+  real values via `setup_wizard.py`'s "RF / downlink link budget" section
+  or `configure_mission.py`'s `--rf-*`/`--downlink-*` flags once a real link
+  budget exists. (`mission_config.RF_FREQUENCY_HZ` and neighbors)
+- **Attitude control axes/gains** (`ANTENNA_BORESIGHT_B`, `PANEL_NORMAL_B`,
+  `ATTITUDE_CONTROL_K`/`_P`/`_MAX_TORQUE_NM`) are placeholders -- no bus
+  layout or ADCS hardware selection exists in this study. The gains are
+  tuned (see Architecture decision #7) against the placeholder inertia
+  above for a settling time well inside the 30 s attitude-control cadence;
+  set real values via `setup_wizard.py`'s "Attitude control" section or
+  `configure_mission.py`'s `--antenna-boresight-b`/`--panel-normal-b`/
+  `--attitude-*` flags.

@@ -29,12 +29,16 @@ maintenance behaviors requested for this mission:
 
 Both act on an :ref:`extForceTorque` dynamic effector by writing its
 ``extForce_N`` (inertial-frame force) directly, rather than by commanding a
-body-frame thruster. This is a deliberate scope choice: this mission-analysis
-study does not need attitude/GNC fidelity, so there is no attitude control
-loop to point a real thruster with, and modeling the force directly in the
-inertial frame (along the local velocity direction) keeps the orbital
-dynamics fully physical while skipping 6-DOF entirely. See ``README.md`` for
-the full architecture rationale.
+body-frame thruster. This is a deliberate scope choice, independent of
+whether attitude is controlled elsewhere (see ``attitude_controllers.py`` --
+that module now actively controls attitude for antenna/solar-panel pointing,
+via the SAME effector's ``extTorquePntB_B``, but the two are decoupled: this
+station-keeping/phasing thrust is still modeled as if through a gimbaled
+thruster that holds the inertial velocity direction regardless of body
+attitude, which is a common enough real design that it does not need
+attitude/GNC fidelity to justify -- it keeps the orbital dynamics fully
+physical without coupling every station-keeping burn to a slew maneuver.
+See ``README.md`` for the full architecture rationale.
 
 Both controllers are meant to run on a *coarse* control task (order ~minutes),
 decoupled from the *fine* dynamics task that actually integrates the orbits

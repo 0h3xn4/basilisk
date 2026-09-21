@@ -102,6 +102,52 @@ ISP_S = 1500.0  # [s]
 G0_MPS2 = 9.80665  # [m/s^2] standard gravity, for the rocket equation (not mission-specific -- not user-configurable)
 
 # ---------------------------------------------------------------------------
+# Power budget (PLACEHOLDERs: no EPS design was given in the mission
+# statement). Modeled in power_budget.py via Basilisk's simpleSolarPanel /
+# simpleBattery / simplePowerSink -- generated power depends on the real,
+# actively-controlled attitude (panel-normal-to-sun angle, via
+# attitude_controllers.py) and eclipse state, not a flat average duty cycle.
+# ---------------------------------------------------------------------------
+SOLAR_PANEL_AREA_M2 = 1.2  # [m^2] PLACEHOLDER total deployed panel area
+SOLAR_PANEL_EFFICIENCY = 0.29  # [-] PLACEHOLDER triple-junction-class cell efficiency
+BUS_IDLE_POWER_W = 25.0  # [W] PLACEHOLDER always-on avionics/thermal/ADCS load
+EO_INSTRUMENT_POWER_W = 40.0  # [W] PLACEHOLDER EO payload power draw while imaging
+DOWNLINK_TX_POWER_W = 15.0  # [W] PLACEHOLDER downlink transmitter RF output power (electrical load; see the RF section below for the assumed link budget)
+BATTERY_CAPACITY_WH = 120.0  # [W*hr] PLACEHOLDER battery capacity
+BATTERY_INITIAL_SOC = 0.9  # [-] PLACEHOLDER initial state of charge, fraction of capacity
+
+# ---------------------------------------------------------------------------
+# RF / downlink link budget (PLACEHOLDER, no link budget was given in the
+# mission statement). DOWNLINK_TX_POWER_W above is the only one of these that
+# feeds the simulated physics (as an electrical load in power_budget.py); the
+# rest feed a simplified, free-space-path-loss link margin ESTIMATE reported
+# at the end of a run (run_constellation_mission.py's _rf_link_margin_db())
+# -- not a real link budget (no atmospheric/rain/pointing-loss/coding-gain
+# terms) and it does NOT affect the simulated downlink data rate or gating,
+# which stays the flat DOWNLINK_BAUD_RATE_BPS below regardless of range.
+# ---------------------------------------------------------------------------
+RF_FREQUENCY_HZ = 8.2e9  # [Hz] PLACEHOLDER X-band downlink
+RF_TX_ANTENNA_GAIN_DBI = 6.0  # [dBi] PLACEHOLDER spacecraft downlink antenna gain
+RF_GROUND_ANTENNA_GAIN_DBI = 45.0  # [dBi] PLACEHOLDER ground station antenna gain
+RF_SYSTEM_NOISE_TEMP_K = 500.0  # [K] PLACEHOLDER ground receiver system noise temperature
+RF_IMPLEMENTATION_LOSS_DB = 2.0  # [dB] PLACEHOLDER combined pointing/polarization/implementation loss
+RF_REQUIRED_EBNO_DB = 6.0  # [dB] PLACEHOLDER required Eb/N0 for the assumed modulation/coding
+
+# ---------------------------------------------------------------------------
+# Attitude control (PLACEHOLDER gains/axes -- see attitude_controllers.py for
+# the pointing-mode logic: point the downlink antenna boresight at whichever
+# ground station currently has access, else point the solar panel normal at
+# the sun. Body-fixed unit vectors; no bus layout exists in this study, so
+# both directions are placeholders pending a real spacecraft configuration.
+# ---------------------------------------------------------------------------
+ANTENNA_BORESIGHT_B = [0.0, 0.0, -1.0]  # [-] body-fixed antenna boresight, nadir-ish
+PANEL_NORMAL_B = [1.0, 0.0, 0.0]  # [-] body-fixed solar panel normal
+ATTITUDE_CONTROL_K = 0.8  # [N*m] MRP attitude-error proportional gain
+ATTITUDE_CONTROL_P = 12.0  # [N*m*s] body-rate feedback (damping) gain
+ATTITUDE_CONTROL_MAX_TORQUE_NM = 0.5  # [N*m] per-axis commanded-torque clamp (idealized actuator, see attitude_controllers.py)
+ATTITUDE_CONTROL_TASK_RATE_S = 30.0  # [s] attitude control cadence -- finer than CONTROL_TASK_RATE_S below since attitude dynamics settle much faster than orbital station-keeping/phasing
+
+# ---------------------------------------------------------------------------
 # Constellation orbit design
 #
 # These are the DEFAULTS used to build SSO_PLANE/CUSTOM_SATELLITES below when
@@ -171,6 +217,15 @@ PHASING_MAX_DELTA_A_M = 3000.0  # [m] safety clamp on the drift-orbit SMA offset
 # Dynamics/control task cadence (see README for the tractability rationale)
 DYNAMICS_TASK_RATE_S = 60.0  # [s]
 CONTROL_TASK_RATE_S = 300.0  # [s]
+
+# Default Vizard recording cadence when --vizard/--vizard-save is used --
+# independent of every other task rate above (see the "Optional Vizard
+# visualization" comment in run_constellation_mission.py's build_simulation()
+# for why this needs to be much finer than the hourly trajectory-recorder
+# cadence to avoid choppy/jumpy playback). Matches DYNAMICS_TASK_RATE_S by
+# default; override with --vizard-rate-s for a smoother (smaller number) or
+# lighter-weight (larger number) recording.
+VIZARD_RECORD_RATE_S = 60.0  # [s]
 
 # Earth gravity spherical-harmonics degree/order. 10-20 per mission statement;
 # default kept at the low end for run-time tractability over 5 years x 3
