@@ -200,22 +200,77 @@ class AltitudeKeepingController(sysModel.SysModel):
             self.deltaVLog.append(self._cumulativeDv)
 
 
+class SeparationSchedule:
+    """A time-varying along-track target separation between a follower and
+    its chief, stepping through a list of distances [km] every
+    ``interval_days``, holding at the last entry after the list is
+    exhausted (no looping) -- e.g. ``distances_km=[1000, 500, 250, 100, 50]``
+    with ``interval_days=90`` reconfigures the formation baseline every
+    ~3 months across a 1000 km -> 50 km range, then holds at 50 km for the
+    remainder of the mission.
+
+    Distance is converted to a mean-anomaly-equivalent angle via the small
+    -angle arc-length approximation ``theta = distance / a`` (exact for a
+    circular orbit; the frozen-orbit SSO eccentricities in this mission are
+    small enough that the error is negligible at these separations). Every
+    :class:`PhasingKeepingController` reads its *current* target from
+    ``value_at(t)`` rather than holding one fixed value for the whole
+    mission -- this is what "maneuvers every few months to change the
+    relative distance" and "different relative distances" (independent
+    schedules for different followers) mean concretely in this codebase.
+    """
+
+    def __init__(self, distances_km, interval_days, semi_major_axis_m, loop=False):
+        if not distances_km:
+            raise ValueError("SeparationSchedule needs at least one distance")
+        self.targetsRad = [d * 1000.0 / semi_major_axis_m for d in distances_km]  # [rad] arc length s = a*theta
+        self.intervalS = interval_days * 86400.0  # [s]
+        self.loop = loop
+
+    def value_at(self, t_s: float) -> float:
+        """Current target separation [rad] at mission-elapsed time t_s [s]."""
+        if self.intervalS <= 0.0 or len(self.targetsRad) == 1:
+            return self.targetsRad[0]
+        idx = int(t_s // self.intervalS)
+        idx = (idx % len(self.targetsRad)) if self.loop else min(idx, len(self.targetsRad) - 1)
+        return self.targetsRad[idx]
+
+
 class PhasingKeepingController(sysModel.SysModel):
     """In-plane phasing / constellation-keeping between two co-planar satellites.
 
     Holds the mean-anomaly separation between a reference satellite A and a
-    maneuvering satellite B at ``target_separation_deg`` (to within
-    ``tolerance_deg``) using a "drift-orbit" maneuver: a small, temporary
-    tangential burn changes B's semimajor axis (and hence mean motion) just
-    enough that, over ``correction_window_days`` of natural drift, the
-    accumulated mean-anomaly difference removes the phase error; a second
-    burn then restores B's nominal SMA.
+    maneuvering satellite B at a target given by ``separation_schedule``
+    (to within a *fraction* of that target -- see below) using a
+    "drift-orbit" maneuver: a small, temporary tangential burn changes B's
+    semimajor axis (and hence mean motion) just enough that, over
+    ``correction_window_days`` of natural drift, the accumulated
+    mean-anomaly difference removes the phase error; a second burn then
+    restores B's nominal SMA.
 
-    For an N-satellite plane evenly spaced in mean anomaly, instantiate one
-    of these per follower (satellites 2..N), all referencing the same chief
-    (satellite 1) with ``target_separation_deg = k * 360/N`` for the k-th
-    follower -- see ``run_constellation_mission.py``, which builds one
-    controller per (chief, follower) pair for every multi-satellite plane.
+    For an N-satellite plane, instantiate one of these per follower
+    (satellites 2..N), all referencing the same chief (satellite 1), each
+    with its own :class:`SeparationSchedule` -- see
+    ``run_constellation_mission.py``, which builds one controller per
+    (chief, follower) pair for every multi-satellite plane. Different
+    followers can run completely independent schedules (different distance
+    sequences, different reconfiguration cadences), which is how this
+    codebase represents "different relative distances" between satellites
+    on the same shared orbit rather than one fixed formation geometry.
+
+    Fractional tolerance
+    ---------------------
+    ``tolerance_fraction``/``restore_tolerance_fraction`` are fractions of
+    the *current* target separation, not fixed angles -- a fixed-degree
+    tolerance does not make sense across a schedule spanning 1000 km down
+    to 50 km (1 deg at 570 km altitude is already ~120 km, i.e. bigger than
+    the tightest target in a typical schedule). A wider fraction means
+    fewer, larger corrections (a "not too tight" deadband); a narrower one
+    means tighter formation-keeping at the cost of more frequent burns.
+    There is a genuine deltaV-vs-tightness trade here with no single
+    universally-"optimal" answer -- it depends on the actual ops concept --
+    so this is deliberately left as an easy knob to retune
+    (``mission_config.PHASING_TOLERANCE_FRACTION``) rather than hardcoded.
 
     This mirrors, at mission-design fidelity, the classic drift-orbit
     technique that a differential corrector (e.g. GMAT's Target/Vary/Achieve)
@@ -249,9 +304,9 @@ class PhasingKeepingController(sysModel.SysModel):
         name: str,
         mu: float,
         nominal_a_m: float,
-        target_separation_deg: float,
-        tolerance_deg: float,
-        restore_tolerance_deg: float,
+        separation_schedule: SeparationSchedule,
+        tolerance_fraction: float,
+        restore_tolerance_fraction: float,
         correction_window_days: float,
         max_drift_days: float,
         max_delta_a_m: float,
@@ -279,9 +334,19 @@ class PhasingKeepingController(sysModel.SysModel):
 
         self.mu = mu  # [m^3/s^2]
         self.aNom = nominal_a_m  # [m]
-        self.targetSeparationRad = np.radians(target_separation_deg)  # [rad]
-        self.tolRad = np.radians(tolerance_deg)  # [rad]
-        self.restoreTolRad = np.radians(restore_tolerance_deg)  # [rad]
+        self.separationSchedule = separation_schedule
+        self.toleranceFraction = tolerance_fraction  # [-] of the current target separation
+        self.restoreToleranceFraction = restore_tolerance_fraction  # [-] of the active maneuver's target
+        # Snapshot of the target this controller is actively maneuvering
+        # toward, taken once at IDLE -> BURN_OUT and held fixed through
+        # BURN_OUT/DRIFT/BURN_RESTORE even if the schedule ticks over to a
+        # new target mid-maneuver (reconfiguration intervals are months,
+        # a maneuver cycle is weeks, so this is a rare corner case -- but
+        # finishing the in-progress correction cleanly, rather than
+        # chasing a moving target with stale deltaA/deltaV bookkeeping, is
+        # what keeps that corner case safe instead of leaving the SMA
+        # offset stranded mid-correction).
+        self._activeTargetRad = 0.0
         self.correctionWindowS = correction_window_days * 86400.0  # [s]
         self.maxDriftS = max_drift_days * 86400.0  # [s]
         self.maxDeltaA = max_delta_a_m  # [m]
@@ -361,13 +426,19 @@ class PhasingKeepingController(sysModel.SysModel):
         _, mA = self._mean_anomaly(self.mu, rA, vA)
         _, mB = self._mean_anomaly(self.mu, rB, vB)
 
+        # The schedule's current value is what the IDLE trigger check
+        # compares against; an in-progress maneuver keeps comparing against
+        # the snapshot it started with (see _activeTargetRad in __init__).
+        scheduledTargetRad = self.separationSchedule.value_at(t)
+        referenceTargetRad = scheduledTargetRad if self.state == self.IDLE else self._activeTargetRad
+
         # error > 0 means B's phase leads the target separation (B is "too
         # far ahead" of A); error < 0 means B trails. Smoothed over one
         # orbital period to reject J2 short-period osculating-element noise
         # (see the smoothingWindowS comment in __init__) -- using the raw,
         # un-smoothed value here would make the controller chase that noise
         # once per orbit instead of real secular drift.
-        rawError = _wrap_pm_pi((mB - mA) - self.targetSeparationRad)  # [rad]
+        rawError = _wrap_pm_pi((mB - mA) - referenceTargetRad)  # [rad]
         self._errorHistory.append((t, rawError))
         while self._errorHistory and (t - self._errorHistory[0][0]) > self.smoothingWindowS:
             self._errorHistory.pop(0)
@@ -396,7 +467,11 @@ class PhasingKeepingController(sysModel.SysModel):
         thrustMag = 0.0  # [N]
 
         if self.state == self.IDLE:
-            if abs(error) > self.tolRad:
+            # Tolerance scales with the CURRENT target, not a fixed angle --
+            # see the "Fractional tolerance" note in the class docstring.
+            tolRad = self.toleranceFraction * abs(scheduledTargetRad)
+            if abs(error) > tolRad:
+                self._activeTargetRad = scheduledTargetRad
                 n = np.sqrt(self.mu / self.aNom**3)  # [rad/s] mean motion
                 # Two-body mean-motion offset from an SMA offset:
                 #   dn = -1.5 * n * (deltaA / a)
@@ -422,8 +497,9 @@ class PhasingKeepingController(sysModel.SysModel):
                 thrustMag = 0.0
 
         elif self.state == self.DRIFT:
+            restoreTolRad = self.restoreToleranceFraction * abs(self._activeTargetRad)
             overshot = np.sign(error) != self._burnSign if error != 0.0 else False
-            if abs(error) < self.restoreTolRad or overshot or (t - self._driftStartT) > self.maxDriftS:
+            if abs(error) < restoreTolRad or overshot or (t - self._driftStartT) > self.maxDriftS:
                 self.state = self.BURN_RESTORE
 
         elif self.state == self.BURN_RESTORE:

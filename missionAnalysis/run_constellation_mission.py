@@ -77,7 +77,11 @@ import os
 import numpy as np
 
 import mission_config as mc
-from constellation_controllers import AltitudeKeepingController, PhasingKeepingController
+from constellation_controllers import (
+    AltitudeKeepingController,
+    PhasingKeepingController,
+    SeparationSchedule,
+)
 import communications
 
 from Basilisk.architecture import messaging
@@ -343,14 +347,38 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         chiefA_m = chief["definition"]["a_m"]
         for followerName in members[1:]:
             follower = satellites[followerName]
-            targetSeparationDeg = (follower["definition"]["mean_anom_deg"] - chiefMeanAnomDeg) % 360.0
+            schedule = follower["definition"].get("schedule")
+            if schedule is not None:
+                # Time-varying target separation: steps through
+                # schedule["distances_km"] every schedule["interval_days"],
+                # holding at (or looping back to) the last entry -- see
+                # SeparationSchedule in constellation_controllers.py.
+                separationSchedule = SeparationSchedule(
+                    distances_km=schedule["distances_km"],
+                    interval_days=schedule["interval_days"],
+                    semi_major_axis_m=chiefA_m,
+                    loop=schedule.get("loop", False),
+                )
+            else:
+                # No schedule assigned (custom satellites, or an SSO plane
+                # with more followers than follower_schedules entries) --
+                # hold a fixed target separation for the whole mission,
+                # taken from the satellites' assigned mean-anomaly offset.
+                fixedSeparationRad = np.radians(
+                    (follower["definition"]["mean_anom_deg"] - chiefMeanAnomDeg) % 360.0
+                )
+                separationSchedule = SeparationSchedule(
+                    distances_km=[fixedSeparationRad * chiefA_m / 1000.0],
+                    interval_days=0.0,
+                    semi_major_axis_m=chiefA_m,
+                )
             phaseCtrl = PhasingKeepingController(
                 name=f"{followerName}PhaseCtrl",
                 mu=mu,
                 nominal_a_m=chiefA_m,
-                target_separation_deg=targetSeparationDeg,
-                tolerance_deg=mc.PHASING_TOLERANCE_DEG,
-                restore_tolerance_deg=mc.PHASING_RESTORE_TOLERANCE_DEG,
+                separation_schedule=separationSchedule,
+                tolerance_fraction=mc.PHASING_TOLERANCE_FRACTION,
+                restore_tolerance_fraction=mc.PHASING_RESTORE_TOLERANCE_FRACTION,
                 correction_window_days=mc.PHASING_CORRECTION_WINDOW_DAYS,
                 max_drift_days=mc.PHASING_MAX_DRIFT_DAYS,
                 max_delta_a_m=mc.PHASING_MAX_DELTA_A_M,
@@ -636,12 +664,14 @@ def _make_plots(sim):
     axes[0].set_ylabel("smoothed altitude [km]\n(dashed: nominal, dotted: deadband)")
     axes[0].legend(fontsize=8)
 
+    # No fixed +/-tolerance reference line here: the phasing tolerance is a
+    # fraction of each follower's own (possibly time-varying, per
+    # SeparationSchedule) target separation, so it differs by follower and
+    # by time rather than being one shared degree value.
     for name, phaseCtrl in sim["phaseControllers"].items():
         if phaseCtrl.tLog:
             tDays = np.array(phaseCtrl.tLog) / 86400.0
             axes[1].plot(tDays, phaseCtrl.errorDegLog, label=name)
-    axes[1].axhline(mc.PHASING_TOLERANCE_DEG, color="r", linestyle=":", linewidth=0.8)
-    axes[1].axhline(-mc.PHASING_TOLERANCE_DEG, color="r", linestyle=":", linewidth=0.8)
     axes[1].set_ylabel("mean-anomaly\nphasing error [deg]")
     if sim["phaseControllers"]:
         axes[1].legend(fontsize=8)

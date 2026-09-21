@@ -59,7 +59,7 @@ EPOCH_UTC = datetime(2028, 10, 1, 0, 0, 0)
 # SPICE-recognizable epoch string, consumed by simIncludeGravBody.createSpiceInterface()
 # and by simHelpers.timeStringToGregorianUTCMsg().
 EPOCH_SPICE_STRING = "2028 OCT 01 00:00:00.0 (UTC)"
-MISSION_DURATION_YEARS = 5  # [yr]
+MISSION_DURATION_YEARS = 3  # [yr]
 MISSION_END_UTC = EPOCH_UTC.replace(year=EPOCH_UTC.year + MISSION_DURATION_YEARS)
 MISSION_DURATION_S = (MISSION_END_UTC - EPOCH_UTC).total_seconds()  # [s]
 
@@ -114,11 +114,28 @@ G0_MPS2 = 9.80665  # [m/s^2] standard gravity, for the rocket equation (not miss
 ALT_NOMINAL_M = 570.0e3  # [m]
 A_NOMINAL_M = R_EARTH_EQ + ALT_NOMINAL_M  # [m] nominal semimajor axis
 
-SSO_SATELLITE_COUNT = 2  # [-] satellites in the shared SSO plane, evenly phased
+SSO_SATELLITE_COUNT = 3  # [-] satellites sharing the SSO plane (1 chief + 2 followers)
 SSO_INCLINATION_DEG = 97.6704  # [deg]
 SSO_ECC = 0.0011  # [-]
 SSO_AOP_DEG = 90.0  # [deg] frozen-orbit condition (nulls the J3 secular e-vector drift)
 SSO_LTDN_HOURS = 10.5  # [hr] ~10:30 local time of descending node
+
+# PLACEHOLDER reconfigurable-formation schedule, one entry per follower (so
+# SSO_SATELLITE_COUNT - 1 entries): each follower holds its own along-track
+# distance from the chief (SSO-1), stepping to the next value in
+# distances_km every interval_days (holding at the last value thereafter --
+# see constellation_controllers.SeparationSchedule). Not a real ops plan --
+# it exists to demonstrate "different relative distances that reconfigure
+# every few months, 1000 km down to 50 km" concretely; retune via
+# setup_wizard.py once the real reconfiguration plan is known. Two
+# followers deliberately run different sequences/cadences here so the
+# default constellation actually shows different satellites at different
+# relative distances at any given time, not just one pair with one moving
+# target.
+_DEFAULT_FOLLOWER_SCHEDULES = [
+    dict(distances_km=[1000.0, 500.0, 250.0, 100.0, 50.0], interval_days=90.0),
+    dict(distances_km=[500.0, 200.0, 750.0, 100.0], interval_days=120.0),
+]
 
 MIDINC_INCLINATION_DEG = 53.0  # [deg]
 # PLACEHOLDERS: no frozen-orbit / phasing spec was given for the 53 deg plane.
@@ -136,8 +153,17 @@ ALT_DEADBAND_M = 5.0e3  # [m] reboost triggers when altitude < nominal - deadban
 # -to-peak at this altitude) that would otherwise chatter the controller.
 ORBIT_PERIOD_S = 2.0 * np.pi * np.sqrt(A_NOMINAL_M**3 / MU_EARTH)  # [s]
 
-PHASING_TOLERANCE_DEG = 1.0  # [deg] trigger threshold on |mean-anomaly error|
-PHASING_RESTORE_TOLERANCE_DEG = 0.05  # [deg] "close enough, stop drifting" threshold
+# Trigger/restore tolerances are FRACTIONS of the current target separation
+# (not fixed angles): a fixed-degree tolerance doesn't scale across a
+# schedule spanning 1000 km down to 50 km -- 1 deg at 570 km altitude is
+# already ~120 km, bigger than the tightest target in a typical schedule.
+# A wider fraction means fewer, larger corrections (a "not too tight"
+# deadband, cheaper in total dV); a narrower one means tighter
+# formation-keeping at the cost of more frequent burns. There is a real
+# deltaV-vs-tightness trade here with no single "optimal" answer independent
+# of the ops concept, so this is meant to be retuned, not treated as final.
+PHASING_TOLERANCE_FRACTION = 0.10  # [-] trigger threshold, as a fraction of the current target separation
+PHASING_RESTORE_TOLERANCE_FRACTION = 0.02  # [-] "close enough, stop drifting" threshold, same units
 PHASING_CORRECTION_WINDOW_DAYS = 21.0  # [day] target time to null a fresh phasing error
 PHASING_MAX_DRIFT_DAYS = 90.0  # [day] safety cap on the drift coast phase
 PHASING_MAX_DELTA_A_M = 3000.0  # [m] safety clamp on the drift-orbit SMA offset
@@ -261,6 +287,7 @@ def _default_sso_plane() -> dict:
         ecc=SSO_ECC,
         aop_deg=SSO_AOP_DEG,
         ltdn_hours=SSO_LTDN_HOURS,
+        follower_schedules=_DEFAULT_FOLLOWER_SCHEDULES,
     )
 
 
@@ -300,14 +327,27 @@ SSO_PLANE, CUSTOM_SATELLITES, GROUND_STATIONS = _load_constellation_setup()
 
 
 def _build_satellites(sso_plane: dict, custom_satellites: list) -> list:
-    """Expand SSO_PLANE into `count` satellites evenly spaced in mean
-    anomaly (all sharing one RAAN/inclination/altitude/eccentricity, i.e.
-    one physical orbit plane) plus each independent CUSTOM_SATELLITES
-    entry. Every satellite dict carries a "plane" key: satellites sharing
-    a "plane" value are phased against each other by
+    """Expand SSO_PLANE into `count` satellites sharing one physical orbit
+    plane (RAAN/inclination/altitude/eccentricity) plus each independent
+    CUSTOM_SATELLITES entry. Every satellite dict carries a "plane" key:
+    satellites sharing a "plane" value are phased against each other by
     run_constellation_mission.py (one PhasingKeepingController per
     follower, referenced to the first satellite added to that plane as
     chief); a plane with only one member gets no phasing controller.
+
+    Within the SSO plane, the chief (k == 0) sits at mean_anom_deg=0 with
+    no schedule. Each follower (k >= 1) draws its own entry from
+    "follower_schedules" (a list of {distances_km, interval_days[, loop]}
+    dicts -- one per follower, see SeparationSchedule in
+    constellation_controllers.py): the follower's initial mean anomaly is
+    set from the first distance in its schedule, and the schedule dict
+    itself is attached under "schedule" so run_constellation_mission.py
+    can build a SeparationSchedule and step the target separation every
+    few months. This is how "different relative distances" per follower,
+    each changing over time, is represented. A follower with no matching
+    "follower_schedules" entry (list too short) falls back to even
+    spacing in mean anomaly with schedule=None, i.e. a fixed target
+    separation held for the whole mission.
     """
     satellites = []
 
@@ -315,7 +355,21 @@ def _build_satellites(sso_plane: dict, custom_satellites: list) -> list:
     if count > 0:
         sso_a_m = R_EARTH_EQ + sso_plane["altitude_km"] * 1000.0
         sso_raan_deg = raan_for_ltdn_deg(EPOCH_UTC, sso_plane["ltdn_hours"])
+        follower_schedules = sso_plane.get("follower_schedules", [])
         for k in range(count):
+            schedule = None
+            if k == 0:
+                mean_anom_deg = 0.0  # [deg] chief -- phasing reference for this plane
+            else:
+                follower_idx = k - 1
+                if follower_idx < len(follower_schedules):
+                    schedule = follower_schedules[follower_idx]
+                    initial_distance_km = schedule["distances_km"][0]  # [km]
+                    mean_anom_deg = float(
+                        np.degrees(initial_distance_km * 1000.0 / sso_a_m)
+                    ) % 360.0
+                else:
+                    mean_anom_deg = k * 360.0 / count  # [deg] no schedule given -- fall back to even spacing
             satellites.append(
                 dict(
                     name=f"SSO-{k + 1}",
@@ -325,7 +379,8 @@ def _build_satellites(sso_plane: dict, custom_satellites: list) -> list:
                     i_deg=sso_plane["inclination_deg"],
                     raan_deg=sso_raan_deg,
                     aop_deg=sso_plane["aop_deg"],
-                    mean_anom_deg=k * 360.0 / count,  # [deg] evenly spaced
+                    mean_anom_deg=mean_anom_deg,
+                    schedule=schedule,
                 )
             )
 
@@ -340,6 +395,7 @@ def _build_satellites(sso_plane: dict, custom_satellites: list) -> list:
                 raan_deg=sat["raan_deg"],
                 aop_deg=sat["aop_deg"],
                 mean_anom_deg=sat["mean_anom_deg"],
+                schedule=None,
             )
         )
 

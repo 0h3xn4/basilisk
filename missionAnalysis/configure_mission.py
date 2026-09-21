@@ -218,8 +218,8 @@ FIELDS = [
     # --- Station-keeping / phasing -----------------------------------------
     Field("--alt-deadband-km", "alt_deadband_km", "ALT_DEADBAND_M", _num, lambda x: _lit(x * 1.0e3),
           "altitude station-keeping deadband below nominal [km]"),
-    Field("--phasing-tolerance-deg", "phasing_tolerance_deg", "PHASING_TOLERANCE_DEG", _num, _lit,
-          "SSO phasing trigger threshold [deg]"),
+    Field("--phasing-tolerance-fraction", "phasing_tolerance_fraction", "PHASING_TOLERANCE_FRACTION", _num, _lit,
+          "SSO phasing trigger threshold, as a fraction of the current target separation [-, 0-1]"),
     # --- Gravity fidelity -----------------------------------------------
     Field("--earth-grav-degree", "earth_grav_degree", "EARTH_GRAV_DEGREE", lambda x: int(x), _lit,
           "Earth spherical-harmonics gravity degree/order [-]"),
@@ -246,7 +246,7 @@ _VALIDATORS = {
     "midinc_inclination_deg": lambda v: 0 <= v <= 180 or "must be in [0, 180] deg",
     "midinc_ecc": lambda v: 0 <= v < 1 or "must be in [0, 1) (elliptical orbit)",
     "alt_deadband_km": lambda v: v > 0 or "must be > 0",
-    "phasing_tolerance_deg": lambda v: v > 0 or "must be > 0",
+    "phasing_tolerance_fraction": lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]",
     "earth_grav_degree": lambda v: 0 <= v <= 360 or "must be a plausible spherical-harmonics degree",
     "mission_years": lambda v: v > 0 or "must be > 0",
 }
