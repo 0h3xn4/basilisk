@@ -121,6 +121,27 @@ CONTROL_TASK_RATE_S = 300.0  # [s]
 # spacecraft. Raise toward 20 once run time on your hardware is characterized.
 EARTH_GRAV_DEGREE = 10
 
+# ---------------------------------------------------------------------------
+# Communications / on-board data handling (PLACEHOLDERS: no EO payload data
+# rate, downlink link budget, on-board storage capacity, or ground network
+# was specified in the mission statement). Ground station locations are
+# real-world reference points chosen for plausibility (a high-latitude site
+# sees an SSO pass almost every orbit; Boulder matches the placeholder site
+# already used elsewhere in Basilisk's own examples) -- not a claim about
+# the actual ground network for this mission.
+# ---------------------------------------------------------------------------
+GROUND_STATIONS = [
+    dict(name="Svalbard", lat_deg=78.2300, lon_deg=15.3894, alt_m=0.0, min_elevation_deg=5.0),
+    dict(name="Boulder", lat_deg=40.009971, lon_deg=-105.243895, alt_m=1624.0, min_elevation_deg=10.0),
+]
+GROUND_STATION_MAX_RANGE_M = 1.0e9  # [m] effectively unlimited slant-range cutoff
+
+EO_INSTRUMENT_BAUD_RATE_BPS = 50.0e6  # [bit/s] PLACEHOLDER EO payload data-generation rate, sunlit-only
+DOWNLINK_BAUD_RATE_BPS = 150.0e6  # [bit/s] PLACEHOLDER X-band downlink rate
+DOWNLINK_PACKET_SIZE_BITS = 1.0e6  # [bit] PLACEHOLDER downlink packet/buffer size
+DOWNLINK_NUM_BUFFERS = 2  # [-] PLACEHOLDER
+DATA_STORAGE_CAPACITY_BITS = 256.0e9  # [bit] PLACEHOLDER on-board storage capacity (~32 GB)
+
 # Eclipse threshold: shadow factor above this counts as "in sunlight" for
 # thrust-enable gating (electric propulsion pauses off battery-only power).
 ECLIPSE_SUNLIT_THRESHOLD = 0.99  # [-]

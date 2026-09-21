@@ -129,6 +129,30 @@ profile. It's included for GMAT-comparability if you want it, not because
 it matters at this fidelity level. Pass `enable_relativistic_correction=True`
 to `build_simulation()`.
 
+### 5. Communications / data downlink (Vizard comm rings)
+
+Added on top of the original design: each satellite gets an EO instrument
+(`simpleInstrument`, data generation gated on/off by the existing eclipse
+module -- an EO payload only images sunlit ground), an on-board storage
+unit (`partitionedStorageUnit`), and a downlink transmitter
+(`spaceToGroundTransmitter`) with access to a small placeholder ground
+network (`GroundLocation`), following the same wiring as Basilisk's own
+`scenarioGroundDownlink` example. This is standard onboard-data-handling
+infrastructure, independent of the orbital-dynamics-only vs. 6-DOF choice
+in decision #1 above -- it needs no attitude model.
+
+When `--vizard`/`--vizard-save` is enabled, each satellite's antenna is
+rendered as a `vizInterface.Transceiver` fed by *both* the instrument's and
+the transmitter's data-node messages. Basilisk's own convention (see
+`vizInterface.cpp`) is: a data node reporting a positive baud rate ("data
+provided") shows as receiving (purple rings), negative ("data consumed")
+shows as sending (green rings). The EO instrument is always positive when
+active and the transmitter is always negative, so this reproduces exactly
+the two-color behavior described in the feature request, plus a
+`GenericStorage` HUD panel per satellite tracking the storage level those
+two events raise and lower. See `communications.py`'s module docstring for
+the full mechanism.
+
 ## Files
 
 | File | Purpose |
@@ -136,6 +160,7 @@ to `build_simulation()`.
 | `mission_config.py` | All mission constants, orbit design (incl. the RAAN-for-LTDN solve), satellite definitions. Pure `numpy`/stdlib, importable without Basilisk. |
 | `generate_space_weather_placeholder.py` | Builds a synthetic multi-year F10.7/Ap table (CelesTrak CSV layout) covering the mission window -- see below for why this has to be synthetic. |
 | `constellation_controllers.py` | The two `SysModel` controllers (altitude keeping, phasing keeping). |
+| `communications.py` | Per-satellite EO data generation, on-board storage, ground downlink, and the eclipse-gated instrument duty cycle -- drives the Vizard comm-rings visualization. |
 | `run_constellation_mission.py` | Builds and runs the full Basilisk simulation; `python3 run_constellation_mission.py` is the entry point. |
 | `data/placeholder_space_weather.csv` | Generated output of the space-weather script (regenerate with `python3 generate_space_weather_placeholder.py`). |
 
@@ -234,3 +259,15 @@ a few this implementation had to introduce:
   It has been checked line-by-line against the actual module source in this
   checkout, but treat the first `--years 0.1` run as the real validation
   step, not this document.
+- **Communications/data-handling values are all placeholders**: EO payload
+  data rate (50 Mbps), downlink rate (150 Mbps), on-board storage capacity
+  (~32 GB), and the two-station ground network (Svalbard + Boulder) are all
+  guesses for plausibility, not a real link budget or ground-segment plan.
+  (`mission_config.GROUND_STATIONS`, `EO_INSTRUMENT_BAUD_RATE_BPS`,
+  `DOWNLINK_BAUD_RATE_BPS`, `DATA_STORAGE_CAPACITY_BITS`)
+- **Instrument antenna placement/geometry for Vizard** (`transceiver.r_SB_B`,
+  `fieldOfView`, `normalVector` in `run_constellation_mission.py`) is a
+  placeholder -- there is no bus layout in this study, and since attitude
+  isn't modeled the antenna's orientation on screen isn't physically
+  meaningful anyway; only the ring color/timing (from the data-node baud
+  sign) is.
