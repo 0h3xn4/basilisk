@@ -227,6 +227,49 @@ it:
   live viewer to watch frame by frame. The saved-file path is the intended
   way to inspect this mission in Vizard.
 
+**Vizard itself is a separate application, not part of the Basilisk Python
+package.** Download and install it once for your platform -- see
+`docs/source/Vizard/VizardDownload.rst` in this repo for the current direct
+download links (macOS/Linux/Windows).
+
+To actually watch a run:
+
+```bash
+python3 run_constellation_mission.py --years 0.05 --vizard-save mission_playback
+```
+
+This writes `_VizFiles/mission_playback_UnityViz.bin` next to the script
+(the run's final message prints the exact path). Then:
+
+1. Open the Vizard app.
+2. Its startup panel has a **Select** button -- click it and navigate to
+   that `.bin` file.
+3. Click **Start Visualization**.
+4. Use the slider at the bottom to scrub through the run, the play/pause
+   button to run it, and the +/- buttons to change playback speed. Vizard
+   starts in spacecraft-centric view; zoom out (or double-click a
+   spacecraft) to switch to planet-centric view, which is what shows the
+   full constellation and its ground tracks around Earth -- probably what
+   you want here.
+
+On macOS you can skip steps 1-2 and launch straight into a file from the
+terminal:
+
+```bash
+open /Applications/Vizard.app --args -loadFile "$PWD/_VizFiles/mission_playback_UnityViz.bin"
+```
+
+(Linux/Windows Vizard builds accept the same `-loadFile <path>` argument;
+launch the extracted binary/`.exe` directly with it instead of `open`.)
+
+A version note (only used because it's what's committed here): a bare
+filename like `--vizard-save mission_playback` used to resolve to an
+absolute path at the filesystem root inside `vizSupport` (`/_VizFiles/...`,
+which fails to write with a permission error) -- `build_simulation()` now
+anchors a bare name to the current directory automatically, so the command
+above just works. If you're on an older pull of this script, either update
+or pass a path with a directory component (`./mission_playback`).
+
 ### Changing spacecraft/orbit parameters
 
 `mission_config.py` is the single source of truth for every spacecraft and

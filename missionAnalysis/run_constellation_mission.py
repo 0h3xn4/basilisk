@@ -377,6 +377,14 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         if not vizSupport.vizFound:
             print("vizSupport: this Basilisk build does not include the Vizard interface; skipping.")
         else:
+            if viz_save_file is not None and not os.path.isabs(viz_save_file) and not os.path.dirname(viz_save_file):
+                # vizSupport.enableUnityVisualization() builds the output
+                # path as f"{os.path.dirname(saveFile)}/_VizFiles/...", so a
+                # bare name with no directory component (dirname == "")
+                # silently resolves to an ABSOLUTE path at the filesystem
+                # root ("/_VizFiles/...") -- which fails to write on any
+                # normal system. Anchor it to the current directory instead.
+                viz_save_file = os.path.abspath(viz_save_file)
             scObjList = [sat["scObject"] for sat in satellites.values()]
             orbitColors = [vizSupport.toRGBA255(c) for c in ("teal", "orange", "purple")]
 
@@ -465,6 +473,7 @@ def build_simulation(mission_years=mc.MISSION_DURATION_YEARS, earth_grav_degree=
         storageRecorders=storageRecorders,
         stopTimeS=stopTimeS,
         viz=viz,
+        viz_save_file=viz_save_file,  # normalized (see the os.path.abspath note above)
     )
 
 
@@ -533,9 +542,12 @@ def run(mission_years=mc.MISSION_DURATION_YEARS, make_plots=True, enable_vizard=
     scSim.ExecuteSimulation()
 
     print("Simulation complete.")
-    if sim["viz"] is not None and viz_save_file:
-        print(f"Wrote Vizard playback file under {os.path.dirname(viz_save_file) or '.'}/_VizFiles/ "
-              f"(open it with the Vizard app)")
+    if sim["viz"] is not None and sim["viz_save_file"]:
+        savedTo = sim["viz_save_file"]
+        binName = os.path.basename(savedTo) + "_UnityViz.bin"
+        print(f"Wrote Vizard playback file: {os.path.dirname(savedTo)}/_VizFiles/{binName}")
+        print("Open it in the Vizard app (Select button on the startup panel, or "
+              f"`open /Applications/Vizard.app --args -loadFile {os.path.dirname(savedTo)}/_VizFiles/{binName}` on macOS).")
     for name, ctrl in sim["altControllers"].items():
         # burnLog is decimated telemetry (see AltitudeKeepingController), so
         # this duty cycle is an approximation, not an exact on-time fraction.
