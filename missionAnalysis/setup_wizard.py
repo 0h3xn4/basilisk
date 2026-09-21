@@ -22,16 +22,21 @@ hand-editing ``mission_config.py`` or using ``configure_mission.py``'s CLI
 flags. Prompts (Enter accepts the default shown in ``[brackets]``) for:
 
 * Epoch and mission duration
-* Spacecraft bus (mass, Cd, Cr, drag/SRP areas, propellant) and electric
-  propulsion (thrust, Isp)
+* Spacecraft bus (mass, Cd, Cr, drag/SRP areas) and electric propulsion
+  (a free-text system/thruster description, thrust, Isp, propellant mass,
+  and the sunlit shadow-factor threshold that gates both thrust-enable and
+  the EO instrument's duty cycle)
 * The SSO constellation plane: altitude, inclination, eccentricity, AOP,
-  local time of descending node, and satellite COUNT (evenly phased in
-  mean anomaly; each gets independent altitude station-keeping, and for
-  count > 1, in-plane phasing against a chief satellite)
+  local time of descending node, and satellite COUNT (each gets independent
+  altitude station-keeping, and for count > 1, in-plane phasing against a
+  chief satellite); each follower additionally gets its own separation
+  schedule -- a list of target distances from the chief [km] stepped every
+  few months, so followers can sit at different, time-varying separations
 * Any number of additional standalone satellites, each with its own orbit
 * Any number of ground stations (with a couple of real-world presets, or
   fully custom lat/lon/altitude/elevation-mask)
-* Station-keeping deadband, phasing tolerance, Earth gravity fidelity
+* Station-keeping deadband, phasing tolerance (as a fraction of the current
+  target separation), Earth gravity fidelity
 
 Run it with no arguments::
 
@@ -128,6 +133,27 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
         print("  please answer y or n")
 
 
+def ask_float_list(prompt: str, default: list, validator=None) -> list:
+    default_str = ",".join(str(v) for v in default)
+    while True:
+        raw = input(f"{prompt} [{default_str}]: ").strip()
+        raw = raw if raw else default_str
+        try:
+            values = [float(x.strip()) for x in raw.split(",") if x.strip()]
+        except ValueError:
+            print("  please enter comma-separated numbers, e.g. 1000,500,250,100,50")
+            continue
+        if not values:
+            print("  need at least one value")
+            continue
+        if validator is not None:
+            ok = validator(values)
+            if ok is not True:
+                print(f"  {ok}")
+                continue
+        return values
+
+
 # ---------------------------------------------------------------------------
 # Sections
 # ---------------------------------------------------------------------------
@@ -150,18 +176,63 @@ def ask_bus_and_propulsion():
     srp_coeff = ask_float("SRP reflectivity coefficient Cr [-]", mc.SRP_COEFF, lambda v: v > 0 or "must be > 0")
     drag_area = ask_float("Drag cross-sectional area [m^2]", mc.DRAG_AREA_M2, lambda v: v > 0 or "must be > 0")
     srp_area = ask_float("SRP cross-sectional area [m^2]", mc.SRP_AREA_M2, lambda v: v > 0 or "must be > 0")
+
+    section("Electric propulsion")
+    propulsion_type = ask(
+        "Thruster/propulsion system description (for your own records -- doesn't affect the simulation)",
+        mc.PROPULSION_TYPE,
+    )
+    thrust_mn = ask_float("Thrust [mN]", mc.THRUST_N * 1000.0, lambda v: v > 0 or "must be > 0")
+    isp_s = ask_float("Specific impulse Isp [s]", mc.ISP_S, lambda v: v > 0 or "must be > 0")
     propellant = ask_float(
         "Propellant mass, beginning-of-life [kg]", mc.PROPELLANT_MASS_BOL_KG, lambda v: v >= 0 or "must be >= 0"
     )
-
-    section("Electric propulsion")
-    thrust_mn = ask_float("Thrust [mN]", mc.THRUST_N * 1000.0, lambda v: v > 0 or "must be > 0")
-    isp_s = ask_float("Specific impulse Isp [s]", mc.ISP_S, lambda v: v > 0 or "must be > 0")
+    eclipse_sunlit_threshold = ask_float(
+        "Sunlit shadow-factor threshold [-, 0-1] (gates both thrust-enable and the EO "
+        "instrument's duty cycle -- higher means less of a partial-shadow margin before "
+        "treating the spacecraft as eclipsed)",
+        mc.ECLIPSE_SUNLIT_THRESHOLD, lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]",
+    )
 
     return dict(
         dry_mass=dry_mass, drag_coeff=drag_coeff, srp_coeff=srp_coeff, drag_area=drag_area,
-        srp_area=srp_area, propellant=propellant, thrust_mn=thrust_mn, isp_s=isp_s,
+        srp_area=srp_area, propulsion_type=propulsion_type, thrust_mn=thrust_mn, isp_s=isp_s,
+        propellant=propellant, eclipse_sunlit_threshold=eclipse_sunlit_threshold,
     )
+
+
+def ask_follower_schedules(count: int, current: dict) -> list:
+    # One schedule per follower (the plane's 2nd..count-th satellite); the
+    # first satellite (the chief) is left unmaneuvered for phasing and has
+    # no schedule of its own. Each follower's along-track separation from
+    # the chief steps through its own list of distances every
+    # interval_days, holding at the last one once the list is exhausted --
+    # this is how "maneuvers every few months, changing relative distance,
+    # order of 1000km to 50km, different [per-follower] relative distances"
+    # is modeled (see SeparationSchedule in constellation_controllers.py).
+    section("SSO follower separation schedules")
+    print("Each follower steps through its own list of target separations from the chief,")
+    print("holding `interval_days` at each before stepping to the next (holds at the last")
+    print("one for good after the list ends). Separations are along-track, in km.")
+    existing = current.get("follower_schedules", []) if IS_REEDIT else []
+    fallback_defaults = mc._DEFAULT_FOLLOWER_SCHEDULES
+    schedules = []
+    for i in range(count - 1):
+        print(f"\n-- Follower SSO-{i + 2} (relative to chief SSO-1) --")
+        prior = existing[i] if i < len(existing) else None
+        fallback = fallback_defaults[i] if i < len(fallback_defaults) else fallback_defaults[-1]
+        default_distances = prior["distances_km"] if prior else fallback["distances_km"]
+        default_interval = prior["interval_days"] if prior else fallback["interval_days"]
+        distances_km = ask_float_list(
+            "  Target separation distances, in order [km]", default_distances,
+            lambda vs: all(v > 0 for v in vs) or "all distances must be > 0",
+        )
+        interval_days = ask_float(
+            "  Days to hold each distance before stepping to the next", default_interval,
+            lambda v: v > 0 or "must be > 0",
+        )
+        schedules.append(dict(distances_km=distances_km, interval_days=interval_days))
+    return schedules
 
 
 def ask_sso_plane():
@@ -173,14 +244,16 @@ def ask_sso_plane():
     # exists yet, so this is correct either way -- re-editing or not.
     current = mc.SSO_PLANE
     section("Sun-synchronous (SSO) constellation plane")
-    print("Satellites in this plane share one orbit, evenly spaced in mean anomaly.")
-    print("Each gets independent altitude station-keeping; with more than one satellite,")
-    print("each also gets in-plane phasing against the first satellite (the chief).")
+    print("Satellites in this plane share one orbit (same altitude/inclination/eccentricity/AOP).")
+    print("The first satellite is the unmaneuvered phasing chief; each other satellite (follower)")
+    print("gets independent altitude station-keeping plus its own in-plane separation schedule,")
+    print("so followers can be spaced at different, time-varying distances from the chief.")
     count = ask_int("Number of satellites in this plane (0 for none)", current["count"],
                      lambda v: v >= 0 or "must be >= 0")
     if count == 0:
         return dict(count=0, altitude_km=current["altitude_km"], inclination_deg=current["inclination_deg"],
-                    ecc=current["ecc"], aop_deg=current["aop_deg"], ltdn_hours=current["ltdn_hours"])
+                    ecc=current["ecc"], aop_deg=current["aop_deg"], ltdn_hours=current["ltdn_hours"],
+                    follower_schedules=[])
     altitude_km = ask_float("Altitude [km]", current["altitude_km"], lambda v: v > 100 or "must be > 100 km")
     inclination_deg = ask_float("Inclination [deg]", current["inclination_deg"],
                                  lambda v: 0 <= v <= 180 or "must be in [0, 180]")
@@ -189,8 +262,9 @@ def ask_sso_plane():
                          lambda v: 0 <= v < 360 or "must be in [0, 360)")
     ltdn_hours = ask_float("Local time of descending node [hr, 0-24]", current["ltdn_hours"],
                             lambda v: 0 <= v < 24 or "must be in [0, 24)")
+    follower_schedules = ask_follower_schedules(count, current) if count > 1 else []
     return dict(count=count, altitude_km=altitude_km, inclination_deg=inclination_deg, ecc=ecc,
-                aop_deg=aop_deg, ltdn_hours=ltdn_hours)
+                aop_deg=aop_deg, ltdn_hours=ltdn_hours, follower_schedules=follower_schedules)
 
 
 def ask_custom_satellites(sso_count: int):
@@ -268,11 +342,13 @@ def ask_advanced():
     section("Station-keeping and mission fidelity")
     alt_deadband_km = ask_float("Altitude station-keeping deadband [km]", mc.ALT_DEADBAND_M / 1000.0,
                                  lambda v: v > 0 or "must be > 0")
-    phasing_tolerance_deg = ask_float("Phasing trigger tolerance [deg]", mc.PHASING_TOLERANCE_DEG,
-                                       lambda v: v > 0 or "must be > 0")
+    phasing_tolerance_fraction = ask_float(
+        "Phasing trigger tolerance, as a fraction of the current target separation [-, e.g. 0.10 = 10%]",
+        mc.PHASING_TOLERANCE_FRACTION, lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]",
+    )
     grav_degree = ask_int("Earth gravity spherical-harmonics degree/order", mc.EARTH_GRAV_DEGREE,
                            lambda v: 0 <= v <= 360 or "must be a plausible degree")
-    return alt_deadband_km, phasing_tolerance_deg, grav_degree
+    return alt_deadband_km, phasing_tolerance_fraction, grav_degree
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +370,7 @@ def main() -> int:
         return 1
 
     ground_stations = ask_ground_stations()
-    alt_deadband_km, phasing_tolerance_deg, grav_degree = ask_advanced()
+    alt_deadband_km, phasing_tolerance_fraction, grav_degree = ask_advanced()
 
     # --- Write the structural config ---
     setup = dict(sso_plane=sso_plane, custom_satellites=custom_satellites, ground_stations=ground_stations)
@@ -314,11 +390,13 @@ def main() -> int:
         "--srp-coeff", str(bus["srp_coeff"]),
         "--drag-area-m2", str(bus["drag_area"]),
         "--srp-area-m2", str(bus["srp_area"]),
-        "--propellant-kg", str(bus["propellant"]),
+        "--propulsion-type", bus["propulsion_type"],
         "--thrust-mn", str(bus["thrust_mn"]),
         "--isp-s", str(bus["isp_s"]),
+        "--propellant-kg", str(bus["propellant"]),
+        "--eclipse-sunlit-threshold", str(bus["eclipse_sunlit_threshold"]),
         "--alt-deadband-km", str(alt_deadband_km),
-        "--phasing-tolerance-deg", str(phasing_tolerance_deg),
+        "--phasing-tolerance-fraction", str(phasing_tolerance_fraction),
         "--earth-grav-degree", str(grav_degree),
     ]
     print("\nApplying scalar settings via configure_mission.py...")

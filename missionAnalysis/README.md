@@ -3,10 +3,13 @@
 A multi-year Earth-observation constellation mission-analysis simulation
 built on Basilisk. Originally designed to be comparable to a companion GMAT
 script (same mission design: an SSO pair + a mid-inclination satellite, same
-bus, same propulsion, same station-keeping/phasing logic) -- that's still the
-default configuration, but the constellation's satellite count, individual
-orbits, and ground-station network are all now configurable; see
-`setup_wizard.py` under **Changing spacecraft/orbit parameters** below.
+bus, same propulsion, same station-keeping/phasing logic); the default
+configuration has since grown to a 3-satellite SSO plane (1 chief + 2
+followers, each maneuvering to its own time-varying along-track separation
+from the chief -- see **Reconfigurable formation flying** below) per updated
+mission requirements. The constellation's satellite count, individual orbits,
+and ground-station network are all configurable; see `setup_wizard.py` under
+**Changing spacecraft/orbit parameters** below.
 
 ## Architecture decisions
 
@@ -60,7 +63,15 @@ like any compiled module:
   single closed-form calculation rather than an iterative solve, but because
   the controller keeps re-evaluating for the rest of the run, the *sequence*
   of corrections is still closed-loop at the mission timescale -- residual
-  error from one correction just triggers the next.
+  error from one correction just triggers the next. The *target* separation
+  is not fixed for the whole mission: it comes from a `SeparationSchedule`
+  (also in `constellation_controllers.py`) that steps through a list of
+  distances every few months and holds at the last one, so a follower can be
+  commanded to a new relative distance mid-mission without restarting the
+  controller. The trigger/restore thresholds are likewise a *fraction* of
+  the current target separation rather than a fixed angle, since a fixed
+  threshold that's sensible at 1000 km of separation is absurdly loose at 50
+  km (see **Reconfigurable formation flying** below).
 
 Both controllers are self-contained, documented, and intentionally simple
 enough to retune (deadbands, correction windows, thrust arbitration policy)
@@ -72,7 +83,7 @@ every tick and stands down (holding its own state/bookkeeping) whenever
 altitude keeping is actively burning -- orbit-safety station-keeping wins,
 phasing just waits.
 
-### 3. Keeping a 5-year x 3-spacecraft run tractable
+### 3. Keeping a 3-year x 4-spacecraft run tractable
 
 The key structural decision is **decoupling the fast numerical integration
 from the (comparatively expensive) Python control logic**, via two Basilisk
@@ -90,7 +101,7 @@ processes running at two different rates:
   much smaller step size to get.
 * A **coarse control process** (default 300 s task rate) holds only the two
   Python controllers, i.e. the only code that pays a real per-call Python
-  overhead. At 300 s over 5 years that's ~526,000 calls per controller --
+  overhead. At 300 s over 3 years that's ~316,000 calls per controller --
   perfectly tractable -- versus tens of millions if control logic ran on the
   fast task.
 
@@ -98,8 +109,8 @@ Everything else that keeps this affordable is really just consequences of
 that split:
 
 * Controller telemetry (for the summary plot) is further decimated
-  (`log_decimation`, default 12 -> hourly) so 5 years of Python-side lists
-  stay at tens of thousands of points instead of ~500K per satellite.
+  (`log_decimation`, default 12 -> hourly) so 3 years of Python-side lists
+  stay at tens of thousands of points instead of ~300K per satellite.
 * Trajectory state recorders run on their own even-coarser task (hourly) for
   the same reason -- they're for post-run plots/exports, not control.
 * Earth gravity defaults to degree/order 10 (mission statement's low end of
@@ -118,7 +129,7 @@ against the actual installed-module source (grep'd APIs, matched against
 existing `examples/*.py` usage patterns) but not executed end to end. Build
 Basilisk (`pip install .` from the repo root, or use the project's Docker
 image) and run a short `--years 0.1` smoke test before trusting a full
-5-year run.
+3-year run.
 
 ### 4. Relativistic correction
 
@@ -127,7 +138,7 @@ standard 1PN/Schwarzschild geodesic acceleration term) but **off by
 default**. Basilisk has no built-in module for it, so enabling it adds
 another per-control-tick Python force computation -- cheap, since it reuses
 the existing coarse control cadence, but still: its effect at 570 km LEO
-over 5 years is on the order of centimeters to a few meters of secular
+over 3 years is on the order of centimeters to a few meters of secular
 drift, dwarfed by the uncertainty already coming from the placeholder drag
 coefficient, SRP coefficient, and (especially) the synthetic space-weather
 profile. It's included for GMAT-comparability if you want it, not because
@@ -157,6 +168,45 @@ the two-color behavior described in the feature request, plus a
 `GenericStorage` HUD panel per satellite tracking the storage level those
 two events raise and lower. See `communications.py`'s module docstring for
 the full mechanism.
+
+### 6. Reconfigurable formation flying (time-varying separation, fractional tolerance)
+
+Added per updated mission requirements ("maintain roughly the same orbit, not
+super tight; different relative distances per satellite; reconfigure every
+few months, order of 1000 km down to 50 km; a slow, low-thrust reconfiguration
+is fine; no payload-activity conflict"):
+
+* **`SeparationSchedule`** (`constellation_controllers.py`) replaces the old
+  single fixed target separation per follower with a list of target distances
+  [km] plus a hold interval [days]: `value_at(t)` steps through the list as
+  mission-elapsed time advances, holding at the last entry once the list runs
+  out (or looping, if `loop=True`). `PhasingKeepingController` reads its
+  target from a `SeparationSchedule` every tick rather than from a constant,
+  so a follower drifts to a new commanded distance on its own schedule with
+  no code change or restart needed mid-mission. Each follower in the SSO
+  plane gets its own independent `SeparationSchedule`, which is how
+  "different relative distances" (plural, per-satellite) is represented --
+  see `mission_config._build_satellites()` and
+  `constellation_setup.json`'s `sso_plane.follower_schedules`.
+* **Fractional, not fixed-angle, tolerance**: `PHASING_TOLERANCE_FRACTION`/
+  `PHASING_RESTORE_TOLERANCE_FRACTION` scale with the *current* target
+  separation instead of being a fixed degree value -- see the rationale in
+  **Assumptions and placeholders to replace** below. This is also the "not
+  super tight, a bit of offset is better for maintenance" requirement in
+  practice: a 10%-of-target trigger threshold is deliberately loose, and the
+  same closed-form drift-orbit maneuver used for ordinary station-keeping
+  (Architecture decision #2) handles a 1000 km -> 50 km reconfiguration the
+  same way it handles a small correction, just with a larger semimajor-axis
+  offset and (per `PHASING_CORRECTION_WINDOW_DAYS`) a longer, low-thrust
+  drift -- consistent with "it's ok if it takes weeks, not required high
+  thrust."
+* **No payload-activity conflict by construction**: the EO instrument's duty
+  cycle (`communications.InstrumentEclipseGate`) is gated only by eclipse/
+  sunlit state, never by thruster state, and the phasing/altitude
+  controllers' thrust arbitration (Architecture decision #2's "actuator
+  conflict" note) is likewise independent of instrument activity. "We can do
+  maneuvers without PL activity" required no code change -- the two were
+  already decoupled.
 
 ## Files
 
@@ -229,8 +279,8 @@ it:
   inertial-frame force, not through a body-mounted `thrusterDynamicEffector`,
   so there's no thruster geometry for Vizard to render anyway).
 * The vizInterface module runs on the same hourly `logTask` as the state
-  recorders, not the fast 60 s dynamics task -- a full 5-year run at 60 s
-  would be ~2.6M frames per spacecraft, impractical to write or play back.
+  recorders, not the fast 60 s dynamics task -- a full 3-year run at 60 s
+  would be ~1.6M frames per spacecraft, impractical to write or play back.
   Hourly sampling is coarse for Vizard's usual few-orbit-scale use case but
   fine for checking overall constellation/phasing geometry and ground
   tracks. For a smooth, detailed playback, run a short `--years` window
@@ -354,11 +404,18 @@ the *fallback defaults* used if you later delete that file.
 These mirror the placeholders already flagged in the mission statement, plus
 a few this implementation had to introduce:
 
-* **Propellant budget (20 kg BOL, all three satellites)** -- not specified in
-  the mission statement (only dry mass was). Sized generously for a 5-year
-  LEO SSO station-keeping + phasing timeline at 10 mN/1500 s Isp; replace
-  once a real propulsion budget/tank sizing exists.
+* **Propellant budget (20 kg BOL, all four satellites)** -- not specified in
+  the mission statement (only dry mass was). Sized generously for a 3-year
+  LEO SSO station-keeping + phasing timeline at 10 mN/1500 s Isp, including
+  the reconfiguration maneuvers described below; replace once a real
+  propulsion budget/tank sizing exists.
   (`mission_config.PROPELLANT_MASS_BOL_KG`)
+* **`PROPULSION_TYPE`** ("Hall-effect thruster (placeholder pending hardware
+  selection)") is a free-text label you can set via `setup_wizard.py` or
+  `configure_mission.py --propulsion-type`, carried only into
+  `mission_config.py`'s own text -- it documents which hardware assumption
+  `THRUST_N`/`ISP_S`/`PROPELLANT_MASS_BOL_KG` correspond to but does not
+  itself affect the simulation.
 - **Mid-inclination satellite orbit** -- RAAN, eccentricity, and AOP are all
   placeholders (`0`, `0`, `0`) per the mission statement's own "currently a
   placeholder" / "coverage-driven" framing. (`mission_config.MIDINC_*`)
@@ -395,6 +452,26 @@ a few this implementation had to introduce:
   cap** (90 days) are reasonable-guess tuning parameters, not derived from a
   requirement; adjust in `mission_config.py` if the real ops concept has a
   target response time.
+- **`_DEFAULT_FOLLOWER_SCHEDULES`** (the two followers' default separation
+  schedules: 1000/500/250/100/50 km every 90 days, and 500/200/750/100 km
+  every 120 days) is a made-up example to demonstrate different, independently
+  time-varying relative distances per follower -- it is not a real ops plan.
+  Set the real schedule per follower via `setup_wizard.py` (prompted right
+  after the SSO plane's orbital elements) or by hand-editing
+  `constellation_setup.json`'s `sso_plane.follower_schedules`.
+  (`mission_config._DEFAULT_FOLLOWER_SCHEDULES`)
+- **`PHASING_TOLERANCE_FRACTION`** (0.10) and **`PHASING_RESTORE_TOLERANCE_FRACTION`**
+  (0.02) are reasonable-guess tuning parameters, not derived from a
+  requirement. They're expressed as a *fraction of the current target
+  separation* rather than a fixed angle/distance specifically because the
+  mission now spans a 1000 km-50 km range of target separations: a fixed
+  threshold sized for 1000 km (e.g. ~1 deg, ~82 km at 570 km altitude) would
+  never be tight enough to trigger a correction once a follower is holding
+  50 km, while one sized for 50 km would fire constantly at 1000 km. A
+  fractional threshold scales with whatever the current target happens to
+  be, which is also a reasonable proxy for "not super tight, a bit of offset
+  is better for maintenance" -- tighten/loosen per satellite, or replace with
+  a real dV-vs-tightness optimum, once the ops concept is final.
 - **First real `--years 0.1` run surfaced a phasing-controller bug, now
   fixed**: the phasing error was computed from *osculating* mean anomaly,
   which carries J2 short-period oscillation that two satellites 180 deg
