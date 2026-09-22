@@ -53,12 +53,14 @@ from ..schema.scenario import (
     SUPPORTED_CENTRAL_BODIES,
     SUPPORTED_INTEGRATORS,
     GravityConfig,
+    MonteCarloConfig,
     Scenario,
     ScenarioValidationError,
     SimSettings,
     SpaceWeatherConfig,
 )
 from .ground_station_editor import GroundStationListWidget
+from .monte_carlo_editor import MonteCarloGroupWidget
 from .spacecraft_editor import SpacecraftListWidget
 
 
@@ -89,6 +91,7 @@ class ScenarioEditorWidget(QWidget):
         layout.addWidget(self._build_space_weather_group())
         layout.addWidget(self._build_spacecraft_group())
         layout.addWidget(self._build_ground_station_group())
+        layout.addWidget(self._build_monte_carlo_group())
         layout.addStretch(1)
 
         self.validation_label = QLabel()
@@ -229,6 +232,7 @@ class ScenarioEditorWidget(QWidget):
         layout = QVBoxLayout(group)
         self.spacecraft_list = SpacecraftListWidget()
         self.spacecraft_list.changed.connect(self.changed)
+        self.spacecraft_list.changed.connect(self._refresh_monte_carlo_spacecraft_names)
         layout.addWidget(self.spacecraft_list)
         return group
 
@@ -239,6 +243,15 @@ class ScenarioEditorWidget(QWidget):
         self.ground_station_list.changed.connect(self.changed)
         layout.addWidget(self.ground_station_list)
         return group
+
+    def _build_monte_carlo_group(self) -> MonteCarloGroupWidget:
+        self.monte_carlo_group = MonteCarloGroupWidget()
+        self.monte_carlo_group.changed.connect(self.changed)
+        self._refresh_monte_carlo_spacecraft_names()
+        return self.monte_carlo_group
+
+    def _refresh_monte_carlo_spacecraft_names(self) -> None:
+        self.monte_carlo_group.set_spacecraft_names([sc.name for sc in self.spacecraft_list.to_list()])
 
     # -- (dis)assembly -------------------------------------------------------
     def to_scenario(self) -> Scenario:
@@ -266,6 +279,7 @@ class ScenarioEditorWidget(QWidget):
             ),
             spacecraft=self.spacecraft_list.to_list(),
             ground_stations=self.ground_station_list.to_list(),
+            monte_carlo=self.monte_carlo_group.to_dataclass(),
         )
         scenario.validate()
         return scenario
@@ -288,6 +302,8 @@ class ScenarioEditorWidget(QWidget):
 
         self.spacecraft_list.from_list(scenario.spacecraft)
         self.ground_station_list.from_list(scenario.ground_stations)
+        self._refresh_monte_carlo_spacecraft_names()
+        self.monte_carlo_group.from_dataclass(scenario.monte_carlo)
 
         self.revalidate()
 

@@ -31,3 +31,16 @@ def test_run_without_basilisk_emits_failed(qtbot):
     with qtbot.waitSignal(worker.failed, timeout=5000) as blocker:
         worker.start()
     assert "Basilisk is not installed" in blocker.args[0]
+
+
+@pytest.mark.skipif(_BASILISK_AVAILABLE, reason="this test's premise is specifically that Basilisk is unavailable")
+def test_monte_carlo_worker_without_basilisk_emits_failed(qtbot, tmp_path):
+    from missionstudio.gui.run_worker import MonteCarloWorker
+    from missionstudio.schema.scenario import MonteCarloConfig
+
+    scenario = _load_two_body_scenario()
+    mc_config = MonteCarloConfig(enabled=True, num_runs=2)
+    worker = MonteCarloWorker(scenario, mc_config, tmp_path / "mc")
+    with qtbot.waitSignal(worker.failed, timeout=5000) as blocker:
+        worker.start()
+    assert "Basilisk is not installed" in blocker.args[0]

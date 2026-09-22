@@ -90,6 +90,21 @@ SUPPORTED_SENSOR_KINDS = ("star_tracker", "imu", "coarse_sun_sensor", "magnetome
 SUPPORTED_ACTUATOR_KINDS = ("reaction_wheel", "thruster", "magnetic_torque_rod")
 SUPPORTED_FSW_MODES = ("inertial3D", "hillPoint", "velocityPoint", "sunSafePoint", "locationPointing")
 
+# Phase 3: Monte Carlo dispersion quantities engine.monte_carlo actually
+# builds a Basilisk.utilities.MonteCarlo.Dispersions class for, and which
+# dispersion "kind" each quantity accepts -- see engine/monte_carlo.py's
+# module docstring for exactly which Dispersions class each pairing maps
+# to and why (e.g. a Cartesian position/velocity dispersion is deliberately
+# NOT offered: Dispersions.UniformVectorCartDispersion/NormalVectorCartDispersion
+# replace each component with an ABSOLUTE random value, not a perturbation
+# around the nominal orbit, which would silently produce a physically
+# nonsensical "dispersed" orbit).
+DISPERSION_QUANTITIES = ("dry_mass_kg", "attitude_sigma_bn")
+DISPERSION_KINDS_BY_QUANTITY = {
+    "dry_mass_kg": ("uniform", "normal"),
+    "attitude_sigma_bn": ("uniform_euler_mrp",),
+}
+
 
 class ScenarioValidationError(ValueError):
     """Raised by :meth:`Scenario.validate` (and the dataclass ``__post_init__``
@@ -320,6 +335,61 @@ class SpaceWeatherConfig:
                       "space_weather.source is 'local_file' but local_file_path was not set")
 
 
+@dataclass
+class DispersionConfig:
+    """One dispersed quantity for one spacecraft in a Monte Carlo batch --
+    see :data:`DISPERSION_QUANTITIES`/:data:`DISPERSION_KINDS_BY_QUANTITY`
+    for what's supported and ``engine/monte_carlo.py`` for how each pairing
+    maps onto a ``Basilisk.utilities.MonteCarlo.Dispersions`` class.
+    """
+
+    spacecraft: str  # must match a SpacecraftConfig.name in this scenario
+    quantity: str  # one of DISPERSION_QUANTITIES
+    kind: str  # one of DISPERSION_KINDS_BY_QUANTITY[quantity]
+    bounds: Optional[list] = None  # [lo, hi]; required for "uniform"/"uniform_euler_mrp"
+    mean: Optional[float] = None  # required for "normal"
+    std_deviation: Optional[float] = None  # required for "normal"
+
+    def validate(self) -> None:
+        _require(bool(self.spacecraft), "dispersion.spacecraft must not be empty")
+        _require(self.quantity in DISPERSION_QUANTITIES,
+                  f"dispersion.quantity {self.quantity!r} must be one of {DISPERSION_QUANTITIES}")
+        allowed_kinds = DISPERSION_KINDS_BY_QUANTITY.get(self.quantity, ())
+        _require(self.kind in allowed_kinds,
+                  f"dispersion.kind {self.kind!r} for quantity {self.quantity!r} must be one of {allowed_kinds}")
+        if self.kind in ("uniform", "uniform_euler_mrp"):
+            _require(self.bounds is not None and len(self.bounds) == 2,
+                      f"dispersion on {self.spacecraft}.{self.quantity}: kind {self.kind!r} needs "
+                      "bounds as a 2-element [lo, hi] list")
+        if self.kind == "normal":
+            _require(self.mean is not None and self.std_deviation is not None,
+                      f"dispersion on {self.spacecraft}.{self.quantity}: kind 'normal' needs "
+                      "mean and std_deviation")
+
+
+@dataclass
+class MonteCarloConfig:
+    """Batch execution settings -- see ``engine/monte_carlo.py``.
+    ``thread_count`` > 1 uses ``multiprocessing.Pool`` under the hood
+    (``Basilisk.utilities.MonteCarlo.Controller``); this has NOT been
+    exercised in this project's development sandbox (no Basilisk build
+    here -- see engine/monte_carlo.py's verification-status note), so the
+    default is the conservative, definitely-safe ``1``.
+    """
+
+    enabled: bool = False
+    num_runs: int = 10
+    thread_count: int = 1
+    verbose: bool = False
+    dispersions: list = field(default_factory=list)  # list[DispersionConfig]
+
+    def validate(self) -> None:
+        _require(self.num_runs >= 1, "monte_carlo.num_runs must be >= 1")
+        _require(self.thread_count >= 1, "monte_carlo.thread_count must be >= 1")
+        for dispersion in self.dispersions:
+            dispersion.validate()
+
+
 # Matches the svIntegrator* classes this Basilisk checkout actually ships
 # (src/simulation/dynamics/Integrators/) -- verified by directly listing
 # that directory, not assumed. There is deliberately no "rk4" option: this
@@ -362,6 +432,7 @@ class Scenario:
     ground_stations: list = field(default_factory=list)  # list[GroundStationConfig]
     space_weather: SpaceWeatherConfig = field(default_factory=SpaceWeatherConfig)
     sim_settings: SimSettings = field(default_factory=SimSettings)
+    monte_carlo: MonteCarloConfig = field(default_factory=MonteCarloConfig)
     description: str = ""
     schema_version: int = CURRENT_SCHEMA_VERSION
 
@@ -392,6 +463,11 @@ class Scenario:
                           f"this scenario's ground_stations {gs_names}")
         self.space_weather.validate()
         self.sim_settings.validate()
+        self.monte_carlo.validate()
+        for dispersion in self.monte_carlo.dispersions:
+            _require(dispersion.spacecraft in names,
+                      f"monte_carlo dispersion.spacecraft {dispersion.spacecraft!r} is not one of "
+                      f"this scenario's spacecraft {names}")
 
     # -- (de)serialization -------------------------------------------------
     def to_dict(self) -> dict:
@@ -405,6 +481,10 @@ class Scenario:
         space_weather = SpaceWeatherConfig(**data.pop("space_weather", {}))
         ground_stations = [GroundStationConfig(**gs) for gs in data.pop("ground_stations", [])]
 
+        mc_data = dict(data.pop("monte_carlo", {}))
+        dispersions = [DispersionConfig(**d) for d in mc_data.pop("dispersions", [])]
+        monte_carlo = MonteCarloConfig(dispersions=dispersions, **mc_data)
+
         spacecraft = []
         for sc in data.pop("spacecraft", []):
             sc = dict(sc)
@@ -415,7 +495,7 @@ class Scenario:
 
         return Scenario(
             gravity=gravity, sim_settings=sim_settings, space_weather=space_weather,
-            ground_stations=ground_stations, spacecraft=spacecraft, **data,
+            ground_stations=ground_stations, spacecraft=spacecraft, monte_carlo=monte_carlo, **data,
         )
 
     def save(self, path: "str | Path") -> None:

@@ -34,6 +34,7 @@ Usage::
 
     missionstudio validate scenario.json
     missionstudio run scenario.json --out-dir results/
+    missionstudio monte-carlo scenario.json --archive-dir mc_results/
     missionstudio kernels-status
     missionstudio spaceweather-resolve scenario.json
     missionstudio gui
@@ -96,6 +97,40 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Wrote {len(paths)} CSV file(s) to {args.out_dir}:")
     for name, path in sorted(paths.items()):
         print(f"  {name}: {path}")
+    return 0
+
+
+def cmd_monte_carlo(args: argparse.Namespace) -> int:
+    try:
+        scenario = load_scenario(args.scenario)
+    except ScenarioValidationError as exc:
+        print(f"INVALID: {exc}", file=sys.stderr)
+        return 1
+
+    if not scenario.monte_carlo.enabled:
+        print("ERROR: scenario.monte_carlo.enabled is false in this scenario file -- "
+              "set it true (and configure dispersions) before running Monte Carlo", file=sys.stderr)
+        return 1
+
+    try:
+        from .engine.monte_carlo import MonteCarloError, run_monte_carlo
+    except ImportError as exc:
+        print(f"ERROR: Basilisk is not installed/built ({exc}) -- see missionStudio/README.md", file=sys.stderr)
+        return 2
+
+    print(f"Running {scenario.monte_carlo.num_runs} Monte Carlo case(s) of {scenario.name!r} "
+          f"({len(scenario.monte_carlo.dispersions)} dispersion(s), {scenario.monte_carlo.thread_count} thread(s))...")
+    try:
+        failures = run_monte_carlo(scenario, scenario.monte_carlo, args.archive_dir)
+    except MonteCarloError as exc:
+        print(f"ERROR: Monte Carlo run failed: {exc}", file=sys.stderr)
+        return 3
+
+    print(f"Archived results to {args.archive_dir}")
+    if failures:
+        print(f"FAILED runs: {failures}", file=sys.stderr)
+        return 4
+    print(f"All {scenario.monte_carlo.num_runs} run(s) succeeded.")
     return 0
 
 
@@ -166,6 +201,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--vizard-live-stream", action="store_true",
                         help="live-stream to a Vizard instance already running on this machine")
     p_run.set_defaults(func=cmd_run)
+
+    p_mc = subparsers.add_parser("monte-carlo", help="run a Monte Carlo batch and archive retained results")
+    p_mc.add_argument("scenario", type=Path)
+    p_mc.add_argument("--archive-dir", type=Path, default=Path("monte_carlo_results"),
+                       help="directory to archive per-run parameters and retained data to")
+    p_mc.set_defaults(func=cmd_monte_carlo)
 
     p_kernels = subparsers.add_parser("kernels-status", help="fetch/check SPICE kernel cache status")
     p_kernels.set_defaults(func=cmd_kernels_status)

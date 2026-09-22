@@ -95,6 +95,25 @@ def test_run_rejects_both_vizard_flags_at_once(tmp_path, capsys):
     assert "at most one of" in capsys.readouterr().err
 
 
+def test_monte_carlo_rejects_scenario_without_enabled_flag(tmp_path, capsys):
+    path = tmp_path / "scenario.json"
+    _write_scenario(path)  # monte_carlo.enabled defaults to False
+    rc = cli.main(["monte-carlo", str(path), "--archive-dir", str(tmp_path / "mc")])
+    assert rc == 1
+    assert "monte_carlo.enabled is false" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(_BASILISK_AVAILABLE, reason="this test's premise is specifically that Basilisk is unavailable")
+def test_monte_carlo_without_basilisk_reports_clear_error(tmp_path, capsys):
+    from missionstudio.schema import MonteCarloConfig
+
+    path = tmp_path / "scenario.json"
+    _write_scenario(path, monte_carlo=MonteCarloConfig(enabled=True, num_runs=2))
+    rc = cli.main(["monte-carlo", str(path), "--archive-dir", str(tmp_path / "mc")])
+    assert rc == 2
+    assert "Basilisk is not installed" in capsys.readouterr().err
+
+
 def test_no_subcommand_is_an_error():
     with pytest.raises(SystemExit):
         cli.main([])

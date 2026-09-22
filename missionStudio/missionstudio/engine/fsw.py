@@ -357,12 +357,13 @@ def build_ground_location(scSim, task_name: str, gs_config, central_body_radius_
     """One ``groundLocation.GroundLocation`` per
     :class:`schema.scenario.GroundStationConfig`. Matches
     ``examples/scenarioAttLocPoint.py``. Its ``currentGroundStateOutMsg`` is
-    what ``locationPointing`` targets (:func:`build_guidance`); passing a
-    non-empty ``sc_state_out_msgs`` also populates ``accessOutMsgs`` (one per
-    spacecraft added), but ``engine.service`` deliberately calls this with
-    ``sc_state_out_msgs=[]`` in Phase 2 -- ground-station ACCESS analysis is
-    Phase 3 scope (see ``engine.service``'s module docstring), even though
-    this function itself is already capable of it.
+    what ``locationPointing`` targets (:func:`build_guidance`).
+
+    ``engine.service`` calls this BEFORE any spacecraft exist (ground
+    stations don't depend on them), so ``sc_state_out_msgs`` is normally
+    ``[]`` here -- access analysis (populating ``accessOutMsgs``) is added
+    in a second pass once every spacecraft is built, via
+    :func:`add_access_analysis`.
     """
     gl = groundLocation.GroundLocation()
     gl.ModelTag = f"groundStation_{gs_config.name}"
@@ -375,6 +376,23 @@ def build_ground_location(scSim, task_name: str, gs_config, central_body_radius_
         gl.addSpacecraftToModel(sc_state_out_msg)
     scSim.AddModelToTask(task_name, gl)
     return gl
+
+
+def add_access_analysis(ground_location, sc_objects: List) -> None:
+    """Phase 3: calls ``addSpacecraftToModel`` on ``ground_location`` for
+    every spacecraft in ``sc_objects``, in order -- populates
+    ``ground_location.accessOutMsgs[i]`` (index == this call's position in
+    ``sc_objects``, verified the same way as ``magneticFieldWMM``'s
+    ``envOutMsgs`` indexing in :func:`build_magnetic_field_wmm`) for
+    ``engine.service`` to record as ``hasAccess``/``slantRange``/
+    ``elevation``/``azimuth`` time series. Safe to call once per ground
+    station for the scenario's full spacecraft list -- each
+    ``GroundLocation`` keeps its own independent ``accessOutMsgs`` index
+    sequence, so calling this for several stations against the same
+    ``sc_objects`` list does not cross-contaminate indices.
+    """
+    for sc_object in sc_objects:
+        ground_location.addSpacecraftToModel(sc_object.scStateOutMsg)
 
 
 def build_magnetic_field_wmm(scSim, task_name: str, planet_state_out_msg, central_body_radius_m: float):

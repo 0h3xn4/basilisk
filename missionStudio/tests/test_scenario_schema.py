@@ -6,8 +6,10 @@ import pytest
 
 from missionstudio.schema import (
     ActuatorConfig,
+    DispersionConfig,
     GravityConfig,
     GroundStationConfig,
+    MonteCarloConfig,
     OrbitIC,
     Scenario,
     ScenarioValidationError,
@@ -265,6 +267,122 @@ def test_location_pointing_with_target_body_validates_structurally():
     sc.spacecraft[0].fsw_mode = "locationPointing"
     sc.spacecraft[0].fsw_params = {"target_body": "sun"}
     sc.validate()  # must not raise
+
+
+# -- Phase 3: Monte Carlo validation ------------------------------------------
+
+def test_monte_carlo_defaults_to_disabled_and_validates():
+    _minimal_scenario().validate()  # monte_carlo defaults to enabled=False, no dispersions
+
+
+def test_monte_carlo_num_runs_must_be_positive():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(enabled=True, num_runs=0)
+    with pytest.raises(ScenarioValidationError, match="num_runs must be >= 1"):
+        sc.validate()
+
+
+def test_monte_carlo_thread_count_must_be_positive():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(enabled=True, thread_count=0)
+    with pytest.raises(ScenarioValidationError, match="thread_count must be >= 1"):
+        sc.validate()
+
+
+def test_dispersion_unsupported_quantity_rejected():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(
+        enabled=True,
+        dispersions=[DispersionConfig(spacecraft="sat-1", quantity="orbit_position", kind="uniform", bounds=[0, 1])],
+    )
+    with pytest.raises(ScenarioValidationError, match="quantity"):
+        sc.validate()
+
+
+def test_dispersion_kind_not_valid_for_quantity_rejected():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(
+        enabled=True,
+        dispersions=[DispersionConfig(spacecraft="sat-1", quantity="dry_mass_kg", kind="uniform_euler_mrp",
+                                       bounds=[0, 1])],
+    )
+    with pytest.raises(ScenarioValidationError, match="must be one of"):
+        sc.validate()
+
+
+def test_dispersion_uniform_requires_bounds():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(
+        enabled=True,
+        dispersions=[DispersionConfig(spacecraft="sat-1", quantity="dry_mass_kg", kind="uniform")],
+    )
+    with pytest.raises(ScenarioValidationError, match="needs bounds"):
+        sc.validate()
+
+
+def test_dispersion_normal_requires_mean_and_std():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(
+        enabled=True,
+        dispersions=[DispersionConfig(spacecraft="sat-1", quantity="dry_mass_kg", kind="normal")],
+    )
+    with pytest.raises(ScenarioValidationError, match="needs mean and std_deviation"):
+        sc.validate()
+
+
+def test_dispersion_unknown_spacecraft_rejected():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(
+        enabled=True,
+        dispersions=[DispersionConfig(spacecraft="does-not-exist", quantity="dry_mass_kg", kind="normal",
+                                       mean=100.0, std_deviation=5.0)],
+    )
+    with pytest.raises(ScenarioValidationError, match="not one of this scenario's spacecraft"):
+        sc.validate()
+
+
+def test_valid_dispersions_validate():
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(
+        enabled=True, num_runs=25,
+        dispersions=[
+            DispersionConfig(spacecraft="sat-1", quantity="dry_mass_kg", kind="normal", mean=100.0, std_deviation=5.0),
+            DispersionConfig(spacecraft="sat-1", quantity="attitude_sigma_bn", kind="uniform_euler_mrp",
+                              bounds=[0.0, 6.283185307]),
+        ],
+    )
+    sc.validate()  # must not raise
+
+
+def test_monte_carlo_round_trips_through_save_load(tmp_path):
+    sc = _minimal_scenario()
+    sc.monte_carlo = MonteCarloConfig(
+        enabled=True, num_runs=25, thread_count=2,
+        dispersions=[DispersionConfig(spacecraft="sat-1", quantity="dry_mass_kg", kind="uniform", bounds=[95.0, 105.0])],
+    )
+    path = tmp_path / "scenario.json"
+    sc.save(path)
+    loaded = load_scenario(path)
+
+    assert loaded.monte_carlo.enabled is True
+    assert loaded.monte_carlo.num_runs == 25
+    assert loaded.monte_carlo.thread_count == 2
+    assert loaded.monte_carlo.dispersions[0].quantity == "dry_mass_kg"
+    assert loaded.monte_carlo.dispersions[0].bounds == [95.0, 105.0]
+
+
+def test_old_scenario_file_without_monte_carlo_key_still_loads(tmp_path):
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "name": "old scenario", "epoch_utc": "2030-01-01T00:00:00",
+        "spacecraft": [{
+            "name": "sat-1",
+            "orbit": {"type": "cartesian", "position_km": [7000, 0, 0], "velocity_km_s": [0, 7.5, 0]},
+        }],
+    }))
+    loaded = load_scenario(path)
+    assert loaded.monte_carlo.enabled is False
+    assert loaded.monte_carlo.dispersions == []
 
 
 def test_phase2_fields_round_trip_through_save_load(tmp_path):

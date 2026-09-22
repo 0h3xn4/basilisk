@@ -1,4 +1,4 @@
-# missionStudio (Phase 2)
+# missionStudio (Phase 3)
 
 A standalone, GUI-based mission-analysis application for Linux, using the
 Basilisk astrodynamics framework (AVS Lab, University of Colorado Boulder)
@@ -7,10 +7,10 @@ every capability maps to a specific Basilisk module (see the capability
 matrix delivered earlier in this project's history) or is explicitly
 flagged as custom/out-of-scope, never fabricated.
 
-This is **Phase 2** of the roadmap: attitude sensors/actuators/FSW pointing
--control modes + Vizard integration, on top of Phase 0's backend
-foundations and Phase 1's PySide6 GUI/CLI. See "What Phase 2 adds" below
-for exactly what that means.
+This is **Phase 3** of the roadmap: Monte Carlo + ground-station access
+analysis + packaging, on top of Phase 0's backend foundations, Phase 1's
+PySide6 GUI/CLI, and Phase 2's attitude/sensors/actuators/Vizard work. See
+"What Phase 3 adds" below for exactly what that means.
 
 ## Environment honesty note (read this first)
 
@@ -26,33 +26,43 @@ Consequently, in **this** environment:
 
 * Everything in `missionstudio/schema/`, `missionstudio/engine/spaceweather.py`,
   `missionstudio/engine/results.py`, `missionstudio/cli.py`, and **the
-  entire `missionstudio/gui/` package** (including Phase 2's new
-  sensor/actuator/FSW-mode/Vizard-request editors) has **no Basilisk
-  import** and has been fully exercised here -- `pytest tests/` genuinely
-  runs and passes 124 tests. That includes the PySide6 GUI: it was built,
-  run headless (`QT_QPA_PLATFORM=offscreen`, set automatically by
-  `tests/conftest.py`), and driven with `pytest-qt` for real -- every form
-  field, every Save/Open/Run menu action, dirty-state tracking, and the
-  unsaved-changes close-confirmation prompt is exercised by an actual
-  running `QApplication`, not asserted about in the abstract. Getting
-  PySide6 itself running headless in this sandbox needed three system
-  packages beyond what was preinstalled (`libegl1 libopengl0
-  libxcb-cursor0` on this Ubuntu-based image, via `apt-get`) -- worth
-  knowing if a deployment target hits the same `ImportError: libEGL.so.1:
-  cannot open shared object file` this session hit first.
-* `missionstudio/engine/time_system.py`, `kernels.py`, `service.py`, and
-  (new in Phase 2) `fsw.py`/`vizard.py` import Basilisk and **could not be
-  executed or tested here**. They are written directly against this
-  checkout's own verified source (module names, function signatures, and
-  call sequences confirmed by reading the actual `.py`/`.cpp`/`.h`/`.i`
-  files in `../src/`, and in several cases by copying an exact call
-  sequence already proven to work in a real, already-run example script --
-  `../missionAnalysis/run_constellation_mission.py` for Phase 0/1,
-  `../examples/scenarioAttitudeFeedbackRW.py`/`scenarioAttitudeGuidance.py`/
-  `scenarioHohmann.py`/`scenarioAttLocPoint.py` for Phase 2's FSW chain) --
-  not from memory, and not guessed. Each of these files' docstring says
-  exactly which parts are verified-by-example versus verified-by-reading
-  -source-only, so nothing here should be trusted as "tested" that isn't.
+  entire `missionstudio/gui/` package** (including Phase 2's sensor/
+  actuator/FSW-mode/Vizard-request editors and Phase 3's Monte Carlo
+  editor) has **no Basilisk import** and has been fully exercised here --
+  `pytest tests/` genuinely runs and passes 150 tests. That includes the
+  PySide6 GUI: it was built, run headless (`QT_QPA_PLATFORM=offscreen`,
+  set automatically by `tests/conftest.py`), and driven with `pytest-qt`
+  for real -- every form field, every Save/Open/Run menu action,
+  dirty-state tracking, and the unsaved-changes close-confirmation prompt
+  is exercised by an actual running `QApplication`, not asserted about in
+  the abstract. Getting PySide6 itself running headless in this sandbox
+  needed three system packages beyond what was preinstalled (`libegl1
+  libopengl0 libxcb-cursor0` on this Ubuntu-based image, via `apt-get`) --
+  worth knowing if a deployment target hits the same `ImportError:
+  libEGL.so.1: cannot open shared object file` this session hit first.
+* `missionstudio/engine/time_system.py`, `kernels.py`, `service.py`,
+  `fsw.py`/`vizard.py` (Phase 2), and `monte_carlo.py` (Phase 3) import
+  Basilisk and **could not be executed or tested here**. They are written
+  directly against this checkout's own verified source (module names,
+  function signatures, and call sequences confirmed by reading the actual
+  `.py`/`.cpp`/`.h`/`.i` files in `../src/`, and in several cases by
+  copying an exact call sequence already proven to work in a real,
+  already-run example script -- `../missionAnalysis/run_constellation_mission.py`
+  for Phase 0/1, `../examples/scenarioAttitudeFeedbackRW.py`/
+  `scenarioAttitudeGuidance.py`/`scenarioHohmann.py`/`scenarioAttLocPoint.py`
+  for Phase 2's FSW chain, and `src/utilities/MonteCarlo/README.md` (plus
+  `Controller.py`'s own path-parsing source) for Phase 3's Monte Carlo
+  bridge -- not from memory, and not guessed. Each of these files'
+  docstring says exactly which parts are verified-by-example versus
+  verified-by-reading-source-only, so nothing here should be trusted as
+  "tested" that isn't.
+* **Phase 3's packaging scripts (`packaging/build_wheel.sh`,
+  `packaging/install.sh`) WERE genuinely run here**, unlike the
+  Basilisk-dependent engine code above -- building `missionstudio`'s wheel
+  needs no Basilisk. Both scripts were run for real, including twice in a
+  row to catch a real bug (see `packaging/README.md`); the one path that
+  couldn't be exercised is `install.sh --basilisk-wheel`, because this
+  sandbox has no built Basilisk wheel to vendor.
 * Because the GUI and CLI both genuinely can't import Basilisk here, both
   were also proven to FAIL GRACEFULLY under that exact condition, for
   real: `gui.run_worker.RunWorker`, `gui.kernel_status_widget`, and
@@ -225,6 +235,41 @@ regression test.
 * **CLI**: `missionstudio run` gained `--vizard-save-file`/
   `--vizard-live-stream` (mutually exclusive).
 
+## What Phase 3 adds
+
+* **Ground-station access analysis.** `engine.service.SimulationService`
+  now builds a `groundLocation.GroundLocation` for EVERY
+  `GroundStationConfig` in a scenario (not just ones a spacecraft's
+  `locationPointing` mode targets), and calls the new
+  `engine.fsw.add_access_analysis()` once every spacecraft exists so every
+  station sees every spacecraft -- the standard access-analysis question.
+  `ResultSet` gains four series per (station, spacecraft) pair:
+  `{station}.access_to_{spacecraft}.has_access`/`.slant_range`/
+  `.elevation`/`.azimuth`.
+* **`missionstudio/engine/monte_carlo.py`** -- wraps
+  `Basilisk.utilities.MonteCarlo` (`Controller`/`Dispersions`/
+  `RetentionPolicy`, real native Basilisk infrastructure, not reimplemented
+  here). `schema.scenario.MonteCarloConfig`/`DispersionConfig` describe a
+  batch (`num_runs`, `thread_count`, `verbose`) and per-spacecraft
+  dispersions (`dry_mass_kg` uniform/normal, `attitude_sigma_bn`
+  uniform-random-attitude via `UniformEulerAngleMRPDispersion`) --
+  deliberately NOT Cartesian position/velocity dispersion, since
+  Basilisk's Cartesian dispersion classes replace each component with an
+  ABSOLUTE random value rather than perturbing around the nominal orbit,
+  which would silently produce a physically nonsensical result (see that
+  module's docstring). `engine.service.SimulationService.build()` gained
+  an `initialize` parameter so Monte Carlo can apply dispersions BEFORE
+  `InitializeSimulation()` runs (applying them after would silently have
+  no effect, since `Reset()` would already have latched the un-dispersed
+  values). `missionstudio monte-carlo` (CLI) and Run > **Run Monte
+  Carlo...** (GUI, via the new `gui/monte_carlo_editor.py` scenario-form
+  section) both drive it.
+* **`packaging/`** -- `build_wheel.sh`/`install.sh`/`missionstudio.desktop.in`,
+  genuinely built and run in this sandbox (see the honesty note above and
+  `packaging/README.md` for two real bugs found and fixed this way: a
+  missing scenario data file in the wheel, and a `./build/`-directory
+  import-shadowing bug in repeated builds).
+
 ## Repository layout
 
 ```
@@ -244,6 +289,7 @@ missionStudio/
       service.py                     -- SimulationService (needs Basilisk)
       fsw.py                         -- Phase 2: attitude nav/guidance/control/actuation chain (needs Basilisk)
       vizard.py                      -- Phase 2: Vizard integration (needs Basilisk, imported lazily)
+      monte_carlo.py                 -- Phase 3: Basilisk.utilities.MonteCarlo bridge (needs Basilisk)
     gui/
       app.py                         -- QApplication entry point
       main_window.py                 -- MainWindow: File/Run menus, ties everything together
@@ -251,13 +297,15 @@ missionStudio/
       spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
       vizard_dialog.py               -- Phase 2: "enable Vizard for the next run" dialog
+      monte_carlo_editor.py          -- Phase 3: Monte Carlo settings + dispersion list editor
       ground_station_editor.py       -- ground station list + add/edit/remove dialog
       orbit_ic_widget.py             -- classical-elements/Cartesian/TLE orbit editor
       kernel_status_widget.py        -- SPICE kernel status panel
       results_widget.py              -- matplotlib results plot + CSV export
-      run_worker.py                  -- SimulationService on a background QThread
+      run_worker.py                  -- SimulationService/Monte Carlo on a background QThread
     scenarios/
       two_body_validation.json       -- the Phase 0 validation scenario
+  packaging/                          -- Phase 3: build_wheel.sh / install.sh / .desktop entry -- see packaging/README.md
   tests/
     conftest.py                      -- requires_basilisk / requires_gui auto-skip markers
     test_scenario_schema.py
@@ -270,6 +318,7 @@ missionStudio/
       test_spacecraft_editor.py
       test_sensor_actuator_editor.py
       test_vizard_dialog.py
+      test_monte_carlo_editor.py
       test_ground_station_editor.py
       test_scenario_editor.py
       test_results_widget.py
@@ -286,13 +335,18 @@ python3 -m pip install -e ".[dev,gui]"
 python3 -m pytest tests/ -v
 ```
 
-Without a Basilisk build on `PYTHONPATH`, this runs 124 tests (schema,
+Without a Basilisk build on `PYTHONPATH`, this runs 150 tests (schema,
 space weather, results, CLI, and the full PySide6 GUI, run headless) and
 skips the 2 in `test_two_body_validation.py` with a clear reason, per
 `tests/conftest.py`. With Basilisk built (see `../docs/source/Build.rst`,
 and `../missionAnalysis/README.md`'s own notes on making sure you're on
-the right build), the same command runs all 126, including the analytical
+the right build), the same command runs all 152, including the analytical
 validation.
+
+`packaging/build_wheel.sh`/`install.sh` are NOT run by `pytest` (they're
+shell scripts that build/install a real wheel, not something worth
+wrapping in a slow subprocess-spawning test) -- see `packaging/README.md`
+for how they were verified instead.
 
 If PySide6 fails to import with `ImportError: libEGL.so.1: cannot open
 shared object file` (a minimal Linux install, or a container like the one
@@ -370,6 +424,7 @@ missionstudio spaceweather-resolve missionstudio/scenarios/two_body_validation.j
 # needs a Basilisk build:
 missionstudio run missionstudio/scenarios/two_body_validation.json --out-dir results/
 missionstudio run scenario_with_fsw.json --out-dir results/ --vizard-save-file results/viz.bin
+missionstudio monte-carlo scenario_with_dispersions.json --archive-dir mc_results/
 missionstudio kernels-status
 
 # launches the PySide6 GUI (needs the 'gui' extra; does NOT need Basilisk
@@ -394,21 +449,27 @@ missionstudio gui
 The GUI opens with a blank scenario. File > New/Open/Save/Save As work
 against the same `schema.Scenario`/`load_scenario()`/`.save()` the CLI
 uses; the scenario form's validation status label updates live as you
-type. Run > Run Simulation runs `SimulationService` on a background
-thread (the UI stays responsive) and switches to the Results tab when
+type, including its Monte Carlo section (enable/num_runs/thread_count +
+a dispersion list, referencing spacecraft by name). Run > Run Simulation
+runs `SimulationService` on a background thread (the UI stays responsive)
+and switches to the Results tab when
 done, with a plot per result series and a CSV export button. Run > Check
 Kernels shows SPICE kernel fetch/cache status. Both Run actions report a
 clear error (not a crash) if Basilisk isn't installed/built.
 
-## Vendoring vs. building Basilisk from source (a Phase 4 decision, flagged now)
+## Vendoring vs. building Basilisk from source
 
 Building from source in an automated/CI/sandboxed context is fragile --
 this project hit exactly that failure mode moments before Phase 0 started
-(see the honesty note above). The roadmap's Phase 4 packaging plan is to
-**vendor a prebuilt wheel pinned to a specific Basilisk release/commit**
-as the default install path for end users, keeping "build from source" as
-a documented, opt-in developer path only. Nothing in Phase 0 forecloses
-that decision; it only affects packaging later.
+(see the honesty note above). The plan flagged since Phase 0, and now
+implemented on the receiving end in `packaging/install.sh`, is to **vendor
+a prebuilt wheel pinned to a specific Basilisk release/commit** as the
+default install path for end users (`install.sh --basilisk-wheel
+PATH_OR_URL`), keeping "build from source" a documented, opt-in developer
+path only. Producing that wheel in the first place is a separate,
+one-time release-engineering task this project's own development sandbox
+cannot do (no Basilisk build here) -- see `packaging/README.md` for the
+full picture of what was and wasn't verified.
 
 ## Known limitations carried over from the capability audit
 
@@ -437,22 +498,39 @@ specifically:
   but not wired up** -- `engine.fsw`/`engine.service` raise a specific
   error if either is actually configured, rather than silently doing
   nothing.
-* **Ground-station ACCESS analysis (as opposed to using a station as a
-  `locationPointing` target) is Phase 3 scope**, matching this project's
-  original roadmap boundary ("Phase 3: Monte Carlo + access analysis +
-  packaging") -- `engine.fsw.build_ground_location()` is already capable
-  of it (it just needs a non-empty spacecraft list), `engine.service`
-  deliberately doesn't call it that way yet.
 * **The attitude control loop closes on truth spacecraft state.**
   `simpleNav` is in the loop (not raw `scStateOutMsg`), but its
   error-model matrices are left at Basilisk's own zero defaults -- there
   is no GUI/schema field yet to configure realistic navigation error.
+* **Monte Carlo dispersions cover two quantities**: `dry_mass_kg`
+  (uniform/normal) and `attitude_sigma_bn` (uniform-random-attitude).
+  Cartesian position/velocity dispersion is deliberately NOT offered --
+  see `engine/monte_carlo.py`'s module docstring for why (Basilisk's
+  Cartesian dispersion classes replace each component with an absolute
+  random value, not a perturbation around the nominal orbit).
+* **`monte_carlo.thread_count > 1` is unverified** in this project's
+  development sandbox (no Basilisk build here to run it against) -- the
+  schema default is the definitely-safe `1`.
+* **Monte Carlo retains a fixed set of data per run** (each spacecraft's
+  position/velocity) -- there is no per-run custom retention-policy
+  selection in the schema yet.
+* **No Basilisk wheel is vendored in `packaging/`** -- `install.sh
+  --basilisk-wheel` is written and its non-Basilisk-specific mechanics
+  (create a venv, `pip install` a wheel into it) are sound, but this
+  project's development sandbox has never had a Basilisk build to produce
+  or test a wheel from. See `packaging/README.md`.
 
-## Next: Phase 3
+## What's next
 
-Per the roadmap: Monte Carlo (`Basilisk.utilities.MonteCarlo`, a real,
-already-confirmed-usable batch-execution framework with dispersion
-generators), ground-station ACCESS analysis (`groundLocation.accessOutMsgs`
--- the `GroundLocation` objects Phase 2's `locationPointing` targeting
-already builds are a running start), and packaging (the vendored-wheel
-decision flagged below).
+This completes the three phases originally scoped for this project
+(Phase 0: backend foundations; Phase 1: GUI shell + CLI; Phase 2:
+attitude/sensors/actuators/Vizard; Phase 3: Monte Carlo + access analysis
++ packaging). The "Known limitations" list above is the honest map of
+what's left: a handful of schema-valid-but-not-wired-up options (celestial
+-body `locationPointing` targets, thrusters, magnetic torque rods,
+non-Earth spherical harmonics/magnetometer), navigation error modeling,
+richer Monte Carlo retention, and -- the one requiring resources this
+development sandbox doesn't have -- an actual vendored Basilisk wheel to
+make `packaging/install.sh` produce a fully self-contained installer.
+None of it is blocked on a design decision; each item is scoped and
+documented at its own call site for whoever picks it up next.

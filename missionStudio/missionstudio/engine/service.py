@@ -53,11 +53,12 @@ validation scenario (``scenarios/two_body_validation.json``,
 Explicitly NOT wired up yet (validated by the schema and carried through
 save/load starting now, so the schema doesn't need to change shape later,
 but silently ignored by this service until the phase that implements it):
-drag, SRP, space weather, Monte Carlo, and ground-station access analysis
-(the last is a deliberate Phase 2/3 boundary -- see below). The Phase 1 GUI
-(see ``gui/``) deliberately does not expose editors for these either, for
-the same reason: a control that looks like it configures simulated
-behavior but silently doesn't is worse than not offering it yet.
+drag, SRP, space weather (space weather HAS its own resolver in
+``engine/spaceweather.py`` -- it just isn't connected to a drag model
+here, since drag itself isn't wired up). The Phase 1 GUI (see ``gui/``)
+deliberately does not expose editors for these either, for the same
+reason: a control that looks like it configures simulated behavior but
+silently doesn't is worse than not offering it yet.
 
 Phase 2 scope
 -------------
@@ -73,14 +74,35 @@ but not built here). ``engine/vizard.py`` covers the Vizard integration,
 triggered via :class:`SimulationService`'s own ``vizard_request`` constructor
 parameter (an ``engine.vizard.VizardRequest``).
 
-One more explicit Phase 2 scope line: :class:`schema.scenario.GroundStationConfig`
-entries are only ever turned into a ``groundLocation.GroundLocation`` object
-here when some spacecraft's ``fsw_mode == "locationPointing"`` actually
-targets them (as a pointing target) -- ``addSpacecraftToModel``/
-``accessOutMsgs`` (ground-station ACCESS analysis, as opposed to using a
-station as a pointing target) is Phase 3 scope, matching the roadmap
-boundary from this project's original phased plan ("Phase 3: Monte Carlo +
-access analysis + packaging").
+Phase 3 scope
+-------------
+Adds ground-station ACCESS analysis and Monte Carlo batch execution, per
+the roadmap's "Phase 3: Monte Carlo + access analysis + packaging".
+
+* Ground-station access: every :class:`schema.scenario.GroundStationConfig`
+  now gets a ``groundLocation.GroundLocation`` (used both as a
+  ``locationPointing`` target, per Phase 2, and for access analysis), and
+  once every spacecraft is built, :func:`engine.fsw.add_access_analysis`
+  is called once per station against the FULL spacecraft list -- every
+  station sees every spacecraft, which is the standard access-analysis
+  question ("when can station X see spacecraft Y"), not just the ones a
+  station happens to be a pointing target for. :meth:`run` records
+  ``hasAccess``/``slantRange``/``elevation``/``azimuth`` per
+  (station, spacecraft) pair.
+* Monte Carlo: lives in ``engine/monte_carlo.py``, not here --
+  :meth:`build` grew an ``initialize`` parameter (default ``True``)
+  specifically so that module can build a sim, apply
+  ``Basilisk.utilities.MonteCarlo`` dispersions to it, and only THEN call
+  ``InitializeSimulation()``/``ConfigureStopTime()`` itself (calling
+  ``InitializeSimulation()`` before dispersions are applied would `Reset()`
+  every module against the UN-dispersed nominal values, silently
+  defeating the dispersion). See that module's docstring for the full
+  design and its own scoping notes (e.g. why Cartesian position/velocity
+  dispersion is deliberately not offered).
+
+Packaging is covered in ``packaging/`` (build scripts, installer, desktop
+entry) and ``missionStudio/README.md``'s packaging section, not in this
+module -- there's no runtime code for it.
 
 Verification status
 --------------------
@@ -210,12 +232,34 @@ class SimulationService:
         self._sun_state_out_msg = None
         self._ground_locations: Dict[str, object] = {}
         self._mag_field_model = None
+        self._access_recorders: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> recorder
 
-    def build(self) -> None:
+    @property
+    def spacecraft_handles(self) -> Dict[str, "_SpacecraftHandle"]:
+        """Read-only view of this run's per-spacecraft handles (``sc_object``,
+        recorders, ...), keyed by spacecraft name. Only populated after
+        :meth:`build`. ``engine.monte_carlo`` uses this to attach dispersion
+        accessor methods to the sim object -- everything else should go
+        through :meth:`run`'s :class:`~missionstudio.engine.results.ResultSet`
+        instead.
+        """
+        return dict(self._handles)
+
+    def build(self, initialize: bool = True) -> None:
         """Assemble the Basilisk simulation from ``self.scenario`` without
         running it. Safe to call at most once per instance (see the class
         docstring); :meth:`run` calls this automatically if it hasn't been
         called yet.
+
+        Args:
+            initialize: when ``True`` (the default), calls
+                ``InitializeSimulation()``/``ConfigureStopTime()`` before
+                returning, exactly as Phase 0/1/2 always did. Pass
+                ``False`` only when the caller needs to mutate the built
+                sim (e.g. apply Monte Carlo dispersions -- see
+                ``engine/monte_carlo.py``) BEFORE those are called; the
+                caller is then responsible for calling them itself once
+                ready.
         """
         if self.scSim is not None:
             raise SimulationServiceError(
@@ -281,20 +325,16 @@ class SimulationService:
 
         central_body_state_out_msg = self.spice_object.planetStateOutMsgs[body_names.index(gravity.central_body)]
 
-        needed_ground_stations = {
-            sc.fsw_params.get("target_ground_station")
-            for sc in scenario.spacecraft
-            if sc.fsw_mode == "locationPointing" and sc.fsw_params.get("target_ground_station")
-        }
-        if needed_ground_stations:
-            gs_by_name = {gs.name: gs for gs in scenario.ground_stations}
-            for gs_name in needed_ground_stations:
-                gs_config = gs_by_name[gs_name]  # unreachable KeyError if Scenario.validate() passed
-                ground_location = fsw.build_ground_location(
-                    self.scSim, dyn_task_name, gs_config, central_body.radEquator,
-                    central_body_state_out_msg, sc_state_out_msgs=[],
-                )
-                self._ground_locations[gs_name] = ground_location
+        # Phase 3: every ground station is built (used as both a possible
+        # locationPointing target and an access-analysis station), not just
+        # ones a spacecraft's fsw_params actually targets -- access analysis
+        # is a per-station question independent of pointing.
+        for gs_config in scenario.ground_stations:
+            ground_location = fsw.build_ground_location(
+                self.scSim, dyn_task_name, gs_config, central_body.radEquator,
+                central_body_state_out_msg, sc_state_out_msgs=[],
+            )
+            self._ground_locations[gs_config.name] = ground_location
 
         needs_magnetometer = any(
             sensor.kind == "magnetometer" for sc in scenario.spacecraft for sensor in sc.sensors
@@ -404,6 +444,18 @@ class SimulationService:
             rw_effectors_in_order.append(rw_effector_for_viz)
             self._handles[sc_config.name] = handle
 
+        # Phase 3: access analysis -- every ground station sees every
+        # spacecraft, now that all spacecraft exist (see fsw.add_access_analysis).
+        # accessOutMsgs[i] corresponds to sc_objects_in_order[i]: fsw.add_access_analysis
+        # calls addSpacecraftToModel in exactly that order (verified indexing
+        # convention, see that function's docstring).
+        for gs_name, ground_location in self._ground_locations.items():
+            fsw.add_access_analysis(ground_location, sc_objects_in_order)
+            for index, sc_object in enumerate(sc_objects_in_order):
+                recorder = ground_location.accessOutMsgs[index].recorder()
+                self.scSim.AddModelToTask(dyn_task_name, recorder)
+                self._access_recorders[(gs_name, sc_object.ModelTag)] = recorder
+
         if self.vizard_request is not None:
             try:
                 vizard.enable_vizard(
@@ -415,9 +467,10 @@ class SimulationService:
                 raise SimulationServiceError(str(exc)) from exc
 
         self.dyn_task_name = dyn_task_name
-        self.scSim.InitializeSimulation()
-        stop_time_s = sim_settings.duration_days * 86400.0
-        self.scSim.ConfigureStopTime(macros.sec2nano(stop_time_s))
+        if initialize:
+            self.scSim.InitializeSimulation()
+            stop_time_s = sim_settings.duration_days * 86400.0
+            self.scSim.ConfigureStopTime(macros.sec2nano(stop_time_s))
 
     def run(self) -> ResultSet:
         """Build (if not already built) and execute the simulation, then
@@ -472,4 +525,16 @@ class SimulationService:
                     result.add(TimeSeries(series_name, sensor_t_s, ("output",), recorder.OutputData, units="-"))
                 elif kind == "magnetometer":
                     result.add(TimeSeries(series_name, sensor_t_s, ("x", "y", "z"), recorder.tam_S, units="T"))
+
+        for (gs_name, sc_name), recorder in self._access_recorders.items():
+            access_t_s = recorder.times() * macros.NANO2SEC
+            series_name = f"{gs_name}.access_to_{sc_name}"
+            result.add(TimeSeries(f"{series_name}.has_access", access_t_s, ("has_access",),
+                                   recorder.hasAccess, units="-"))
+            result.add(TimeSeries(f"{series_name}.slant_range", access_t_s, ("slant_range",),
+                                   recorder.slantRange, units="m"))
+            result.add(TimeSeries(f"{series_name}.elevation", access_t_s, ("elevation",),
+                                   recorder.elevation, units="rad"))
+            result.add(TimeSeries(f"{series_name}.azimuth", access_t_s, ("azimuth",),
+                                   recorder.azimuth, units="rad"))
         return result

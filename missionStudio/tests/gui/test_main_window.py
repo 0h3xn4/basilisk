@@ -207,6 +207,55 @@ def test_run_passes_vizard_request_to_worker(window, monkeypatch):
     assert captured["vizard_request"] is window._vizard_request
 
 
+def test_run_monte_carlo_rejects_disabled_monte_carlo(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    _add_valid_spacecraft(window)  # monte_carlo defaults to disabled
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
+
+    window.on_run_monte_carlo()
+    assert len(critical_calls) == 1
+    assert "enable monte carlo" in critical_calls[0][2].lower()
+    assert window._mc_worker is None
+
+
+def test_run_monte_carlo_starts_worker_with_chosen_archive_dir(window, monkeypatch, tmp_path):
+    from missionstudio.gui.run_worker import MonteCarloWorker
+    from missionstudio.schema.scenario import DispersionConfig, MonteCarloConfig
+    from PySide6.QtWidgets import QFileDialog
+
+    _add_valid_spacecraft(window)
+    window.scenario_editor.monte_carlo_group.set_spacecraft_names(["sat-1"])
+    window.scenario_editor.monte_carlo_group.from_dataclass(MonteCarloConfig(
+        enabled=True, num_runs=3,
+        dispersions=[DispersionConfig(spacecraft="sat-1", quantity="dry_mass_kg", kind="uniform", bounds=[90, 110])],
+    ))
+
+    archive_dir = tmp_path / "mc_archive"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(archive_dir)))
+    monkeypatch.setattr(MonteCarloWorker, "start", lambda self: None)  # don't actually spin up the thread
+
+    window.on_run_monte_carlo()
+    assert window._mc_worker is not None
+    assert window._mc_worker.archive_dir == archive_dir
+    assert window._mc_worker.mc_config.num_runs == 3
+    assert not window.monte_carlo_action.isEnabled()
+
+
+def test_run_monte_carlo_cancel_dialog_does_not_start_worker(window, monkeypatch):
+    from missionstudio.schema.scenario import MonteCarloConfig
+    from PySide6.QtWidgets import QFileDialog
+
+    _add_valid_spacecraft(window)
+    window.scenario_editor.monte_carlo_group.set_spacecraft_names(["sat-1"])
+    window.scenario_editor.monte_carlo_group.from_dataclass(MonteCarloConfig(enabled=True))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
+
+    window.on_run_monte_carlo()
+    assert window._mc_worker is None
+
+
 def test_close_with_no_unsaved_changes_does_not_prompt(window, monkeypatch):
     from PySide6.QtGui import QCloseEvent
     from PySide6.QtWidgets import QMessageBox

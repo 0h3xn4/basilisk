@@ -90,6 +90,38 @@ def test_space_weather_local_file_field_enabled_only_for_local_file_source(widge
     assert not widget.local_file_edit.isEnabled()
 
 
+def test_monte_carlo_round_trips(widget):
+    from missionstudio.schema.scenario import DispersionConfig, MonteCarloConfig, OrbitIC, SpacecraftConfig
+
+    widget.spacecraft_list.from_list([
+        SpacecraftConfig(name="sat-1", orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0],
+                                                       velocity_km_s=[0, 7.5, 0]))
+    ])
+    widget._refresh_monte_carlo_spacecraft_names()
+    mc = MonteCarloConfig(
+        enabled=True, num_runs=15, thread_count=2, verbose=True,
+        dispersions=[DispersionConfig(spacecraft="sat-1", quantity="dry_mass_kg", kind="uniform", bounds=[95, 105])],
+    )
+    widget.monte_carlo_group.from_dataclass(mc)
+
+    got = widget.to_scenario()
+    assert got.monte_carlo.enabled is True
+    assert got.monte_carlo.num_runs == 15
+    assert got.monte_carlo.thread_count == 2
+    assert got.monte_carlo.dispersions[0].spacecraft == "sat-1"
+
+
+def test_monte_carlo_spacecraft_names_track_spacecraft_list(widget):
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    assert widget.monte_carlo_group.dispersion_list._spacecraft_names == []
+    widget.spacecraft_list.from_list([
+        SpacecraftConfig(name="a", orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0])),
+    ])
+    widget.spacecraft_list.changed.emit()
+    assert widget.monte_carlo_group.dispersion_list._spacecraft_names == ["a"]
+
+
 def test_reset_to_default_clears_spacecraft(widget):
     from missionstudio.schema import load_scenario
 

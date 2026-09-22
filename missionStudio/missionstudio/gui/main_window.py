@@ -40,7 +40,7 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QMainWindow, QMessageBox, QS
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
 from .kernel_status_widget import KernelStatusWidget
 from .results_widget import ResultsWidget
-from .run_worker import RunWorker
+from .run_worker import MonteCarloWorker, RunWorker
 from .scenario_editor import ScenarioEditorWidget
 from .vizard_dialog import VizardDialog
 
@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         self._current_path: Path | None = None
         self._dirty = False
         self._run_worker: RunWorker | None = None
+        self._mc_worker: MonteCarloWorker | None = None
         self._vizard_request = None  # engine.vizard.VizardRequest, or None -- set via the Run menu's "Vizard..." action
 
         self.scenario_editor = ScenarioEditorWidget()
@@ -129,6 +130,11 @@ class MainWindow(QMainWindow):
         vizard_action.triggered.connect(self.on_configure_vizard)
         run_menu.addAction(vizard_action)
         self.vizard_action = vizard_action
+
+        monte_carlo_action = QAction("Run &Monte Carlo...", self)
+        monte_carlo_action.triggered.connect(self.on_run_monte_carlo)
+        run_menu.addAction(monte_carlo_action)
+        self.monte_carlo_action = monte_carlo_action
 
     def _update_window_title(self) -> None:
         name = self._current_path.name if self._current_path else "untitled"
@@ -250,6 +256,44 @@ class MainWindow(QMainWindow):
         self.run_action.setEnabled(True)
         self.statusBar().showMessage("Run failed.")
         QMessageBox.critical(self, "Simulation failed", message)
+
+    def on_run_monte_carlo(self) -> None:
+        try:
+            scenario = self.scenario_editor.to_scenario()
+        except ScenarioValidationError as exc:
+            QMessageBox.critical(self, "Cannot run invalid scenario", str(exc))
+            return
+        if not scenario.monte_carlo.enabled:
+            QMessageBox.critical(self, "Monte Carlo is disabled",
+                                  "Enable Monte Carlo (and add at least one dispersion) in the scenario form "
+                                  "before running it.")
+            return
+
+        archive_dir_str = QFileDialog.getExistingDirectory(self, "Monte Carlo archive directory")
+        if not archive_dir_str:
+            return
+        archive_dir = Path(archive_dir_str)
+
+        self.monte_carlo_action.setEnabled(False)
+        self.statusBar().showMessage(f"Running {scenario.monte_carlo.num_runs} Monte Carlo case(s)...")
+        self._mc_worker = MonteCarloWorker(scenario, scenario.monte_carlo, archive_dir)
+        self._mc_worker.finished_ok.connect(self._on_monte_carlo_finished)
+        self._mc_worker.failed.connect(self._on_monte_carlo_failed)
+        self._mc_worker.start()
+
+    def _on_monte_carlo_finished(self, failures: list) -> None:
+        self.monte_carlo_action.setEnabled(True)
+        if failures:
+            self.statusBar().showMessage(f"Monte Carlo complete with {len(failures)} failed run(s).")
+            QMessageBox.warning(self, "Monte Carlo finished with failures",
+                                 f"Run indices that failed: {failures}")
+        else:
+            self.statusBar().showMessage("Monte Carlo complete -- all runs succeeded.")
+
+    def _on_monte_carlo_failed(self, message: str) -> None:
+        self.monte_carlo_action.setEnabled(True)
+        self.statusBar().showMessage("Monte Carlo run failed.")
+        QMessageBox.critical(self, "Monte Carlo failed", message)
 
     # -- window lifecycle ---------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:
