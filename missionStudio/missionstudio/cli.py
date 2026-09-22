@@ -100,7 +100,35 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Wrote {len(paths)} CSV file(s) to {args.out_dir}:")
     for name, path in sorted(paths.items()):
         print(f"  {name}: {path}")
+
+    if any(sc.station_keeping is not None for sc in scenario.spacecraft):
+        print("Station-keeping summary:")
+        _print_station_keeping_summary(scenario, result)
     return 0
+
+
+def _print_station_keeping_summary(scenario, result) -> None:
+    """Prints total delta-V used and propellant used/remaining per
+    spacecraft with ``station_keeping`` configured -- the headline numbers
+    ``engine.orbit_maintenance`` tracks, surfaced directly rather than
+    leaving the user to dig them out of a CSV. Reads the final sample of
+    each spacecraft's ``.station_keeping.delta_v``/``.propellant_remaining``
+    series (see ``engine.service.SimulationService.run()``); silently
+    skips a spacecraft whose series aren't present (station_keeping was
+    configured but, e.g., the run failed before the series could be built).
+    """
+    for sc in scenario.spacecraft:
+        if sc.station_keeping is None:
+            continue
+        delta_v_series = result.series.get(f"{sc.name}.station_keeping.delta_v")
+        propellant_series = result.series.get(f"{sc.name}.station_keeping.propellant_remaining")
+        if delta_v_series is None or propellant_series is None or len(delta_v_series.data) == 0:
+            continue
+        total_delta_v_m_s = float(delta_v_series.data[-1, 0])
+        propellant_remaining_kg = float(propellant_series.data[-1, 0])
+        propellant_used_kg = sc.station_keeping.propellant_kg - propellant_remaining_kg
+        print(f"  {sc.name}: {total_delta_v_m_s:.3f} m/s delta-V, "
+              f"{propellant_used_kg:.3f} kg propellant used ({propellant_remaining_kg:.3f} kg remaining)")
 
 
 def cmd_monte_carlo(args: argparse.Namespace) -> int:

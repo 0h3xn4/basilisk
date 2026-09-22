@@ -412,15 +412,39 @@ Driven directly by feedback from actually using the Phase 3 GUI:
   original, this is a reported ESTIMATE only (no atmosphere/rain/
   pointing-loss/coding-gain terms) and does not feed back into simulated
   physics anywhere.
+* **Orbit-maintenance / station-keeping automation, with delta-V and
+  propellant bookkeeping.** `schema.scenario.StationKeepingConfig`
+  (optional, per spacecraft) wires the new `engine.orbit_maintenance`
+  module -- `StationKeepingController`, ported from `../missionAnalysis`'s
+  `AltitudeKeepingController` -- into `engine.service`: a dedicated
+  `extForceTorque` effector fires a continuous prograde reboost burn
+  whenever a smoothed altitude estimate decays `deadband_km` below
+  `target_altitude_km`, gated off during eclipse and once propellant is
+  depleted. Propellant use is tracked via the rocket equation
+  (explicit-Euler) and fed back into the spacecraft's simulated mass every
+  tick, so thrust-to-mass stays physically consistent as it burns off --
+  see `SpacecraftConfig.dry_mass_kg`'s docstring for how that field's
+  meaning sharpens once `station_keeping` is set (it becomes the mass
+  *without* propellant; the initial simulated mass becomes
+  `dry_mass_kg + station_keeping.propellant_kg`). `ResultSet` gains
+  `{spacecraft}.station_keeping.altitude` (raw + smoothed),
+  `.burn_on`, `.propellant_remaining`, and `.delta_v` (cumulative);
+  `missionstudio run` also prints a one-line delta-V/propellant-used
+  summary per spacecraft so the headline numbers don't require opening a
+  CSV. This needs something actually decaying the orbit to have any
+  effect -- with only point-mass gravity (the default), altitude never
+  decays and the burn never fires; enable `SpacecraftConfig.enable_drag`
+  for a station-keeping scenario. Shares the same eclipse model
+  `PowerConfig` uses when both are configured on the same spacecraft.
 
-Both `PowerConfig` and `RFLinkConfig` default to `None` (off) on every
-existing scenario -- turning either on is the only input needed; the GUI's
-new "Power / link budget" spacecraft-editor tab and the ground-station
-editor's two new fields are pre-filled with reasonable placeholder
-defaults, matching this phase's "user only supplies numbers, the tool does
-the rest" design goal. Orbit-maintenance/ΔV-fuel bookkeeping, constellation
-design, and richer Vizard live-data panels are scoped but not yet built --
-see "What's next" below.
+`PowerConfig`, `RFLinkConfig`, and `StationKeepingConfig` all default to
+`None` (off) on every existing scenario -- turning any one on is the only
+input needed; the GUI's new "Power / propulsion / link budget"
+spacecraft-editor tab and the ground-station editor's two new fields are
+pre-filled with reasonable placeholder defaults, matching this phase's
+"user only supplies numbers, the tool does the rest" design goal.
+Constellation design and richer Vizard live-data panels are scoped but not
+yet built -- see "What's next" below.
 
 ## Repository layout
 
@@ -697,14 +721,13 @@ Phase 4 (see "What Phase 4 adds" above) responded to the first round of
 real GUI usage feedback. Still open from that same feedback, scoped but
 not yet built:
 
-* **Orbit-maintenance / station-keeping automation**, with ΔV and
-  propellant-mass bookkeeping reported per spacecraft -- `../missionAnalysis`
-  has working station-keeping/phasing controller logic
-  (`constellation_controllers.py`) that can be adapted rather than built
-  from scratch.
 * **A constellation design tool** ("user supplies the requirement, the
   tool designs the constellation" -- Walker/streets-of-coverage-style
-  geometry generation), also with prior art in `../missionAnalysis`.
+  geometry generation), with prior art in `../missionAnalysis`
+  (`constellation_controllers.py`'s `PhasingKeepingController` handles the
+  in-plane phasing/drift-orbit half of this already, in the same style
+  `StationKeepingController` -- see "What Phase 4 adds" above -- was
+  ported from).
 * **Richer, more understandable Vizard live-data panels** beyond the
   Phase 4 default-camera/orbit-line fix -- e.g. clearer on-screen
   power/link-margin/access-window readouts while a live-streamed run is in
@@ -718,7 +741,7 @@ Carlo retention, and -- the one requiring something this development
 sandbox's network policy specifically blocks -- a full simulation run past
 SPICE kernel loading, to get the first true end-to-end confirmation
 (including `test_two_body_validation.py`'s analytical check, and the new
-Phase 4 power-budget/link-budget wiring) on top of everything up to that
+Phase 4 power-budget/link-budget/station-keeping wiring) on top of everything up to that
 point already being verified against a real Basilisk install. None of it
 is blocked on a design decision; each item is scoped and documented at its
 own call site for whoever picks it up next.

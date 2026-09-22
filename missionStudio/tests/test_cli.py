@@ -112,6 +112,53 @@ def test_run_vizard_camera_target_defaults_to_none():
     assert args.vizard_no_orbit_lines is False
 
 
+def test_station_keeping_summary_reports_delta_v_and_propellant_used(capsys):
+    import numpy as np
+
+    from missionstudio.engine.results import ResultSet, TimeSeries
+    from missionstudio.schema import GravityConfig, OrbitIC, Scenario, SpacecraftConfig, StationKeepingConfig
+
+    scenario = Scenario(
+        name="sk test", epoch_utc="2030-01-01T00:00:00", gravity=GravityConfig(),
+        spacecraft=[SpacecraftConfig(
+            name="sat-1",
+            orbit=OrbitIC(type="cartesian", position_km=[7000.0, 0.0, 0.0], velocity_km_s=[0.0, 7.5, 0.0]),
+            station_keeping=StationKeepingConfig(target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01,
+                                                  isp_s=1500.0, propellant_kg=2.0),
+        )],
+    )
+    result = ResultSet(scenario_name="sk test")
+    t = np.array([0.0, 100.0, 200.0])
+    result.add(TimeSeries("sat-1.station_keeping.delta_v", t, ("cumulative_delta_v",),
+                           np.array([[0.0], [0.5], [1.25]]), units="m/s"))
+    result.add(TimeSeries("sat-1.station_keeping.propellant_remaining", t, ("propellant_remaining",),
+                           np.array([[2.0], [1.9], [1.75]]), units="kg"))
+
+    cli._print_station_keeping_summary(scenario, result)
+    out = capsys.readouterr().out
+    assert "sat-1" in out
+    assert "1.250 m/s delta-V" in out
+    assert "0.250 kg propellant used" in out
+    assert "1.750 kg remaining" in out
+
+
+def test_station_keeping_summary_skips_spacecraft_without_the_config(capsys):
+    from missionstudio.engine.results import ResultSet
+    from missionstudio.schema import GravityConfig, OrbitIC, Scenario, SpacecraftConfig
+
+    scenario = Scenario(
+        name="no sk", epoch_utc="2030-01-01T00:00:00", gravity=GravityConfig(),
+        spacecraft=[SpacecraftConfig(
+            name="sat-1",
+            orbit=OrbitIC(type="cartesian", position_km=[7000.0, 0.0, 0.0], velocity_km_s=[0.0, 7.5, 0.0]),
+        )],
+    )
+    result = ResultSet(scenario_name="no sk")
+
+    cli._print_station_keeping_summary(scenario, result)
+    assert capsys.readouterr().out == ""
+
+
 def test_monte_carlo_rejects_scenario_without_enabled_flag(tmp_path, capsys):
     path = tmp_path / "scenario.json"
     _write_scenario(path)  # monte_carlo.enabled defaults to False

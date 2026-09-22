@@ -68,6 +68,7 @@ from ..schema.scenario import (
     ScenarioValidationError,
     SensorConfig,
     SpacecraftConfig,
+    StationKeepingConfig,
     SUPPORTED_ACTUATOR_KINDS,
     SUPPORTED_FSW_MODES,
     SUPPORTED_SENSOR_KINDS,
@@ -224,6 +225,27 @@ class SpacecraftEditorDialog(QDialog):
         power_form.addRow("Battery initial state of charge [-]", self.battery_initial_soc)
         power_layout.addWidget(self.power_group)
 
+        sk0 = config.station_keeping if config else None
+        self.station_keeping_group = QGroupBox("Station keeping (altitude maintenance, delta-V + fuel tracking)")
+        self.station_keeping_group.setCheckable(True)
+        self.station_keeping_group.setChecked(sk0 is not None)
+        sk_form = QFormLayout(self.station_keeping_group)
+        self.sk_target_altitude_km = _spin(0.001, 1.0e6, decimals=3, step=10.0,
+                                            value=sk0.target_altitude_km if sk0 else 500.0)
+        self.sk_deadband_km = _spin(0.001, 1.0e5, decimals=3, step=0.5, value=sk0.deadband_km if sk0 else 1.0)
+        self.sk_thrust_n = _spin(1.0e-6, 1.0e4, decimals=6, step=0.001, value=sk0.thrust_n if sk0 else 0.01)
+        self.sk_isp_s = _spin(1.0, 1.0e5, decimals=1, step=10.0, value=sk0.isp_s if sk0 else 1500.0)
+        self.sk_propellant_kg = _spin(0.0, 1.0e5, decimals=3, step=0.1, value=sk0.propellant_kg if sk0 else 2.0)
+        self.sk_eclipse_sunlit_threshold = _spin(0.001, 1.0, decimals=4, step=0.01,
+                                                   value=sk0.eclipse_sunlit_threshold if sk0 else 0.99)
+        sk_form.addRow("Target altitude [km]", self.sk_target_altitude_km)
+        sk_form.addRow("Deadband below target [km]", self.sk_deadband_km)
+        sk_form.addRow("Reboost thrust [N]", self.sk_thrust_n)
+        sk_form.addRow("Reboost thruster Isp [s]", self.sk_isp_s)
+        sk_form.addRow("Propellant available [kg]", self.sk_propellant_kg)
+        sk_form.addRow("Eclipse sunlit threshold [-]", self.sk_eclipse_sunlit_threshold)
+        power_layout.addWidget(self.station_keeping_group)
+
         rf_link0 = config.rf_link if config else None
         self.rf_link_group = QGroupBox("Downlink RF link budget (margin ESTIMATE only)")
         self.rf_link_group.setCheckable(True)
@@ -249,7 +271,7 @@ class SpacecraftEditorDialog(QDialog):
         power_layout.addWidget(self.rf_link_group)
         power_layout.addStretch(1)
 
-        tabs.addTab(power_tab, "Power / link budget")
+        tabs.addTab(power_tab, "Power / propulsion / link budget")
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._on_accept)
@@ -297,9 +319,22 @@ class SpacecraftEditorDialog(QDialog):
             control_params=self._parse_json_object(self.control_params_edit, "Control gains"),
             power=self._power_to_dataclass(),
             rf_link=self._rf_link_to_dataclass(),
+            station_keeping=self._station_keeping_to_dataclass(),
         )
         config.validate()  # raises ScenarioValidationError with a specific message on anything bad
         return config
+
+    def _station_keeping_to_dataclass(self) -> StationKeepingConfig | None:
+        if not self.station_keeping_group.isChecked():
+            return None
+        return StationKeepingConfig(
+            target_altitude_km=self.sk_target_altitude_km.value(),
+            deadband_km=self.sk_deadband_km.value(),
+            thrust_n=self.sk_thrust_n.value(),
+            isp_s=self.sk_isp_s.value(),
+            propellant_kg=self.sk_propellant_kg.value(),
+            eclipse_sunlit_threshold=self.sk_eclipse_sunlit_threshold.value(),
+        )
 
     def _power_to_dataclass(self) -> PowerConfig | None:
         if not self.power_group.isChecked():

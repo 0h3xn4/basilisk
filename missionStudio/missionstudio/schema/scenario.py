@@ -287,9 +287,60 @@ class RFLinkConfig:
 
 
 @dataclass
+class StationKeepingConfig:
+    """Automated altitude/semi-major-axis station-keeping for one
+    spacecraft, with delta-V and propellant bookkeeping
+    (``engine.orbit_maintenance``, ported from
+    ``../missionAnalysis``'s ``AltitudeKeepingController``): fires a
+    continuous low-thrust reboost burn (prograde, along the inertial
+    velocity direction) whenever a smoothed altitude estimate decays past
+    ``deadband_km`` below ``target_altitude_km``, holding the burn until
+    altitude is restored -- simple deadband/hysteresis control, gated off
+    during eclipse (approximates a solar-electric bus that can't run the
+    thruster off battery alone) and inhibited once propellant is
+    depleted. Propellant use is tracked via the rocket equation and fed
+    back into the spacecraft's simulated mass every tick, so thrust-to
+    -mass stays physically consistent as propellant burns off -- see
+    ``SpacecraftConfig.dry_mass_kg``'s docstring for how that interacts
+    with ``propellant_kg`` below.
+
+    This assumes something is actually decaying the orbit -- with only
+    point-mass gravity (this schema's default), altitude never decays and
+    the burn simply never fires. Enable atmospheric drag
+    (``SpacecraftConfig.enable_drag``) for this to have any effect.
+    ``None`` (the default) means no station-keeping is simulated for that
+    spacecraft.
+    """
+
+    target_altitude_km: float  # [km] altitude above the central body's equatorial radius to maintain
+    deadband_km: float  # [km] how far below target_altitude_km before a reboost burn starts
+    thrust_n: float  # [N] reboost thruster thrust
+    isp_s: float  # [s] reboost thruster specific impulse
+    propellant_kg: float  # [kg] initial propellant mass available for station-keeping
+    eclipse_sunlit_threshold: float = 0.99  # [-] shadow factor above which the spacecraft is treated as sunlit
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(self.target_altitude_km > 0, f"{spacecraft_name}: station_keeping.target_altitude_km must be > 0")
+        _require(0.0 < self.deadband_km < self.target_altitude_km,
+                  f"{spacecraft_name}: station_keeping.deadband_km must be > 0 and < target_altitude_km")
+        _require(self.thrust_n > 0, f"{spacecraft_name}: station_keeping.thrust_n must be > 0")
+        _require(self.isp_s > 0, f"{spacecraft_name}: station_keeping.isp_s must be > 0")
+        _require(self.propellant_kg >= 0, f"{spacecraft_name}: station_keeping.propellant_kg must be >= 0")
+        _require(0.0 < self.eclipse_sunlit_threshold <= 1.0,
+                  f"{spacecraft_name}: station_keeping.eclipse_sunlit_threshold must be in (0, 1]")
+
+
+@dataclass
 class SpacecraftConfig:
     name: str
     orbit: OrbitIC
+    # [kg] The spacecraft's mass WITHOUT station-keeping propellant. With
+    # station_keeping unset (the default), this is simply the whole
+    # spacecraft's simulated mass, exactly as before StationKeepingConfig
+    # existed. With station_keeping set, engine.service initializes the
+    # simulated mass to dry_mass_kg + station_keeping.propellant_kg, and
+    # the station-keeping controller depletes it back toward dry_mass_kg
+    # as propellant burns -- see StationKeepingConfig's docstring.
     dry_mass_kg: float = 100.0
     inertia_kg_m2: list = field(default_factory=lambda: [10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0])
     sigma_bn_init: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -322,6 +373,7 @@ class SpacecraftConfig:
 
     power: Optional[PowerConfig] = None
     rf_link: Optional[RFLinkConfig] = None
+    station_keeping: Optional[StationKeepingConfig] = None
 
     def validate(self) -> None:
         _require(bool(self.name), "spacecraft.name must not be empty")
@@ -372,6 +424,8 @@ class SpacecraftConfig:
             self.power.validate(self.name)
         if self.rf_link is not None:
             self.rf_link.validate(self.name)
+        if self.station_keeping is not None:
+            self.station_keeping.validate(self.name)
 
 
 @dataclass
@@ -590,8 +644,10 @@ class Scenario:
             power = PowerConfig(**power_data) if power_data is not None else None
             rf_link_data = sc.pop("rf_link", None)
             rf_link = RFLinkConfig(**rf_link_data) if rf_link_data is not None else None
+            station_keeping_data = sc.pop("station_keeping", None)
+            station_keeping = StationKeepingConfig(**station_keeping_data) if station_keeping_data is not None else None
             spacecraft.append(SpacecraftConfig(orbit=orbit, sensors=sensors, actuators=actuators,
-                                                power=power, rf_link=rf_link, **sc))
+                                                power=power, rf_link=rf_link, station_keeping=station_keeping, **sc))
 
         return Scenario(
             gravity=gravity, sim_settings=sim_settings, space_weather=space_weather,

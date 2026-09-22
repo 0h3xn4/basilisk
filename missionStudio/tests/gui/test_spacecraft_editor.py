@@ -156,6 +156,58 @@ def test_dialog_round_trips_power_and_rf_link(qtbot):
     assert got.rf_link == existing.rf_link
 
 
+def test_dialog_station_keeping_defaults_to_none(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    assert not dialog.station_keeping_group.isChecked()
+    sc = dialog.to_dataclass()
+    assert sc.station_keeping is None
+
+
+def test_dialog_builds_station_keeping_config_when_group_checked(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    dialog.station_keeping_group.setChecked(True)
+    dialog.sk_target_altitude_km.setValue(600.0)
+    dialog.sk_deadband_km.setValue(2.0)
+    dialog.sk_thrust_n.setValue(0.02)
+    dialog.sk_isp_s.setValue(1600.0)
+    dialog.sk_propellant_kg.setValue(3.5)
+    dialog.sk_eclipse_sunlit_threshold.setValue(0.95)
+
+    sc = dialog.to_dataclass()
+    assert sc.station_keeping is not None
+    assert sc.station_keeping.target_altitude_km == 600.0
+    assert sc.station_keeping.deadband_km == 2.0
+    assert sc.station_keeping.thrust_n == 0.02
+    assert sc.station_keeping.isp_s == 1600.0
+    assert sc.station_keeping.propellant_kg == 3.5
+    assert sc.station_keeping.eclipse_sunlit_threshold == 0.95
+
+
+def test_dialog_round_trips_station_keeping(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig, StationKeepingConfig
+
+    existing = SpacecraftConfig(
+        name="sat-sk",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        station_keeping=StationKeepingConfig(target_altitude_km=550.0, deadband_km=1.5, thrust_n=0.015,
+                                              isp_s=1550.0, propellant_kg=2.5),
+    )
+    dialog = SpacecraftEditorDialog(config=existing)
+    qtbot.addWidget(dialog)
+
+    assert dialog.station_keeping_group.isChecked()
+
+    got = dialog.to_dataclass()
+    assert got.station_keeping == existing.station_keeping
+
+
 def test_dialog_rejects_invalid_fsw_params_json(qtbot):
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
 

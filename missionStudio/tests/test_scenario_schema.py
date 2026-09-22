@@ -17,6 +17,7 @@ from missionstudio.schema import (
     ScenarioValidationError,
     SensorConfig,
     SpacecraftConfig,
+    StationKeepingConfig,
     load_scenario,
 )
 
@@ -499,3 +500,72 @@ def test_old_scenario_file_without_power_or_rf_link_keys_still_loads(tmp_path):
     loaded = load_scenario(path)
     assert loaded.spacecraft[0].power is None
     assert loaded.spacecraft[0].rf_link is None
+    assert loaded.spacecraft[0].station_keeping is None
+
+
+def test_station_keeping_defaults_to_none():
+    sc = _minimal_scenario()
+    assert sc.spacecraft[0].station_keeping is None
+    sc.validate()  # must not raise -- not required
+
+
+def test_station_keeping_round_trips_through_save_load(tmp_path):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+
+    path = tmp_path / "scenario.json"
+    sc.save(path)
+    loaded = load_scenario(path)
+
+    assert isinstance(loaded.spacecraft[0].station_keeping, StationKeepingConfig)
+    assert loaded.spacecraft[0].station_keeping.target_altitude_km == 500.0
+    assert loaded.spacecraft[0].station_keeping.propellant_kg == 2.0
+    assert loaded.spacecraft[0].station_keeping.eclipse_sunlit_threshold == 0.99  # default preserved
+
+
+def test_station_keeping_rejects_deadband_not_less_than_target_altitude():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=500.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="deadband_km"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_zero_deadband():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=0.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="deadband_km"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_non_positive_thrust():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.0, isp_s=1500.0, propellant_kg=2.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="thrust_n"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_negative_propellant():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=-1.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="propellant_kg"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_out_of_range_eclipse_threshold():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+        eclipse_sunlit_threshold=1.5,
+    )
+    with pytest.raises(ScenarioValidationError, match="eclipse_sunlit_threshold"):
+        sc.validate()
