@@ -106,20 +106,42 @@ module -- there's no runtime code for it.
 
 Verification status
 --------------------
-Requires a Basilisk build -- cannot be executed in this development
-sandbox (no Basilisk build here; a from-source build was attempted and
-failed because this sandbox's network policy blocks Conan Center -- see
-``missionStudio/README.md``). Written directly against the same verified
-API calls already exercised (and long since run against a real Basilisk
+Requires a Basilisk build. A from-source build inside this project's
+sandbox was attempted early on and failed (blocked Conan Center network
+access); later, ``pip install "bsk[all]"`` (Basilisk's own published PyPI
+package) turned out to work in that same sandbox -- see
+``missionStudio/README.md``'s "Getting started" section for the working
+install path this project actually verified.
+
+Against that real build, ``build()`` was confirmed to run correctly
+through gravity/SPICE-interface construction, spacecraft assembly (mass,
+inertia, orbit IC, integrator selection), and attitude/sensor/actuator/
+ground-station wiring -- it fails only at the SPICE kernel DOWNLOAD step
+inside ``engine.kernels``, because that sandbox's network egress to NAIF's
+kernel host was blocked (see ``kernels.py``'s own verification note); this
+is an environment limitation, not a code path that was skipped. A real
+bug was found and fixed this way in ``engine/time_system.py`` (a bare
+``import pyswice`` that doesn't match the published package's module
+layout) -- see that module's own docstring. Every Basilisk module/class
+this file and ``engine/fsw.py``/``vizard.py``/``monte_carlo.py`` import
+was individually confirmed to exist under the expected name in that real
+build. Full end-to-end execution (a run that gets PAST kernel loading) was
+NOT achieved in this sandbox, for the network reason above -- that
+remains to be exercised on a machine with ordinary internet access, ideally
+starting with ``tests/test_two_body_validation.py``.
+
+The calling conventions in this file also mirror the same verified API
+calls already exercised (and long since run against a real Basilisk
 build) in ``../missionAnalysis/run_constellation_mission.py`` earlier in
-this project -- see that file for the calling conventions this mirrors
-(``gravBodyFactory``, ``spacecraft.Spacecraft``, ``svIntegrators``,
-``orbitalMotion``). The one call sequence in this file that is NOT
-mirrored from already-verified code is the integrator class lookup (see
-``_INTEGRATORS`` below) -- those class names were confirmed by directly
-listing ``src/simulation/dynamics/Integrators/`` in this checkout, not by
-example usage, since only ``svIntegratorRKF78`` happens to already appear
-in ``../missionAnalysis``.
+this project (``gravBodyFactory``, ``spacecraft.Spacecraft``,
+``svIntegrators``, ``orbitalMotion``). The integrator class lookup (see
+``_INTEGRATORS`` below) was confirmed both by directly listing
+``src/simulation/dynamics/Integrators/`` in this checkout and, now, by
+import against a real (if newer/PyPI-sourced) Basilisk build -- note that
+build also exposes ``svIntegratorRK4``, which this checkout's own source
+does not; ``_INTEGRATORS`` intentionally still doesn't offer it, since
+this schema targets what THIS checkout ships, not whatever a given
+installed version happens to add.
 """
 
 from __future__ import annotations

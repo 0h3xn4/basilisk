@@ -28,8 +28,25 @@ missionStudio that needs a time conversion should call into this module,
 not roll its own SPICE/datetime math.
 
 Requires a Basilisk build (imports ``Basilisk.architecture.messaging`` and
-the ``pyswice`` CSPICE wrapper) -- cannot be executed in this development
-sandbox (no Basilisk build here; see ``missionStudio/README.md``).
+the ``pyswice`` CSPICE wrapper).
+
+Verification status (updated after this project's first genuine access to
+a working Basilisk build, via ``pip install "bsk[all]"`` -- see
+``missionStudio/README.md``'s "Getting started" section): the exact
+``furnsh_c``/``str2et_c``/``doubleArray``/``et2utc_c``/``unload_c``/
+``unitim_c`` call sequence below was run for real against
+``Basilisk.topLevelModules.pyswice`` (round-tripping
+``"2030-01-01T00:00:00"`` -> ET -> back to the identical ISO string, and
+producing sane TAI/TT offsets from ET). One real bug was caught doing
+this: the module-level import used to be a bare ``import pyswice``, which
+worked against this checkout's own source layout but not against the
+published ``bsk`` package on PyPI, where the module lives at
+``Basilisk.topLevelModules.pyswice`` (confirmed by reading
+``Basilisk.utilities.simHelpers``'s own import of it) -- fixed below.
+``get_path()``/kernel-fetching itself (as opposed to the SPICE calls that
+consume an already-loaded kernel) could not be exercised end-to-end in
+that same environment, because its network egress to NAIF's kernel host
+was blocked -- see ``engine/kernels.py``'s own note.
 
 Provenance of the SPICE call sequence below
 --------------------------------------------
@@ -41,19 +58,12 @@ from memory) -- that is the one place in this codebase known to call
 ``pyswice`` correctly, including the easy-to-get-wrong ``doubleArray``
 marshalling ``str2et_c`` needs for its output-pointer argument.
 
-:func:`epoch_times`'s TAI/TT conversions use ``pyswice.unitim_c()``, which
-is NOT called anywhere else in this checkout, so it has not been verified
-by example the way the above two have. Its exposure is confirmed by
-reading ``src/topLevelModules/pyswice/pyswice.i``: that file wraps the
-*entire* public CSPICE API via ``#include "SpiceUsr.h"``, excluding only
-four unrelated functions (``illumg_c``, ``prefix_c``, ``ekucei_c``,
-``ekuced_c``) -- ``unitim_c`` is not among them, so it is exposed as
-``pyswice.unitim_c``. Per the same file's typemap rules, a plain
-``SpiceDouble`` return value (which is what CSPICE's ``unitim_c`` has --
-unlike ``str2et_c``, it returns its result directly rather than through an
-output pointer) should map straight through to a Python ``float`` with no
-``doubleArray`` marshalling needed. This reasoning has not been checked
-against a real build in this sandbox; verify (or fix) on first use.
+:func:`epoch_times`'s TAI/TT conversions use ``pyswice.unitim_c()``, whose
+exposure was confirmed by reading ``src/topLevelModules/pyswice/pyswice.i``
+directly (that file wraps the *entire* public CSPICE API via
+``#include "SpiceUsr.h"``, excluding only four unrelated functions) before
+it was ALSO exercised directly against a real build, per the verification
+note above.
 """
 
 from __future__ import annotations
@@ -65,7 +75,7 @@ from datetime import datetime
 from Basilisk.utilities.supportDataTools.dataFetcher import DataFile, get_path
 
 try:
-    import pyswice
+    from Basilisk.topLevelModules import pyswice
 except ImportError as exc:  # pragma: no cover - only hit without a Basilisk build
     raise ImportError(
         "missionstudio.engine.time_system requires the pyswice CSPICE wrapper, which ships "
