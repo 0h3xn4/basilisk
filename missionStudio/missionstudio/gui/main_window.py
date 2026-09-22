@@ -33,9 +33,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QElapsedTimer, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
-from PySide6.QtWidgets import QDialog, QFileDialog, QMainWindow, QMessageBox, QSplitter, QTabWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QSplitter,
+    QTabWidget,
+)
 
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
 from .kernel_status_widget import KernelStatusWidget
@@ -77,6 +86,29 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         self._build_menu()
+
+        # Run-in-progress feedback (status bar): an indeterminate busy bar
+        # plus an elapsed-time label, shown for the duration of ANY
+        # run/Monte Carlo worker. Indeterminate rather than a real percentage
+        # because neither SimBaseClass.ExecuteSimulation() nor
+        # MonteCarlo.Controller.executeSimulations() exposes a step/run
+        # progress callback to drive one -- this at least answers "is it
+        # running, or did it silently die" (users previously had only a
+        # static status-bar string and no other feedback while a run was in
+        # flight -- see the on_run/on_run_monte_carlo history).
+        self._busy_elapsed = QElapsedTimer()
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(200)
+        self._busy_timer.timeout.connect(self._update_busy_elapsed)
+        self._busy_label = QLabel()
+        self._busy_label.setVisible(False)
+        self._busy_progress = QProgressBar()
+        self._busy_progress.setRange(0, 0)  # indeterminate ("marching ants") -- see comment above
+        self._busy_progress.setMaximumWidth(120)
+        self._busy_progress.setVisible(False)
+        self.statusBar().addPermanentWidget(self._busy_label)
+        self.statusBar().addPermanentWidget(self._busy_progress)
+
         self.statusBar().showMessage("Ready.")
         self._update_window_title()
 
@@ -220,11 +252,46 @@ class MainWindow(QMainWindow):
         self._mark_clean()
         self.statusBar().showMessage(f"Saved {path}")
 
+    # -- run-in-progress feedback -------------------------------------------
+    def _set_running(self, running: bool) -> None:
+        """Disables every Run-menu action while ANY run (single or Monte
+        Carlo) is in flight -- previously only the action that started the
+        run was disabled, so e.g. Run Monte Carlo could be triggered while a
+        single run's worker was still using ``self._run_worker``, silently
+        losing track of it. One run at a time.
+        """
+        for action in (self.run_action, self.monte_carlo_action, self.vizard_action, self.check_kernels_action):
+            action.setEnabled(not running)
+
+    def _start_busy(self, message: str) -> None:
+        self._set_running(True)
+        self._busy_elapsed.start()
+        self._busy_label.setText("0:00 elapsed")
+        self._busy_label.setVisible(True)
+        self._busy_progress.setVisible(True)
+        self._busy_timer.start()
+        self.statusBar().showMessage(message)
+
+    def _stop_busy(self, message: str) -> None:
+        self._set_running(False)
+        self._busy_timer.stop()
+        self._busy_label.setVisible(False)
+        self._busy_progress.setVisible(False)
+        self.statusBar().showMessage(message)
+
+    def _update_busy_elapsed(self) -> None:
+        seconds = self._busy_elapsed.elapsed() // 1000
+        self._busy_label.setText(f"{seconds // 60}:{seconds % 60:02d} elapsed")
+
     # -- Run --------------------------------------------------------------
     def on_configure_vizard(self) -> None:
         current_save_file = getattr(self._vizard_request, "save_file", None)
         current_live_stream = getattr(self._vizard_request, "live_stream", False)
-        dialog = VizardDialog(current_save_file=current_save_file, current_live_stream=current_live_stream, parent=self)
+        current_camera_target = getattr(self._vizard_request, "camera_target", None)
+        current_show_orbit_lines = getattr(self._vizard_request, "show_orbit_lines", True)
+        dialog = VizardDialog(current_save_file=current_save_file, current_live_stream=current_live_stream,
+                               current_camera_target=current_camera_target,
+                               current_show_orbit_lines=current_show_orbit_lines, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._vizard_request = dialog.to_request()
             if self._vizard_request is None:
@@ -239,22 +306,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Cannot run invalid scenario", str(exc))
             return
 
-        self.run_action.setEnabled(False)
-        self.statusBar().showMessage(f"Running {scenario.name}...")
+        self._start_busy(f"Running {scenario.name}...")
         self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request)
         self._run_worker.finished_ok.connect(self._on_run_finished)
         self._run_worker.failed.connect(self._on_run_failed)
         self._run_worker.start()
 
     def _on_run_finished(self, result) -> None:
-        self.run_action.setEnabled(True)
+        self._stop_busy(f"Run complete: {len(result.series)} result series.")
         self.results_widget.set_result(result)
         self.right_tabs.setCurrentWidget(self.results_widget)
-        self.statusBar().showMessage(f"Run complete: {len(result.series)} result series.")
 
     def _on_run_failed(self, message: str) -> None:
-        self.run_action.setEnabled(True)
-        self.statusBar().showMessage("Run failed.")
+        self._stop_busy("Run failed.")
         QMessageBox.critical(self, "Simulation failed", message)
 
     def on_run_monte_carlo(self) -> None:
@@ -274,25 +338,22 @@ class MainWindow(QMainWindow):
             return
         archive_dir = Path(archive_dir_str)
 
-        self.monte_carlo_action.setEnabled(False)
-        self.statusBar().showMessage(f"Running {scenario.monte_carlo.num_runs} Monte Carlo case(s)...")
+        self._start_busy(f"Running {scenario.monte_carlo.num_runs} Monte Carlo case(s)...")
         self._mc_worker = MonteCarloWorker(scenario, scenario.monte_carlo, archive_dir)
         self._mc_worker.finished_ok.connect(self._on_monte_carlo_finished)
         self._mc_worker.failed.connect(self._on_monte_carlo_failed)
         self._mc_worker.start()
 
     def _on_monte_carlo_finished(self, failures: list) -> None:
-        self.monte_carlo_action.setEnabled(True)
         if failures:
-            self.statusBar().showMessage(f"Monte Carlo complete with {len(failures)} failed run(s).")
+            self._stop_busy(f"Monte Carlo complete with {len(failures)} failed run(s).")
             QMessageBox.warning(self, "Monte Carlo finished with failures",
                                  f"Run indices that failed: {failures}")
         else:
-            self.statusBar().showMessage("Monte Carlo complete -- all runs succeeded.")
+            self._stop_busy("Monte Carlo complete -- all runs succeeded.")
 
     def _on_monte_carlo_failed(self, message: str) -> None:
-        self.monte_carlo_action.setEnabled(True)
-        self.statusBar().showMessage("Monte Carlo run failed.")
+        self._stop_busy("Monte Carlo run failed.")
         QMessageBox.critical(self, "Monte Carlo failed", message)
 
     # -- window lifecycle ---------------------------------------------------

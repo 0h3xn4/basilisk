@@ -82,7 +82,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.vizard_save_file or args.vizard_live_stream:
         from .engine.vizard import VizardRequest
 
-        vizard_request = VizardRequest(save_file=args.vizard_save_file, live_stream=args.vizard_live_stream)
+        vizard_request = VizardRequest(
+            save_file=args.vizard_save_file, live_stream=args.vizard_live_stream,
+            camera_target=args.vizard_camera_target, show_orbit_lines=not args.vizard_no_orbit_lines,
+        )
 
     print(f"Running {scenario.name!r} ({len(scenario.spacecraft)} spacecraft, "
           f"{scenario.sim_settings.duration_days} day(s), {scenario.sim_settings.integrator})...")
@@ -200,6 +203,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="write a Vizard .bin playback file to this path (see engine/vizard.py)")
     p_run.add_argument("--vizard-live-stream", action="store_true",
                         help="live-stream to a Vizard instance already running on this machine")
+    p_run.add_argument("--vizard-camera-target", type=str, default=None,
+                        help="spacecraft or celestial body name for Vizard's camera to start locked on "
+                             "(default: the scenario's central body -- an Earth-centered view with the orbit "
+                             "tracing around it, like STK/GMAT/FreeFlyer, rather than a spacecraft-locked close-up)")
+    p_run.add_argument("--vizard-no-orbit-lines", action="store_true",
+                        help="don't draw Vizard's orbit-trace lines (they're on by default)")
     p_run.set_defaults(func=cmd_run)
 
     p_mc = subparsers.add_parser("monte-carlo", help="run a Monte Carlo batch and archive retained results")

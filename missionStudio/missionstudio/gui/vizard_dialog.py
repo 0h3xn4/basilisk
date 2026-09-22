@@ -28,9 +28,11 @@ needed to show this dialog -- the request is only handed to
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -46,7 +48,8 @@ class VizardDialog(QDialog):
     :meth:`to_request` after ``exec()`` returns ``Accepted``.
     """
 
-    def __init__(self, current_save_file: str | None = None, current_live_stream: bool = False, parent=None):
+    def __init__(self, current_save_file: str | None = None, current_live_stream: bool = False,
+                 current_camera_target: str | None = None, current_show_orbit_lines: bool = True, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Vizard visualization")
 
@@ -71,6 +74,16 @@ class VizardDialog(QDialog):
         layout.addLayout(save_file_row)
 
         layout.addWidget(self.live_stream_radio)
+
+        view_form = QFormLayout()
+        self.camera_target_edit = QLineEdit(current_camera_target or "")
+        self.camera_target_edit.setPlaceholderText("(default: central body -- Earth-centered view, like STK/GMAT/FreeFlyer)")
+        view_form.addRow("Camera starts locked on", self.camera_target_edit)
+        layout.addLayout(view_form)
+
+        self.orbit_lines_check = QCheckBox("Show orbit trace lines")
+        self.orbit_lines_check.setChecked(current_show_orbit_lines)
+        layout.addWidget(self.orbit_lines_check)
 
         if current_live_stream:
             self.live_stream_radio.setChecked(True)
@@ -105,6 +118,9 @@ class VizardDialog(QDialog):
             return None
         from ..engine.vizard import VizardRequest
 
+        camera_target = self.camera_target_edit.text().strip() or None
+        show_orbit_lines = self.orbit_lines_check.isChecked()
         if self.live_stream_radio.isChecked():
-            return VizardRequest(live_stream=True)
-        return VizardRequest(save_file=self.save_file_edit.text().strip())
+            return VizardRequest(live_stream=True, camera_target=camera_target, show_orbit_lines=show_orbit_lines)
+        return VizardRequest(save_file=self.save_file_edit.text().strip(),
+                              camera_target=camera_target, show_orbit_lines=show_orbit_lines)
