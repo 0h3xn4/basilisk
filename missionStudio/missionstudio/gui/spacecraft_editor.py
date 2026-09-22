@@ -45,6 +45,7 @@ corrected.
 from __future__ import annotations
 
 import json
+from typing import NamedTuple
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -85,6 +86,81 @@ from .orbit_ic_widget import OrbitIcWidget
 from .sensor_actuator_editor import SensorActuatorListWidget
 
 _FSW_MODE_NONE_LABEL = "(none -- no attitude control)"
+
+
+class _FswParamSpec(NamedTuple):
+    key: str
+    required: bool
+    example: object
+    help_text: str
+
+
+# Same rationale/pattern as gui.sensor_actuator_editor._KIND_PARAM_SPECS
+# (see that module's docstring) -- drives a per-mode hint label, a "Reset
+# to template" button, and immediate required-key validation here, instead
+# of a blank JSON box with only a one-line static example. Keep in sync
+# with engine.fsw.build_guidance()'s actual fsw_params.get()/[...] usage.
+_FSW_MODE_PARAM_SPECS: dict[str, list[_FswParamSpec]] = {
+    "inertial3D": [
+        _FswParamSpec("sigma_R0N", False, [0.0, 0.0, 0.0], "target inertial attitude, MRP [-]"),
+    ],
+    "hillPoint": [],
+    "velocityPoint": [],
+    "sunSafePoint": [
+        _FswParamSpec("sHatBdyCmd", False, [0.0, 0.0, 1.0], "body-frame sun-pointing axis, unit vector [-]"),
+        _FswParamSpec("min_unit_mag", False, 0.1, "minimum sun-sensor signal magnitude to trust [-]"),
+        _FswParamSpec("sun_axis_spin_rate_rad_s", False, 0.0, "commanded spin rate about sHatBdyCmd [rad/s]"),
+    ],
+    "locationPointing": [
+        _FswParamSpec("target_ground_station", True, "<ground station name>",
+                       "name of a GroundStationConfig already in this scenario"),
+        _FswParamSpec("pHat_B", False, [0.0, 0.0, 1.0], "body-frame pointing axis, unit vector [-]"),
+    ],
+}
+
+# Mirrors engine.fsw.DEFAULT_MRP_GAINS -- not imported directly since
+# engine.fsw pulls in Basilisk, which this GUI module must not require
+# just to be opened (see e.g. tests/gui/'s requires_gui-only, no
+# requires_basilisk, marker on every test that imports this module).
+_CONTROL_PARAM_SPECS: list[_FswParamSpec] = [
+    _FswParamSpec("K", False, 3.5, "MRP feedback proportional (attitude) gain"),
+    _FswParamSpec("P", False, 30.0, "MRP feedback derivative (rate) gain"),
+    _FswParamSpec("Ki", False, -1.0, "integral gain (negative disables integral feedback)"),
+    _FswParamSpec("integral_limit", False, 0.0, "integral windup limit"),
+]
+
+
+def _fsw_template_params(fsw_mode: "str | None") -> dict:
+    if fsw_mode is None:
+        return {}
+    return {spec.key: spec.example for spec in _FSW_MODE_PARAM_SPECS.get(fsw_mode, [])}
+
+
+def _fsw_missing_required_keys(fsw_mode: "str | None", params: dict) -> list[str]:
+    if fsw_mode is None:
+        return []
+    return [spec.key for spec in _FSW_MODE_PARAM_SPECS.get(fsw_mode, []) if spec.required and spec.key not in params]
+
+
+def _fsw_hint_text(fsw_mode: "str | None") -> str:
+    if fsw_mode is None:
+        return "No attitude control -- FSW params/control gains below are unused."
+    specs = _FSW_MODE_PARAM_SPECS.get(fsw_mode, [])
+    note = ""
+    if fsw_mode == "locationPointing":
+        note = (
+            "\n⚠ fsw_params['target_body'] (point at a celestial body directly) is schema-valid but not "
+            "wired up -- use target_ground_station above instead."
+        )
+    if not specs:
+        return f"{fsw_mode!r} needs no FSW params." + note
+    lines = [f"• {spec.key} ({'required' if spec.required else 'optional'}): {spec.help_text}"
+             for spec in specs]
+    return "\n".join(lines) + note
+
+
+def _control_params_hint_text() -> str:
+    return "\n".join(f"• {spec.key} (optional): {spec.help_text}" for spec in _CONTROL_PARAM_SPECS)
 
 
 def _spin(minimum: float, maximum: float, decimals: int = 4, step: float = 1.0, value: float = 0.0) -> QDoubleSpinBox:
@@ -185,21 +261,42 @@ class SpacecraftEditorDialog(QDialog):
         self.fsw_mode_combo.addItem(_FSW_MODE_NONE_LABEL, userData=None)
         for mode in SUPPORTED_FSW_MODES:
             self.fsw_mode_combo.addItem(mode, userData=mode)
-        fsw_form.addRow("FSW mode", self.fsw_mode_combo)
-        fsw_layout.addLayout(fsw_form)
-        fsw_layout.addWidget(QLabel(
-            "FSW params (JSON object) -- e.g. {\"sigma_R0N\": [0,0,0]} for inertial3D, "
-            "{\"target_ground_station\": \"name\", \"pHat_B\": [0,0,1]} for locationPointing"
-        ))
-        self.fsw_params_edit = QPlainTextEdit(json.dumps(config.fsw_params if config else {}, indent=2))
-        fsw_layout.addWidget(self.fsw_params_edit)
-        fsw_layout.addWidget(QLabel("Control gains (JSON object) -- e.g. {\"K\": 3.5, \"P\": 30.0}"))
-        self.control_params_edit = QPlainTextEdit(json.dumps(config.control_params if config else {}, indent=2))
-        fsw_layout.addWidget(self.control_params_edit)
         if config is not None and config.fsw_mode is not None:
             index = self.fsw_mode_combo.findData(config.fsw_mode)
             if index >= 0:
                 self.fsw_mode_combo.setCurrentIndex(index)
+        self.fsw_mode_combo.currentIndexChanged.connect(self._on_fsw_mode_changed)
+        fsw_form.addRow("FSW mode", self.fsw_mode_combo)
+        fsw_layout.addLayout(fsw_form)
+
+        self.fsw_hint_label = QLabel(_fsw_hint_text(self.fsw_mode_combo.currentData()))
+        self.fsw_hint_label.setWordWrap(True)
+        self.fsw_hint_label.setStyleSheet("color: palette(mid);")
+        fsw_layout.addWidget(self.fsw_hint_label)
+
+        fsw_params_row = QHBoxLayout()
+        fsw_params_row.addWidget(QLabel("FSW params (JSON object)"))
+        fsw_params_row.addStretch(1)
+        self.fsw_reset_template_button = QPushButton("Reset to template")
+        self.fsw_reset_template_button.setToolTip(
+            "Fill the FSW params box below with a working example for the selected FSW mode -- "
+            "overwrites whatever is currently typed there."
+        )
+        self.fsw_reset_template_button.clicked.connect(self._on_fsw_reset_template)
+        fsw_params_row.addWidget(self.fsw_reset_template_button)
+        fsw_layout.addLayout(fsw_params_row)
+
+        initial_fsw_params = config.fsw_params if config else _fsw_template_params(self.fsw_mode_combo.currentData())
+        self.fsw_params_edit = QPlainTextEdit(json.dumps(initial_fsw_params, indent=2))
+        fsw_layout.addWidget(self.fsw_params_edit)
+
+        fsw_layout.addWidget(QLabel("Control gains (JSON object)"))
+        control_hint_label = QLabel(_control_params_hint_text())
+        control_hint_label.setWordWrap(True)
+        control_hint_label.setStyleSheet("color: palette(mid);")
+        fsw_layout.addWidget(control_hint_label)
+        self.control_params_edit = QPlainTextEdit(json.dumps(config.control_params if config else {}, indent=2))
+        fsw_layout.addWidget(self.control_params_edit)
         tabs.addTab(fsw_tab, "Attitude control (FSW)")
 
         # -- Power budget / RF link budget tab (Phase 4) ----------------------
@@ -361,9 +458,17 @@ class SpacecraftEditorDialog(QDialog):
             QMessageBox.critical(self, "Invalid spacecraft", str(exc))
             return
         except ValueError as exc:
-            QMessageBox.critical(self, "Invalid JSON", str(exc))
+            QMessageBox.critical(self, "Invalid input", str(exc))
             return
         self.accept()
+
+    def _on_fsw_mode_changed(self, _index: int) -> None:
+        self.fsw_hint_label.setText(_fsw_hint_text(self.fsw_mode_combo.currentData()))
+
+    def _on_fsw_reset_template(self) -> None:
+        self.fsw_params_edit.setPlainText(
+            json.dumps(_fsw_template_params(self.fsw_mode_combo.currentData()), indent=2)
+        )
 
     def _parse_json_object(self, edit: QPlainTextEdit, field_label: str) -> dict:
         text = edit.toPlainText().strip() or "{}"
@@ -377,6 +482,14 @@ class SpacecraftEditorDialog(QDialog):
 
     def to_dataclass(self) -> SpacecraftConfig:
         name = self.name_edit.text().strip()
+        fsw_mode = self.fsw_mode_combo.currentData()
+        fsw_params = self._parse_json_object(self.fsw_params_edit, "FSW params")
+        missing = _fsw_missing_required_keys(fsw_mode, fsw_params)
+        if missing:
+            raise ValueError(
+                f"FSW mode {fsw_mode!r} is missing required params key(s): {', '.join(missing)} -- "
+                "use 'Reset to template' for a working example"
+            )
         config = SpacecraftConfig(
             name=name,
             orbit=self.orbit_widget.to_dataclass(),
@@ -390,8 +503,8 @@ class SpacecraftEditorDialog(QDialog):
             omega_bn_b_init_rad_s=[self.omega1.value(), self.omega2.value(), self.omega3.value()],
             sensors=self.sensor_list.to_list(),
             actuators=self.actuator_list.to_list(),
-            fsw_mode=self.fsw_mode_combo.currentData(),
-            fsw_params=self._parse_json_object(self.fsw_params_edit, "FSW params"),
+            fsw_mode=fsw_mode,
+            fsw_params=fsw_params,
             control_params=self._parse_json_object(self.control_params_edit, "Control gains"),
             power=self._power_to_dataclass(),
             rf_link=self._rf_link_to_dataclass(),

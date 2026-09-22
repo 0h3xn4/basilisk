@@ -25,14 +25,27 @@ parameterized by which item class and which kind whitelist to use.
 sensor/actuator kind: the schema deliberately keeps ``params`` an open
 dict (see ``schema.scenario.SensorConfig``'s docstring) so new kinds don't
 need a schema migration, and a JSON text box is the one editor that never
-falls behind that dict's actual shape. See each kind's ``params`` keys in
-``engine/fsw.py``'s builder functions (e.g. ``coarse_sun_sensor`` needs
-``nHat_B``, ``reaction_wheel`` needs ``gsHat_B``).
+falls behind that dict's actual shape.
+
+User feedback (this app's own beginner testing): a blank ``{}`` JSON box
+with zero in-dialog guidance meant a user had to already know -- from
+reading ``engine/fsw.py``'s source -- which keys a given kind needs, their
+units, and which ones are required vs. optional; a missing required key
+(e.g. ``coarse_sun_sensor``'s ``nHat_B``) wasn't caught here either, only
+much later when the OUTER spacecraft-editor dialog's
+``SpacecraftConfig.validate()`` ran, decontextualized from the params box
+that actually needs fixing. Fixed by _KIND_PARAM_SPECS below, which drives:
+a per-kind help label, a "Reset to template" button that fills the params
+box with a working example for the selected kind, and an immediate
+required-key check right in this dialog. Keep _KIND_PARAM_SPECS in sync
+with ``engine.fsw.attach_sensors()``/``build_reaction_wheels()``'s actual
+``params.get()``/``params[...]`` usage when either changes.
 """
 
 from __future__ import annotations
 
 import json
+from typing import NamedTuple
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -53,6 +66,79 @@ from PySide6.QtWidgets import (
 )
 
 
+class _ParamSpec(NamedTuple):
+    key: str
+    required: bool
+    example: object
+    help_text: str  # includes units, where the quantity has physical meaning
+
+
+# One entry per SUPPORTED_SENSOR_KINDS/SUPPORTED_ACTUATOR_KINDS value that
+# engine.fsw actually builds -- deliberately omits "thruster"/
+# "magnetic_torque_rod" (schema-valid but not wired up; see
+# _UNIMPLEMENTED_ACTUATOR_KINDS below and SUPPORTED_ACTUATOR_KINDS's own
+# module-level docstring note in schema.scenario).
+_KIND_PARAM_SPECS: dict[str, list[_ParamSpec]] = {
+    "star_tracker": [
+        _ParamSpec("noise_arcsec", False, 0.0, "1-sigma attitude noise [arcsec]"),
+    ],
+    "imu": [
+        _ParamSpec("gyro_noise_rad_s", False, 0.0, "1-sigma gyro noise [rad/s]"),
+        _ParamSpec("accel_noise_m_s2", False, 0.0, "1-sigma accelerometer noise [m/s^2]"),
+    ],
+    "coarse_sun_sensor": [
+        _ParamSpec("nHat_B", True, [1.0, 0.0, 0.0], "sensor boresight direction, body frame, unit vector [-]"),
+        _ParamSpec("fov_deg", False, 90.0, "full field of view [deg]"),
+        _ParamSpec("noise_std", False, 0.0, "1-sigma output noise (cosine-law output units) [-]"),
+    ],
+    "magnetometer": [
+        _ParamSpec("noise_std_tesla", False, [0.0, 0.0, 0.0], "1-sigma noise per body axis [T]"),
+    ],
+    "reaction_wheel": [
+        _ParamSpec("gsHat_B", True, [0.0, 0.0, 1.0], "spin-axis direction, body frame, unit vector [-]"),
+        _ParamSpec("rw_type", False, "custom",
+                    "wheel model name known to Basilisk's simIncludeRW.rwFactory(), e.g. 'Honeywell_HR16'"),
+        _ParamSpec("Omega_max", False, 6000.0, "max wheel speed [RPM]"),
+        _ParamSpec("u_max", False, 0.2, "max motor torque [N*m]"),
+        _ParamSpec("maxMomentum", False, 50.0, "max wheel angular momentum [N*m*s]"),
+        _ParamSpec("Js", False, 0.028, "wheel inertia about the spin axis [kg*m^2]"),
+    ],
+}
+
+# Schema-valid (SUPPORTED_ACTUATOR_KINDS) but engine.fsw/engine.service
+# raise a specific error if actually configured -- see
+# schema.scenario.SUPPORTED_ACTUATOR_KINDS's module-level docstring note.
+# Selectable here (so a saved scenario file using one can still be
+# opened/edited), but flagged with an in-dialog warning rather than
+# letting a beginner discover this only when Run Simulation fails.
+_UNIMPLEMENTED_ACTUATOR_KINDS = ("thruster", "magnetic_torque_rod")
+
+
+def _template_params(kind: str) -> dict:
+    return {spec.key: spec.example for spec in _KIND_PARAM_SPECS.get(kind, [])}
+
+
+def _missing_required_keys(kind: str, params: dict) -> list[str]:
+    return [spec.key for spec in _KIND_PARAM_SPECS.get(kind, []) if spec.required and spec.key not in params]
+
+
+def _hint_text(kind: str) -> str:
+    if kind in _UNIMPLEMENTED_ACTUATOR_KINDS:
+        return (
+            f"⚠ {kind!r} is schema-valid but not simulated yet -- engine.service will raise an error at "
+            "Run Simulation if this actuator is actually configured on a spacecraft with fsw_mode set. "
+            "Pick 'reaction_wheel' for a working actuator."
+        )
+    specs = _KIND_PARAM_SPECS.get(kind)
+    if not specs:
+        return "No params needed for this kind."
+    lines = []
+    for spec in specs:
+        tag = "required" if spec.required else "optional"
+        lines.append(f"• {spec.key} ({tag}): {spec.help_text}")
+    return "\n".join(lines)
+
+
 class _ItemEditorDialog(QDialog):
     def __init__(self, item_cls, kind_choices, item=None, parent: QWidget | None = None):
         super().__init__(parent)
@@ -68,14 +154,32 @@ class _ItemEditorDialog(QDialog):
             index = self.kind_combo.findText(item.kind)
             if index >= 0:
                 self.kind_combo.setCurrentIndex(index)
+        self.kind_combo.currentTextChanged.connect(self._on_kind_changed)
         form.addRow("Kind", self.kind_combo)
 
         self.name_edit = QLineEdit(item.name if item is not None else "")
         form.addRow("Name", self.name_edit)
         layout.addLayout(form)
 
-        layout.addWidget(QLabel("Params (JSON object)"))
-        self.params_edit = QPlainTextEdit(json.dumps(item.params if item is not None else {}, indent=2))
+        self.hint_label = QLabel(_hint_text(self.kind_combo.currentText()))
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet("color: palette(mid);")
+        layout.addWidget(self.hint_label)
+
+        params_row = QHBoxLayout()
+        params_row.addWidget(QLabel("Params (JSON object)"))
+        params_row.addStretch(1)
+        self.reset_template_button = QPushButton("Reset to template")
+        self.reset_template_button.setToolTip(
+            "Fill the params box below with a working example for the selected Kind -- "
+            "overwrites whatever is currently typed there."
+        )
+        self.reset_template_button.clicked.connect(self._on_reset_template)
+        params_row.addWidget(self.reset_template_button)
+        layout.addLayout(params_row)
+
+        initial_params = item.params if item is not None else _template_params(self.kind_combo.currentText())
+        self.params_edit = QPlainTextEdit(json.dumps(initial_params, indent=2))
         self.params_edit.setTabChangesFocus(True)
         layout.addWidget(self.params_edit)
 
@@ -83,6 +187,12 @@ class _ItemEditorDialog(QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_kind_changed(self, kind: str) -> None:
+        self.hint_label.setText(_hint_text(kind))
+
+    def _on_reset_template(self) -> None:
+        self.params_edit.setPlainText(json.dumps(_template_params(self.kind_combo.currentText()), indent=2))
 
     def _on_accept(self) -> None:
         try:
@@ -96,6 +206,7 @@ class _ItemEditorDialog(QDialog):
         name = self.name_edit.text().strip()
         if not name:
             raise ValueError("name must not be empty")
+        kind = self.kind_combo.currentText()
         text = self.params_edit.toPlainText().strip() or "{}"
         try:
             params = json.loads(text)
@@ -103,7 +214,13 @@ class _ItemEditorDialog(QDialog):
             raise ValueError(f"params is not valid JSON: {exc}") from exc
         if not isinstance(params, dict):
             raise ValueError("params must be a JSON object (e.g. {\"gsHat_B\": [1, 0, 0]})")
-        return self._item_cls(kind=self.kind_combo.currentText(), name=name, params=params)
+        missing = _missing_required_keys(kind, params)
+        if missing:
+            raise ValueError(
+                f"{kind!r} is missing required params key(s): {', '.join(missing)} -- "
+                "use 'Reset to template' for a working example"
+            )
+        return self._item_cls(kind=kind, name=name, params=params)
 
 
 class SensorActuatorListWidget(QWidget):

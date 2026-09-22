@@ -595,6 +595,33 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   argument of periapsis/true anomaly (see
   `engine.service._osculating_elements`'s docstring) -- not a bug, just
   how classical elements behave at those limits.
+* **Sensor/actuator/FSW-mode setup is no longer a blank JSON box with zero
+  guidance.** User feedback: configuring a spacecraft's sensors, actuators,
+  and attitude-control mode was "confusing and not beginner friendly" --
+  each dialog offered only a Kind/mode combo and an empty `{}` params box,
+  so a user had to already know (by reading `engine/fsw.py`'s source)
+  which JSON keys a given kind needs, their units, and which are required.
+  A missing required key (e.g. `coarse_sun_sensor`'s `nHat_B`,
+  `reaction_wheel`'s `gsHat_B`, `locationPointing`'s
+  `target_ground_station`) wasn't caught there either -- only much later,
+  decontextualized, when the whole spacecraft dialog's
+  `SpacecraftConfig.validate()` ran (sensors/actuators) or not at all
+  until `Run Simulation` actually failed deep inside `engine.fsw`
+  (FSW mode). Fixed in both `gui.sensor_actuator_editor` and
+  `gui.spacecraft_editor`'s FSW tab: a per-kind/per-mode help label (key
+  name, required/optional, units, one-line description) that updates live
+  as the Kind/FSW-mode combo changes; a new spacecraft/sensor/actuator
+  starts pre-filled with a working example instead of `{}`; a "Reset to
+  template" button refills the params box for the CURRENTLY selected
+  kind/mode on demand (switching kind never silently overwrites what's
+  already typed, to avoid destroying in-progress edits); and both dialogs
+  now check required keys themselves and raise an immediate, specific
+  error naming exactly what's missing, right where the params box is.
+  `SUPPORTED_ACTUATOR_KINDS`'s `"thruster"`/`"magnetic_torque_rod"`
+  (schema-valid but not wired up -- see the Phase 0 section above) and
+  `locationPointing`'s `fsw_params["target_body"]` option now show an
+  explicit in-dialog warning instead of silently accepting a
+  configuration that fails only when the simulation actually runs.
 
 ## Repository layout
 

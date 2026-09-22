@@ -76,6 +76,50 @@ def test_dialog_defaults_fsw_mode_to_none(qtbot):
     assert sc.actuators == []
 
 
+def test_dialog_catches_missing_locationpointing_target_immediately(qtbot):
+    """Regression test: locationPointing's required
+    fsw_params['target_ground_station'] used to only be caught deep inside
+    engine.fsw at Run Simulation time (an FswError with no connection back
+    to this dialog), or not at all if the scenario was never actually run.
+    This dialog should catch it itself, right where the params box is.
+    """
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    index = dialog.fsw_mode_combo.findData("locationPointing")
+    dialog.fsw_mode_combo.setCurrentIndex(index)
+    dialog.fsw_params_edit.setPlainText("{}")  # no target_ground_station
+
+    with pytest.raises(ValueError, match="target_ground_station"):
+        dialog.to_dataclass()
+
+
+def test_dialog_fsw_reset_template_fills_working_example(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    index = dialog.fsw_mode_combo.findData("locationPointing")
+    dialog.fsw_mode_combo.setCurrentIndex(index)
+    dialog._on_fsw_reset_template()
+
+    sc = dialog.to_dataclass()
+    assert "target_ground_station" in sc.fsw_params
+
+
+def test_dialog_fsw_hint_updates_with_mode(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    assert "no attitude control" in dialog.fsw_hint_label.text().lower()
+
+    index = dialog.fsw_mode_combo.findData("locationPointing")
+    dialog.fsw_mode_combo.setCurrentIndex(index)
+    assert "target_ground_station" in dialog.fsw_hint_label.text()
+
+
 def test_dialog_power_and_rf_link_default_to_none(qtbot):
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
 
