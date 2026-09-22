@@ -1,0 +1,110 @@
+#
+#  ISC License
+#
+#  Copyright (c) 2026, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+#
+#  Permission to use, copy, modify, and/or distribute this software for any
+#  purpose with or without fee is hereby granted, provided that the above
+#  copyright notice and this permission notice appear in all copies.
+#
+#  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+#  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+#  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+#  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+#  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+#  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+"""VizardDialog: lets the user turn Vizard on for the NEXT run, choosing
+between the two modes ``engine.vizard.VizardRequest`` supports -- see that
+module's docstring for what "live simulation data" means in each mode.
+Does not import ``engine.vizard`` at module scope (no Basilisk import
+needed to show this dialog -- the request is only handed to
+``engine.vizard`` once a run actually starts, matching this app's general
+"engine/ imports Basilisk, gui/ doesn't have to" split).
+"""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QRadioButton,
+    QVBoxLayout,
+)
+
+
+class VizardDialog(QDialog):
+    """Modal "Enable Vizard" dialog. Construct with the current request (or
+    ``None`` to start disabled); read back the new choice via
+    :meth:`to_request` after ``exec()`` returns ``Accepted``.
+    """
+
+    def __init__(self, current_save_file: str | None = None, current_live_stream: bool = False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Vizard visualization")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Vizard is a separate application and cannot be embedded here -- pick how this run "
+            "feeds it. See missionStudio/README.md for how to open Vizard itself."
+        ))
+
+        self.disabled_radio = QRadioButton("Disabled (no Vizard output this run)")
+        self.save_file_radio = QRadioButton("Write a .bin playback file to open in Vizard afterward")
+        self.live_stream_radio = QRadioButton("Live-stream to a Vizard instance already running on this machine")
+        layout.addWidget(self.disabled_radio)
+        layout.addWidget(self.save_file_radio)
+
+        save_file_row = QHBoxLayout()
+        self.save_file_edit = QLineEdit(current_save_file or "")
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.clicked.connect(self._on_browse)
+        save_file_row.addWidget(self.save_file_edit)
+        save_file_row.addWidget(self.browse_button)
+        layout.addLayout(save_file_row)
+
+        layout.addWidget(self.live_stream_radio)
+
+        if current_live_stream:
+            self.live_stream_radio.setChecked(True)
+        elif current_save_file:
+            self.save_file_radio.setChecked(True)
+        else:
+            self.disabled_radio.setChecked(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_browse(self) -> None:
+        path_str, _selected_filter = QFileDialog.getSaveFileName(self, "Vizard playback file", "", "Vizard playback (*.bin)")
+        if path_str:
+            self.save_file_edit.setText(path_str)
+            self.save_file_radio.setChecked(True)
+
+    def _on_accept(self) -> None:
+        if self.save_file_radio.isChecked() and not self.save_file_edit.text().strip():
+            self.save_file_edit.setFocus()
+            return
+        self.accept()
+
+    def to_request(self):
+        """Returns an ``engine.vizard.VizardRequest``, or ``None`` if the
+        user chose "Disabled". Imports ``engine.vizard`` lazily (see module
+        docstring).
+        """
+        if self.disabled_radio.isChecked():
+            return None
+        from ..engine.vizard import VizardRequest
+
+        if self.live_stream_radio.isChecked():
+            return VizardRequest(live_stream=True)
+        return VizardRequest(save_file=self.save_file_edit.text().strip())

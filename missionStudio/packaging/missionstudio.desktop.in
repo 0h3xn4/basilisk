@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=missionStudio
+Comment=Mission-analysis GUI built on the Basilisk astrodynamics framework
+Exec=@INSTALL_PREFIX@/missionstudio gui
+Icon=missionstudio
+Terminal=false
+Categories=Science;Education;
+StartupNotify=true

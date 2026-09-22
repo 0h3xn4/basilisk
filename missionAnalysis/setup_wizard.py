@@ -35,6 +35,14 @@ flags. Prompts (Enter accepts the default shown in ``[brackets]``) for:
 * Any number of additional standalone satellites, each with its own orbit
 * Any number of ground stations (with a couple of real-world presets, or
   fully custom lat/lon/altitude/elevation-mask)
+* Power budget (solar panel area/efficiency, bus/instrument/downlink power
+  draws, battery capacity and initial state of charge)
+* RF / downlink link budget (data rate, TX power, antenna gains, system
+  noise temperature, implementation loss, required Eb/N0 -- see
+  mission_config.py's RF section for what feeds the simulation vs. the
+  reported link-margin estimate only)
+* Attitude control (antenna-boresight and solar-panel-normal body-fixed
+  vectors, and the pointing controller's gains/torque clamp)
 * Station-keeping deadband, phasing tolerance (as a fraction of the current
   target separation), Earth gravity fidelity
 
@@ -131,6 +139,28 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
         if raw in ("n", "no"):
             return False
         print("  please answer y or n")
+
+
+def ask_vec3(prompt: str, default: list) -> str:
+    """Returns the raw comma-separated STRING (not a parsed list) -- this
+    is passed straight through to configure_mission.py's --antenna
+    -boresight-b/--panel-normal-b flags, which do the actual parsing and
+    (nonzero-magnitude) validation.
+    """
+    default_str = ",".join(str(c) for c in default)
+    while True:
+        raw = input(f"{prompt} [{default_str}]: ").strip()
+        raw = raw if raw else default_str
+        parts = raw.split(",")
+        if len(parts) != 3:
+            print("  please enter exactly 3 comma-separated numbers, e.g. 0,0,-1")
+            continue
+        try:
+            [float(p) for p in parts]
+        except ValueError:
+            print("  please enter exactly 3 comma-separated numbers, e.g. 0,0,-1")
+            continue
+        return raw
 
 
 def ask_float_list(prompt: str, default: list, validator=None) -> list:
@@ -338,6 +368,70 @@ def ask_ground_stations():
     return stations
 
 
+def ask_power_and_rf():
+    section("Power budget")
+    panel_area_m2 = ask_float("Solar panel area [m^2]", mc.SOLAR_PANEL_AREA_M2, lambda v: v > 0 or "must be > 0")
+    panel_efficiency = ask_float("Solar cell efficiency [-, 0-1]", mc.SOLAR_PANEL_EFFICIENCY,
+                                  lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]")
+    bus_idle_power_w = ask_float("Always-on bus power draw (avionics/thermal/ADCS) [W]", mc.BUS_IDLE_POWER_W,
+                                  lambda v: v >= 0 or "must be >= 0")
+    instrument_power_w = ask_float("EO instrument power draw while imaging [W]", mc.EO_INSTRUMENT_POWER_W,
+                                    lambda v: v >= 0 or "must be >= 0")
+    battery_capacity_wh = ask_float("Battery capacity [W*hr]", mc.BATTERY_CAPACITY_WH,
+                                     lambda v: v > 0 or "must be > 0")
+    battery_initial_soc = ask_float("Initial battery state of charge [-, 0-1]", mc.BATTERY_INITIAL_SOC,
+                                     lambda v: 0.0 <= v <= 1.0 or "must be in [0, 1]")
+
+    section("RF / downlink link budget")
+    print("Downlink rate and TX power feed the simulation (data throughput, power-budget load).")
+    print("Everything else here feeds a reported link-margin ESTIMATE only (simplified free-space")
+    print("path loss -- no atmosphere/rain/pointing-loss/coding-gain terms) -- it does NOT change")
+    print("the simulated downlink data rate/gating. See mission_config.py's RF section.")
+    downlink_rate_mbps = ask_float("Downlink data rate [Mbit/s]", mc.DOWNLINK_BAUD_RATE_BPS / 1.0e6,
+                                    lambda v: v > 0 or "must be > 0")
+    downlink_tx_power_w = ask_float("Downlink transmitter RF output power [W]", mc.DOWNLINK_TX_POWER_W,
+                                     lambda v: v > 0 or "must be > 0")
+    rf_frequency_ghz = ask_float("Downlink carrier frequency [GHz]", mc.RF_FREQUENCY_HZ / 1.0e9,
+                                  lambda v: v > 0 or "must be > 0")
+    rf_tx_antenna_gain_dbi = ask_float("Spacecraft downlink antenna gain [dBi]", mc.RF_TX_ANTENNA_GAIN_DBI)
+    rf_ground_antenna_gain_dbi = ask_float("Ground station antenna gain [dBi]", mc.RF_GROUND_ANTENNA_GAIN_DBI)
+    rf_system_noise_temp_k = ask_float("Ground receiver system noise temperature [K]",
+                                        mc.RF_SYSTEM_NOISE_TEMP_K, lambda v: v > 0 or "must be > 0")
+    rf_implementation_loss_db = ask_float("Implementation/pointing/polarization loss [dB]",
+                                           mc.RF_IMPLEMENTATION_LOSS_DB, lambda v: v >= 0 or "must be >= 0")
+    rf_required_ebno_db = ask_float("Required Eb/N0 for the assumed modulation/coding [dB]",
+                                     mc.RF_REQUIRED_EBNO_DB)
+
+    return dict(
+        panel_area_m2=panel_area_m2, panel_efficiency=panel_efficiency,
+        bus_idle_power_w=bus_idle_power_w, instrument_power_w=instrument_power_w,
+        battery_capacity_wh=battery_capacity_wh, battery_initial_soc=battery_initial_soc,
+        downlink_rate_mbps=downlink_rate_mbps, downlink_tx_power_w=downlink_tx_power_w,
+        rf_frequency_ghz=rf_frequency_ghz, rf_tx_antenna_gain_dbi=rf_tx_antenna_gain_dbi,
+        rf_ground_antenna_gain_dbi=rf_ground_antenna_gain_dbi, rf_system_noise_temp_k=rf_system_noise_temp_k,
+        rf_implementation_loss_db=rf_implementation_loss_db, rf_required_ebno_db=rf_required_ebno_db,
+    )
+
+
+def ask_attitude():
+    section("Attitude control")
+    print("Points the antenna boresight at the best in-range ground station whenever one is in")
+    print("contact, else points the solar panel normal at the sun -- both body-fixed vectors (no")
+    print("gimbal is modeled, so only one target can be satisfied at a time; see README.md).")
+    antenna_boresight_b = ask_vec3("Antenna boresight body vector", mc.ANTENNA_BORESIGHT_B)
+    panel_normal_b = ask_vec3("Solar panel normal body vector", mc.PANEL_NORMAL_B)
+    attitude_k = ask_float("Attitude control proportional gain K [N*m]", mc.ATTITUDE_CONTROL_K,
+                            lambda v: v > 0 or "must be > 0")
+    attitude_p = ask_float("Attitude control rate-damping gain P [N*m*s]", mc.ATTITUDE_CONTROL_P,
+                            lambda v: v > 0 or "must be > 0")
+    attitude_max_torque_nm = ask_float("Per-axis commanded-torque clamp [N*m]", mc.ATTITUDE_CONTROL_MAX_TORQUE_NM,
+                                        lambda v: v > 0 or "must be > 0")
+    return dict(
+        antenna_boresight_b=antenna_boresight_b, panel_normal_b=panel_normal_b,
+        attitude_k=attitude_k, attitude_p=attitude_p, attitude_max_torque_nm=attitude_max_torque_nm,
+    )
+
+
 def ask_advanced():
     section("Station-keeping and mission fidelity")
     alt_deadband_km = ask_float("Altitude station-keeping deadband [km]", mc.ALT_DEADBAND_M / 1000.0,
@@ -370,6 +464,8 @@ def main() -> int:
         return 1
 
     ground_stations = ask_ground_stations()
+    power_rf = ask_power_and_rf()
+    attitude = ask_attitude()
     alt_deadband_km, phasing_tolerance_fraction, grav_degree = ask_advanced()
 
     # --- Write the structural config ---
@@ -395,6 +491,25 @@ def main() -> int:
         "--isp-s", str(bus["isp_s"]),
         "--propellant-kg", str(bus["propellant"]),
         "--eclipse-sunlit-threshold", str(bus["eclipse_sunlit_threshold"]),
+        "--panel-area-m2", str(power_rf["panel_area_m2"]),
+        "--panel-efficiency", str(power_rf["panel_efficiency"]),
+        "--bus-idle-power-w", str(power_rf["bus_idle_power_w"]),
+        "--instrument-power-w", str(power_rf["instrument_power_w"]),
+        "--downlink-tx-power-w", str(power_rf["downlink_tx_power_w"]),
+        "--battery-capacity-wh", str(power_rf["battery_capacity_wh"]),
+        "--battery-initial-soc", str(power_rf["battery_initial_soc"]),
+        "--rf-frequency-ghz", str(power_rf["rf_frequency_ghz"]),
+        "--downlink-rate-mbps", str(power_rf["downlink_rate_mbps"]),
+        "--rf-tx-antenna-gain-dbi", str(power_rf["rf_tx_antenna_gain_dbi"]),
+        "--rf-ground-antenna-gain-dbi", str(power_rf["rf_ground_antenna_gain_dbi"]),
+        "--rf-system-noise-temp-k", str(power_rf["rf_system_noise_temp_k"]),
+        "--rf-implementation-loss-db", str(power_rf["rf_implementation_loss_db"]),
+        "--rf-required-ebno-db", str(power_rf["rf_required_ebno_db"]),
+        "--antenna-boresight-b", attitude["antenna_boresight_b"],
+        "--panel-normal-b", attitude["panel_normal_b"],
+        "--attitude-k", str(attitude["attitude_k"]),
+        "--attitude-p", str(attitude["attitude_p"]),
+        "--attitude-max-torque-nm", str(attitude["attitude_max_torque_nm"]),
         "--alt-deadband-km", str(alt_deadband_km),
         "--phasing-tolerance-fraction", str(phasing_tolerance_fraction),
         "--earth-grav-degree", str(grav_degree),

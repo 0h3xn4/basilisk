@@ -1,0 +1,58 @@
+[project]
+name = "missionstudio"
+version = "0.1.0.dev0"
+description = "Standalone GUI mission-analysis application built on the Basilisk astrodynamics framework"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "ISC" }
+authors = [
+    { name = "missionStudio contributors" },
+]
+# Basilisk itself is deliberately NOT listed here: this project targets a
+# specific Basilisk build (see README.md's "Vendoring vs. building from
+# source" note), which is not something pip can resolve as an ordinary
+# dependency. numpy is the only hard runtime dependency of the
+# Basilisk-independent modules (schema, spaceweather, results); everything
+# in engine/ that talks to Basilisk obviously also needs a Basilisk build
+# on PYTHONPATH, arranged separately (see README.md).
+dependencies = [
+    "numpy>=1.24.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-qt>=4.4.0",
+]
+# The Phase 1 GUI shell: PySide6 for the widgets, matplotlib (already a
+# Basilisk dependency, see ../requirements.txt) embedded via
+# FigureCanvasQTAgg for results_widget.py's plots -- no new heavy plotting
+# dependency beyond what Basilisk itself already needs.
+gui = [
+    "PySide6>=6.6",
+    "matplotlib>=3.7.5",
+]
+
+[project.scripts]
+missionstudio = "missionstudio.cli:main"
+
+[build-system]
+requires = ["setuptools>=70.1.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["missionstudio*"]
+
+# missionstudio/scenarios/*.json (the two-body validation scenario and any
+# future example scenarios) has no __init__.py, so packages.find() above
+# never picks it up as a package -- found by actually building the wheel
+# (python -m build) and inspecting its contents, not assumed: without this,
+# `missionstudio validate missionstudio/scenarios/two_body_validation.json`
+# and the "Running a scenario" README example would 404 the moment
+# missionstudio was installed from a wheel instead of run from a checkout.
+[tool.setuptools.package-data]
+missionstudio = ["scenarios/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"

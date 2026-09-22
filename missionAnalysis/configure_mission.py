@@ -173,6 +173,13 @@ def _str(x: str) -> str:
     return x
 
 
+def _vec3(x: str) -> list:
+    parts = [float(p) for p in x.split(",")]
+    if len(parts) != 3:
+        raise ValueError("expected 3 comma-separated numbers, e.g. 0,0,-1")
+    return parts
+
+
 def _lit(x: Any) -> str:
     return repr(x)
 
@@ -226,6 +233,49 @@ FIELDS = [
     # --- Epoch / duration (EPOCH_UTC handled separately, see main()) ------
     Field("--mission-years", "mission_years", "MISSION_DURATION_YEARS", _num,
           lambda x: _lit(int(x) if float(x).is_integer() else x), "mission duration [yr]"),
+    # --- Power budget ------------------------------------------------------
+    Field("--panel-area-m2", "panel_area_m2", "SOLAR_PANEL_AREA_M2", _num, _lit,
+          "total deployed solar panel area [m^2]"),
+    Field("--panel-efficiency", "panel_efficiency", "SOLAR_PANEL_EFFICIENCY", _num, _lit,
+          "solar cell efficiency [-, 0-1]"),
+    Field("--bus-idle-power-w", "bus_idle_power_w", "BUS_IDLE_POWER_W", _num, _lit,
+          "always-on avionics/thermal/ADCS bus load [W]"),
+    Field("--instrument-power-w", "instrument_power_w", "EO_INSTRUMENT_POWER_W", _num, _lit,
+          "EO instrument power draw while imaging [W]"),
+    Field("--downlink-tx-power-w", "downlink_tx_power_w", "DOWNLINK_TX_POWER_W", _num, _lit,
+          "downlink transmitter RF output power [W] (power-budget load AND the RF link-budget EIRP term below)"),
+    Field("--battery-capacity-wh", "battery_capacity_wh", "BATTERY_CAPACITY_WH", _num, _lit,
+          "battery capacity [W*hr]"),
+    Field("--battery-initial-soc", "battery_initial_soc", "BATTERY_INITIAL_SOC", _num, _lit,
+          "initial battery state of charge, fraction of capacity [-, 0-1]"),
+    # --- RF / downlink link budget (see mission_config.py's RF section --
+    # this feeds a reported link-margin ESTIMATE only, not the simulated
+    # downlink data rate/gating) --------------------------------------------
+    Field("--rf-frequency-ghz", "rf_frequency_ghz", "RF_FREQUENCY_HZ", _num, lambda x: _lit(x * 1.0e9),
+          "downlink RF carrier frequency [GHz]"),
+    Field("--downlink-rate-mbps", "downlink_rate_mbps", "DOWNLINK_BAUD_RATE_BPS", _num, lambda x: _lit(x * 1.0e6),
+          "downlink data rate [Mbit/s]"),
+    Field("--rf-tx-antenna-gain-dbi", "rf_tx_antenna_gain_dbi", "RF_TX_ANTENNA_GAIN_DBI", _num, _lit,
+          "spacecraft downlink antenna gain [dBi]"),
+    Field("--rf-ground-antenna-gain-dbi", "rf_ground_antenna_gain_dbi", "RF_GROUND_ANTENNA_GAIN_DBI", _num, _lit,
+          "ground station antenna gain [dBi]"),
+    Field("--rf-system-noise-temp-k", "rf_system_noise_temp_k", "RF_SYSTEM_NOISE_TEMP_K", _num, _lit,
+          "ground receiver system noise temperature [K]"),
+    Field("--rf-implementation-loss-db", "rf_implementation_loss_db", "RF_IMPLEMENTATION_LOSS_DB", _num, _lit,
+          "combined pointing/polarization/implementation loss [dB]"),
+    Field("--rf-required-ebno-db", "rf_required_ebno_db", "RF_REQUIRED_EBNO_DB", _num, _lit,
+          "required Eb/N0 for the assumed modulation/coding [dB]"),
+    # --- Attitude control ----------------------------------------------
+    Field("--antenna-boresight-b", "antenna_boresight_b", "ANTENNA_BORESIGHT_B", _vec3, _lit,
+          "body-fixed antenna boresight unit vector, comma-separated [-, e.g. 0,0,-1]"),
+    Field("--panel-normal-b", "panel_normal_b", "PANEL_NORMAL_B", _vec3, _lit,
+          "body-fixed solar panel normal unit vector, comma-separated [-, e.g. 1,0,0]"),
+    Field("--attitude-k", "attitude_k", "ATTITUDE_CONTROL_K", _num, _lit,
+          "MRP attitude-error proportional control gain [N*m]"),
+    Field("--attitude-p", "attitude_p", "ATTITUDE_CONTROL_P", _num, _lit,
+          "body-rate feedback (damping) control gain [N*m*s]"),
+    Field("--attitude-max-torque-nm", "attitude_max_torque_nm", "ATTITUDE_CONTROL_MAX_TORQUE_NM", _num, _lit,
+          "per-axis commanded attitude-control torque clamp [N*m]"),
 ]
 
 _VALIDATORS = {
@@ -249,6 +299,25 @@ _VALIDATORS = {
     "phasing_tolerance_fraction": lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]",
     "earth_grav_degree": lambda v: 0 <= v <= 360 or "must be a plausible spherical-harmonics degree",
     "mission_years": lambda v: v > 0 or "must be > 0",
+    "panel_area_m2": lambda v: v > 0 or "must be > 0",
+    "panel_efficiency": lambda v: 0.0 < v <= 1.0 or "must be in (0, 1]",
+    "bus_idle_power_w": lambda v: v >= 0 or "must be >= 0",
+    "instrument_power_w": lambda v: v >= 0 or "must be >= 0",
+    "downlink_tx_power_w": lambda v: v > 0 or "must be > 0",
+    "battery_capacity_wh": lambda v: v > 0 or "must be > 0",
+    "battery_initial_soc": lambda v: 0.0 <= v <= 1.0 or "must be in [0, 1]",
+    "rf_frequency_ghz": lambda v: v > 0 or "must be > 0",
+    "downlink_rate_mbps": lambda v: v > 0 or "must be > 0",
+    "rf_tx_antenna_gain_dbi": lambda v: True,
+    "rf_ground_antenna_gain_dbi": lambda v: True,
+    "rf_system_noise_temp_k": lambda v: v > 0 or "must be > 0",
+    "rf_implementation_loss_db": lambda v: v >= 0 or "must be >= 0",
+    "rf_required_ebno_db": lambda v: True,
+    "antenna_boresight_b": lambda v: sum(c * c for c in v) > 1e-12 or "must be a nonzero vector",
+    "panel_normal_b": lambda v: sum(c * c for c in v) > 1e-12 or "must be a nonzero vector",
+    "attitude_k": lambda v: v > 0 or "must be > 0",
+    "attitude_p": lambda v: v > 0 or "must be > 0",
+    "attitude_max_torque_nm": lambda v: v > 0 or "must be > 0",
 }
 
 
@@ -281,8 +350,8 @@ def main(argv: Optional[list] = None) -> int:
             continue
         try:
             value = field.parser(raw)
-        except ValueError:
-            print(f"error: {field.flag} expects a number, got {raw!r}", file=sys.stderr)
+        except ValueError as exc:
+            print(f"error: {field.flag} could not parse {raw!r} ({exc})", file=sys.stderr)
             return 2
         validator = _VALIDATORS.get(field.dest)
         if validator is not None:

@@ -1,0 +1,63 @@
+"""Tests for gui.vizard_dialog.VizardDialog."""
+
+import pytest
+
+pytestmark = pytest.mark.requires_gui
+
+
+def test_defaults_to_disabled(qtbot):
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.disabled_radio.isChecked()
+    assert dialog.to_request() is None
+
+
+def test_save_file_mode(qtbot):
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog()
+    qtbot.addWidget(dialog)
+    dialog.save_file_edit.setText("/tmp/out.bin")
+    dialog.save_file_radio.setChecked(True)
+    request = dialog.to_request()
+    assert request.save_file == "/tmp/out.bin"
+    assert request.live_stream is False
+
+
+def test_live_stream_mode(qtbot):
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog()
+    qtbot.addWidget(dialog)
+    dialog.live_stream_radio.setChecked(True)
+    request = dialog.to_request()
+    assert request.live_stream is True
+    assert request.save_file is None
+
+
+def test_preselects_from_current_request(qtbot):
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog(current_live_stream=True)
+    qtbot.addWidget(dialog)
+    assert dialog.live_stream_radio.isChecked()
+
+    dialog2 = VizardDialog(current_save_file="/tmp/existing.bin")
+    qtbot.addWidget(dialog2)
+    assert dialog2.save_file_radio.isChecked()
+    assert dialog2.save_file_edit.text() == "/tmp/existing.bin"
+
+
+def test_accept_blocked_when_save_file_mode_has_no_path(qtbot):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog()
+    qtbot.addWidget(dialog)
+    dialog.save_file_radio.setChecked(True)
+    dialog.save_file_edit.setText("")
+    dialog._on_accept()
+    assert dialog.result() != QDialog.DialogCode.Accepted
