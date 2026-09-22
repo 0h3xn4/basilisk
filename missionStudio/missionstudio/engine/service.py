@@ -245,6 +245,7 @@ class _SpacecraftHandle:
     num_rw: int = 0
     sensor_recorders: Dict[str, object] = field(default_factory=dict)  # sensor.name -> (kind, recorder)
     battery_recorder: Optional[object] = None  # Phase 4: only set if sc_config.power was configured
+    battery_module: Optional[object] = None  # Phase 4: the simpleBattery.SimpleBattery itself, for engine.vizard
     station_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.station_keeping was configured
 
 
@@ -265,7 +266,8 @@ class SimulationService:
         self._ground_locations: Dict[str, object] = {}
         self._mag_field_model = None
         self._access_recorders: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> recorder
-        self._eclipse_object = None  # Phase 4: only built if some spacecraft has power configured
+        self._access_out_msgs: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> accessOutMsg, for engine.vizard
+        self._eclipse_object = None  # Phase 4: only built if some spacecraft has power or station_keeping configured
 
     @property
     def spacecraft_handles(self) -> Dict[str, "_SpacecraftHandle"]:
@@ -502,6 +504,7 @@ class SimulationService:
 
                 handle.battery_recorder = battery.batPowerOutMsg.recorder()
                 self.scSim.AddModelToTask(dyn_task_name, handle.battery_recorder)
+                handle.battery_module = battery
 
             # -- Phase 4: station-keeping (schema.scenario.StationKeepingConfig)
             # -- independent of fsw_mode/sensors/power like the blocks
@@ -579,16 +582,29 @@ class SimulationService:
         for gs_name, ground_location in self._ground_locations.items():
             fsw.add_access_analysis(ground_location, sc_objects_in_order)
             for index, sc_object in enumerate(sc_objects_in_order):
-                recorder = ground_location.accessOutMsgs[index].recorder()
+                access_out_msg = ground_location.accessOutMsgs[index]
+                recorder = access_out_msg.recorder()
                 self.scSim.AddModelToTask(dyn_task_name, recorder)
                 self._access_recorders[(gs_name, sc_object.ModelTag)] = recorder
+                self._access_out_msgs[(gs_name, sc_object.ModelTag)] = access_out_msg
 
         if self.vizard_request is not None:
+            battery_by_spacecraft = {
+                name: handle.battery_module for name, handle in self._handles.items()
+                if handle.battery_module is not None
+            }
+            station_keeping_by_spacecraft = {
+                name: handle.station_keeping_controller for name, handle in self._handles.items()
+                if handle.station_keeping_controller is not None
+            }
             try:
                 vizard.enable_vizard(
                     self.scSim, dyn_task_name, sc_objects_in_order, self.vizard_request,
                     rw_effectors_by_spacecraft=rw_effectors_in_order,
                     ground_stations=self._ground_locations, central_body_name=gravity.central_body,
+                    battery_by_spacecraft=battery_by_spacecraft,
+                    station_keeping_by_spacecraft=station_keeping_by_spacecraft,
+                    access_out_msgs=self._access_out_msgs,
                 )
             except vizard.VizardError as exc:
                 raise SimulationServiceError(str(exc)) from exc

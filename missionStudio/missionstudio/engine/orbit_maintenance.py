@@ -41,6 +41,12 @@ differ from the original:
 * No ``log_decimation`` -- missionStudio scenarios are short enough that
   logging every tick (matching how every other recorder in
   ``engine.service`` already behaves) doesn't need thinning.
+* Publishes ``fuelTankOutMsg`` (a real ``FuelTankMsgPayload``, not part of
+  the original ``AltitudeKeepingController``) purely so ``engine.vizard``
+  can drive a live "propellant remaining" bar in Vizard off of it (see
+  that module) -- this controller still does NOT use a Basilisk
+  ``fuelTank`` state effector for the actual physics, only for this one
+  output message.
 
 Uses a dedicated ``extForceTorque`` effector for the reboost force
 (``extForce_N``, inertial-frame), independent of whatever effector
@@ -98,6 +104,12 @@ class StationKeepingController(sysModel.SysModel):
 
         self.scStateInMsg = messaging.SCStatesMsgReader()
         self.eclipseInMsg = messaging.EclipseMsgReader()
+        # Live propellant telemetry, for Vizard's GenericStorage "fuel tank"
+        # panel (see engine.vizard) -- this controller tracks propellant as
+        # a plain Python scalar (see module docstring for why: no
+        # fuelTank state effector), so there is no Basilisk message
+        # carrying it unless this module publishes one itself.
+        self.fuelTankOutMsg = messaging.FuelTankMsg()
 
         # Wired up externally (see build_station_keeping): the
         # extForceTorque effector this controller commands, and the
@@ -114,6 +126,7 @@ class StationKeepingController(sysModel.SysModel):
         self.g0 = g0_mps2  # [m/s^2]
         self.dryMass = dry_mass_kg  # [kg]
         self.propellant = propellant_kg  # [kg]
+        self._initialPropellantKg = propellant_kg  # [kg] fixed tank capacity, for fuelTankOutMsg.maxFuelMass
         semi_major_axis_m = r_planet_m + nominal_alt_m  # [m]
         self.smoothingWindowS = float(2.0 * np.pi * np.sqrt(semi_major_axis_m ** 3 / mu))  # [s] orbit period
         self.sunlitThreshold = eclipse_sunlit_threshold  # [-]
@@ -172,6 +185,7 @@ class StationKeepingController(sysModel.SysModel):
 
         currentMass = self.dryMass + self.propellant  # [kg]
 
+        mDot = 0.0  # [kg/s]
         if thrustMag > 0.0:
             self._cumulativeDv += (thrustMag / currentMass) * dt  # [m/s]
             mDot = thrustMag / (self.ispS * self.g0)  # [kg/s]
@@ -186,6 +200,12 @@ class StationKeepingController(sysModel.SysModel):
             forceVec = thrustMag * vHat
         if self.extForceEffector is not None:
             self.extForceEffector.extForce_N = forceVec.tolist()
+
+        fuelTankMsg = messaging.FuelTankMsgPayload()
+        fuelTankMsg.fuelMass = self.propellant  # [kg]
+        fuelTankMsg.fuelMassDot = -mDot  # [kg/s] negative: mass decreasing
+        fuelTankMsg.maxFuelMass = self._initialPropellantKg  # [kg]
+        self.fuelTankOutMsg.write(fuelTankMsg, CurrentSimNanos, self.moduleID)
 
         self.tLog.append(t)
         self.altLog.append(alt)

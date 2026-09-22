@@ -9,12 +9,13 @@ flagged as custom/out-of-scope, never fabricated.
 
 This is **Phase 4** of the roadmap: usability fixes and mission-analysis
 outputs driven directly by real GUI usage feedback -- a more informative
-Vizard default view, live run/Monte Carlo progress feedback, mean-anomaly
-orbit input, and real power-budget/link-budget results -- on top of Phase
-0's backend foundations, Phase 1's PySide6 GUI/CLI, Phase 2's
-attitude/sensors/actuators/Vizard work, and Phase 3's Monte Carlo +
-ground-station access analysis + packaging. See "What Phase 4 adds" below
-for exactly what that means.
+Vizard default view (including live data panels), live run/Monte Carlo
+progress feedback, mean-anomaly orbit input, real power-budget/link
+-budget/station-keeping results, and a Walker-pattern constellation
+generator -- on top of Phase 0's backend foundations, Phase 1's PySide6
+GUI/CLI, Phase 2's attitude/sensors/actuators/Vizard work, and Phase 3's
+Monte Carlo + ground-station access analysis + packaging. See "What Phase
+4 adds" below for exactly what that means.
 
 ## Getting started
 
@@ -460,15 +461,54 @@ Driven directly by feedback from actually using the Phase 3 GUI:
   spaced from each other despite differential drag, as opposed to each
   one's own independent altitude via `StationKeepingConfig` above) is a
   distinct, not-yet-built feature -- see "What's next" below.
+* **Live Vizard data panels**, responding directly to "the live-stream of
+  the simulation with Vizard is not really understandable, improve" --
+  three real, already-simulated data feeds now drive native Vizard HUD
+  elements (`engine.vizard`, extended), not a static snapshot or an
+  analytical estimate:
+  * **Battery state of charge**, for any spacecraft with `PowerConfig` --
+    a `GenericStorage` bar panel wired straight to that spacecraft's
+    `simpleBattery.SimpleBattery.batPowerOutMsg`.
+  * **Station-keeping propellant remaining**, for any spacecraft with
+    `StationKeepingConfig` -- a second `GenericStorage` panel, fed by a
+    new `FuelTankMsgPayload` output
+    `engine.orbit_maintenance.StationKeepingController` now publishes
+    specifically for this (that controller still doesn't use a Basilisk
+    `fuelTank` state effector for the actual physics -- see its own
+    docstring).
+  * **Ground-station access windows** -- one `GenericSensor` marker per
+    (station, spacecraft) pair Phase 3's access analysis tracks, changing
+    color live between "no access"/"access" as the real, already
+    -simulated `hasAccess` flag changes, via a small bridge module this
+    phase adds (`GenericSensor` takes an integer mode, not a boolean, so
+    something has to republish `hasAccess` as one -- see `engine.vizard`'s
+    docstring for exactly how and why 0/2, not 0/1, are the two values
+    used).
+
+  The battery/propellant panel pattern is copied line-for-line from a
+  real, shipped Basilisk example
+  (`examples/MultiSatBskSim/scenariosMultiSat/scenario_StationKeepingMultiSat.py`);
+  the access-window bridge composes verified pieces
+  (`examples/scenarioGroundLocationImaging.py`'s `GenericSensor`/
+  `DeviceCmdMsgPayload` wiring, `../missionAnalysis/attitude_controllers.py`'s
+  `AccessMsgReader` usage) in a way that's this module's own, not copied
+  from one example -- like the Phase 4 camera/orbit-line work, none of
+  this has been checked against a real running Vizard display (no display
+  in this development sandbox). A live **link-margin** panel was
+  considered and deliberately NOT built: Vizard's `GenericStorage` only
+  accepts Battery/DataStorage/FuelTank-shaped messages, and forcing a dB
+  margin value through the DataStorage shape would need a fabricated
+  adapter message with no natural floor/ceiling -- the link-margin numbers
+  stay exactly where they already were (the plotted/exported
+  `.link_margin_db` series from `engine.link_budget`), which is the
+  honest choice over a misleading gauge.
 
 `PowerConfig`, `RFLinkConfig`, and `StationKeepingConfig` all default to
 `None` (off) on every existing scenario -- turning any one on is the only
 input needed; the GUI's new "Power / propulsion / link budget"
 spacecraft-editor tab and the ground-station editor's two new fields are
 pre-filled with reasonable placeholder defaults, matching this phase's
-"user only supplies numbers, the tool does the rest" design goal. Richer
-Vizard live-data panels are scoped but not yet built -- see "What's next"
-below.
+"user only supplies numbers, the tool does the rest" design goal.
 
 ## Repository layout
 
@@ -766,10 +806,12 @@ not yet built:
   offset, drift, restore -- that also arbitrates sharing one thruster with
   altitude-keeping when both act on the same spacecraft), in the same
   style `StationKeepingController` was ported from.
-* **Richer, more understandable Vizard live-data panels** beyond the
-  Phase 4 default-camera/orbit-line fix -- e.g. clearer on-screen
-  power/link-margin/access-window readouts while a live-streamed run is in
-  progress.
+* **A live link-margin gauge in Vizard** -- deliberately not built this
+  phase (see "What Phase 4 adds" above for why forcing it through
+  `GenericStorage` would need a fabricated adapter message); if this
+  becomes worth doing anyway, the RIGHT path is a real custom Vizard
+  protobuf message/panel type, not a reused Battery/DataStorage/FuelTank
+  shape.
 
 Beyond that, the "Known limitations" list above is the rest of the honest
 map: a handful of schema-valid-but-not-wired-up options (celestial-body
@@ -779,7 +821,7 @@ Carlo retention, and -- the one requiring something this development
 sandbox's network policy specifically blocks -- a full simulation run past
 SPICE kernel loading, to get the first true end-to-end confirmation
 (including `test_two_body_validation.py`'s analytical check, and the new
-Phase 4 power-budget/link-budget/station-keeping wiring) on top of everything up to that
-point already being verified against a real Basilisk install. None of it
-is blocked on a design decision; each item is scoped and documented at its
-own call site for whoever picks it up next.
+Phase 4 power-budget/link-budget/station-keeping/Vizard-panel wiring) on
+top of everything up to that point already being verified against a real
+Basilisk install. None of it is blocked on a design decision; each item is
+scoped and documented at its own call site for whoever picks it up next.
