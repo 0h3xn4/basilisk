@@ -443,6 +443,18 @@ class SpacecraftConfig:
     station_keeping: Optional[StationKeepingConfig] = None
     phasing_keeping: Optional[PhasingKeepingConfig] = None
 
+    # Phase 5: PURELY COSMETIC Vizard display -- replaces this spacecraft's
+    # default cube icon with a custom CAD model
+    # (Basilisk.utilities.vizSupport.createCustomModel()). Never affects
+    # simulated physics: mass properties, drag/SRP area, etc. still come
+    # from dry_mass_kg/inertia_kg_m2/drag_area_m2/srp_area_m2 above, same
+    # as when this is unset. None (the default) leaves Vizard's own
+    # default icon in place.
+    vizard_model_path: Optional[str] = None  # path to a .obj file, or "CUBE"/"CYLINDER"/"SPHERE"
+    vizard_model_offset_m: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    vizard_model_rotation_deg: list = field(default_factory=lambda: [0.0, 0.0, 0.0])  # 3-2-1 Euler (z,y,x)
+    vizard_model_scale: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
+
     def validate(self) -> None:
         _require(bool(self.name), "spacecraft.name must not be empty")
         _require(self.dry_mass_kg > 0, f"{self.name}: dry_mass_kg must be > 0")
@@ -499,6 +511,13 @@ class SpacecraftConfig:
                       f"{self.name}: phasing_keeping requires station_keeping to also be set on this spacecraft "
                       "-- they share one physical thruster/propellant tank (see PhasingKeepingConfig's docstring)")
             self.phasing_keeping.validate(self.name)
+
+        if self.vizard_model_path is not None:
+            _require(bool(self.vizard_model_path.strip()), f"{self.name}: vizard_model_path must not be blank")
+        _require(len(self.vizard_model_offset_m) == 3, f"{self.name}: vizard_model_offset_m must have 3 elements")
+        _require(len(self.vizard_model_rotation_deg) == 3,
+                  f"{self.name}: vizard_model_rotation_deg must have 3 elements")
+        _require(len(self.vizard_model_scale) == 3, f"{self.name}: vizard_model_scale must have 3 elements")
 
 
 @dataclass

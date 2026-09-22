@@ -258,6 +258,42 @@ def test_none_fsw_mode_is_valid():
     _minimal_scenario().validate()  # fsw_mode defaults to None -- must not raise
 
 
+def test_none_vizard_model_path_is_valid():
+    _minimal_scenario().validate()  # vizard_model_path defaults to None -- must not raise
+
+
+def test_blank_vizard_model_path_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].vizard_model_path = "   "
+    with pytest.raises(ScenarioValidationError, match="vizard_model_path must not be blank"):
+        sc.validate()
+
+
+@pytest.mark.parametrize("field", ["vizard_model_offset_m", "vizard_model_rotation_deg", "vizard_model_scale"])
+def test_vizard_model_vectors_require_3_elements(field):
+    sc = _minimal_scenario()
+    setattr(sc.spacecraft[0], field, [1.0, 2.0])
+    with pytest.raises(ScenarioValidationError, match=f"{field} must have 3 elements"):
+        sc.validate()
+
+
+def test_vizard_model_path_round_trips_through_json(tmp_path):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].vizard_model_path = "CUBE"
+    sc.spacecraft[0].vizard_model_offset_m = [0.1, 0.2, 0.3]
+    sc.spacecraft[0].vizard_model_rotation_deg = [10.0, 20.0, 30.0]
+    sc.spacecraft[0].vizard_model_scale = [2.0, 2.0, 2.0]
+    sc.validate()
+
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps(sc.to_dict(), indent=2))
+    loaded = load_scenario(path)
+    assert loaded.spacecraft[0].vizard_model_path == "CUBE"
+    assert loaded.spacecraft[0].vizard_model_offset_m == [0.1, 0.2, 0.3]
+    assert loaded.spacecraft[0].vizard_model_rotation_deg == [10.0, 20.0, 30.0]
+    assert loaded.spacecraft[0].vizard_model_scale == [2.0, 2.0, 2.0]
+
+
 @pytest.mark.parametrize("mode", ["inertial3D", "hillPoint", "velocityPoint", "sunSafePoint"])
 def test_every_supported_fsw_mode_validates(mode):
     sc = _minimal_scenario()

@@ -773,6 +773,15 @@ class SimulationService:
                 name: handle.station_keeping_controller for name, handle in self._handles.items()
                 if handle.station_keeping_controller is not None
             }
+            custom_models_by_spacecraft = {
+                sc_config.name: {
+                    "path": sc_config.vizard_model_path,
+                    "offset_m": sc_config.vizard_model_offset_m,
+                    "rotation_deg": sc_config.vizard_model_rotation_deg,
+                    "scale": sc_config.vizard_model_scale,
+                }
+                for sc_config in scenario.spacecraft if sc_config.vizard_model_path is not None
+            }
             try:
                 self._viz = vizard.enable_vizard(
                     self.scSim, dyn_task_name, sc_objects_in_order, self.vizard_request,
@@ -781,6 +790,7 @@ class SimulationService:
                     battery_by_spacecraft=battery_by_spacecraft,
                     station_keeping_by_spacecraft=station_keeping_by_spacecraft,
                     access_out_msgs=self._access_out_msgs,
+                    custom_models_by_spacecraft=custom_models_by_spacecraft,
                 )
             except vizard.VizardError as exc:
                 raise SimulationServiceError(str(exc)) from exc

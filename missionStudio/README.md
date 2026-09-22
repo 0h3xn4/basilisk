@@ -647,6 +647,17 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   picker, then the ordinary `SpacecraftEditorDialog` pre-filled with the
   chosen template so the user still sets the actual name/orbit/anything
   else themselves, exactly like editing any other spacecraft.
+* **Custom 3D models in Vizard.** The last piece of "adequately represent
+  the correct placement" feedback: `SpacecraftConfig.vizard_model_path`
+  (plus `vizard_model_offset_m`/`_rotation_deg`/`_scale`) wires
+  `Basilisk.utilities.vizSupport.createCustomModel()` in, replacing a
+  spacecraft's default cube icon with a real `.obj` mesh (or Vizard's
+  `CUBE`/`CYLINDER`/`SPHERE` primitives) at a chosen body-frame offset/
+  rotation/scale. PURELY COSMETIC -- it changes nothing about simulated
+  physics (mass, drag/SRP area, etc. are unaffected either way); the
+  spacecraft editor's new "Vizard model (cosmetic)" tab says so up front,
+  same "don't offer a control that looks like it does something it
+  doesn't" discipline as everywhere else in this app.
 
 ## Repository layout
 

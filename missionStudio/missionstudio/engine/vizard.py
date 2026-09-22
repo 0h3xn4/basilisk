@@ -209,7 +209,8 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
                    central_body_name: str = "earth",
                    battery_by_spacecraft: Optional[Dict[str, object]] = None,
                    station_keeping_by_spacecraft: Optional[Dict[str, object]] = None,
-                   access_out_msgs: Optional[Dict[tuple, object]] = None):
+                   access_out_msgs: Optional[Dict[tuple, object]] = None,
+                   custom_models_by_spacecraft: Optional[Dict[str, dict]] = None):
     """Call once, after every spacecraft/sensor/actuator/FSW module for
     this run has been added to ``scSim`` and BEFORE ``InitializeSimulation()``
     (matches every ``vizSupport.enableUnityVisualization`` call site in
@@ -233,6 +234,12 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
             for every station/spacecraft pair Phase 3's access analysis
             tracks (``engine.service``'s own ``_access_out_msgs``) -- same
             section.
+        custom_models_by_spacecraft: ``{spacecraft_name: {"path": str, "offset_m": [x,y,z],
+            "rotation_deg": [z,y,x], "scale": [x,y,z]}}`` for every spacecraft with
+            ``SpacecraftConfig.vizard_model_path`` set -- Phase 5, PURELY
+            cosmetic (see that field's docstring): replaces the spacecraft's
+            default cube icon with a custom CAD model via
+            ``vizSupport.createCustomModel()``.
     """
     from Basilisk.architecture import messaging, sysModel
     from Basilisk.simulation import vizInterface
@@ -364,6 +371,21 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
     # Keep the access-indicator bridges alive for as long as ``viz`` is --
     # see the comment where access_indicator_bridges is created above.
     viz._missionstudio_access_indicator_bridges = access_indicator_bridges
+
+    # Phase 5: custom CAD models -- purely cosmetic (see this function's
+    # docstring), applied after enableUnityVisualization() itself per
+    # createCustomModel()'s own docstring ("This method creates a
+    # CustomModel" against the already-built ``viz``).
+    for sc_name, model in (custom_models_by_spacecraft or {}).items():
+        try:
+            vizSupport.createCustomModel(
+                viz, modelPath=model["path"], simBodiesToModify=[sc_name],
+                offset=list(model.get("offset_m", [0.0, 0.0, 0.0])),
+                rotation=[math.radians(v) for v in model.get("rotation_deg", [0.0, 0.0, 0.0])],
+                scale=list(model.get("scale", [1.0, 1.0, 1.0])),
+            )
+        except Exception as exc:  # noqa: BLE001 -- report ANY custom-model failure with a specific message
+            raise VizardError(f"vizSupport.createCustomModel failed for {sc_name!r}: {exc}") from exc
 
     # See module docstring: without these, Vizard falls back to its own
     # default (spacecraft-locked, no orbit trace) instead of an

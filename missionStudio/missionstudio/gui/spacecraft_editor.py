@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -446,6 +447,59 @@ class SpacecraftEditorDialog(QDialog):
 
         tabs.addTab(power_tab, "Power / propulsion / link budget")
 
+        # -- Vizard 3D model tab (Phase 5) -------------------------------------
+        # PURELY COSMETIC -- see SpacecraftConfig.vizard_model_path's
+        # docstring. Deliberately its own tab, not folded into another one,
+        # so it reads as clearly separate from anything that affects
+        # simulated physics.
+        viz_model_tab = QWidget()
+        viz_model_layout = QVBoxLayout(viz_model_tab)
+        viz_model_layout.addWidget(QLabel(
+            "Replaces this spacecraft's default cube icon in Vizard with a custom 3D model. "
+            "PURELY COSMETIC -- never affects simulated physics (mass, drag/SRP area, etc. are set "
+            "on the Orbit/mass and Power tabs and are unchanged by anything here)."
+        ))
+
+        model0 = config if config else None
+        self.viz_model_group = QGroupBox("Custom 3D model")
+        self.viz_model_group.setCheckable(True)
+        self.viz_model_group.setChecked(bool(model0.vizard_model_path) if model0 else False)
+        viz_model_form = QFormLayout(self.viz_model_group)
+
+        path_row = QHBoxLayout()
+        self.viz_model_path_edit = QLineEdit(model0.vizard_model_path if model0 and model0.vizard_model_path else "")
+        self.viz_model_path_edit.setPlaceholderText("path to a .obj file, or CUBE / CYLINDER / SPHERE")
+        path_row.addWidget(self.viz_model_path_edit)
+        self.viz_model_browse_button = QPushButton("Browse...")
+        self.viz_model_browse_button.clicked.connect(self._on_browse_viz_model)
+        path_row.addWidget(self.viz_model_browse_button)
+        viz_model_form.addRow("Model path", path_row)
+
+        offset0 = model0.vizard_model_offset_m if model0 else [0.0, 0.0, 0.0]
+        self.viz_offset_x = _spin(-1.0e6, 1.0e6, decimals=4, step=0.1, value=offset0[0])
+        self.viz_offset_y = _spin(-1.0e6, 1.0e6, decimals=4, step=0.1, value=offset0[1])
+        self.viz_offset_z = _spin(-1.0e6, 1.0e6, decimals=4, step=0.1, value=offset0[2])
+        viz_model_form.addRow("Offset [m] (body frame, 3 components)",
+                               _hbox(self.viz_offset_x, self.viz_offset_y, self.viz_offset_z))
+
+        rot0 = model0.vizard_model_rotation_deg if model0 else [0.0, 0.0, 0.0]
+        self.viz_rotation_z = _spin(-360.0, 360.0, decimals=3, step=1.0, value=rot0[0])
+        self.viz_rotation_y = _spin(-360.0, 360.0, decimals=3, step=1.0, value=rot0[1])
+        self.viz_rotation_x = _spin(-360.0, 360.0, decimals=3, step=1.0, value=rot0[2])
+        viz_model_form.addRow("Rotation [deg] (3-2-1 Euler: Z, Y, X)",
+                               _hbox(self.viz_rotation_z, self.viz_rotation_y, self.viz_rotation_x))
+
+        scale0 = model0.vizard_model_scale if model0 else [1.0, 1.0, 1.0]
+        self.viz_scale_x = _spin(0.0001, 1.0e6, decimals=4, step=0.1, value=scale0[0])
+        self.viz_scale_y = _spin(0.0001, 1.0e6, decimals=4, step=0.1, value=scale0[1])
+        self.viz_scale_z = _spin(0.0001, 1.0e6, decimals=4, step=0.1, value=scale0[2])
+        viz_model_form.addRow("Scale [-] (body x, y, z axes, 3 components)",
+                               _hbox(self.viz_scale_x, self.viz_scale_y, self.viz_scale_z))
+
+        viz_model_layout.addWidget(self.viz_model_group)
+        viz_model_layout.addStretch(1)
+        tabs.addTab(viz_model_tab, "Vizard model (cosmetic)")
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
@@ -520,9 +574,25 @@ class SpacecraftEditorDialog(QDialog):
             enable_srp=self._config.enable_srp if self._config else False,
             srp_coeff=self._config.srp_coeff if self._config else SpacecraftConfig.srp_coeff,
             srp_area_m2=self._config.srp_area_m2 if self._config else SpacecraftConfig.srp_area_m2,
+            vizard_model_path=self._viz_model_to_dataclass_path(),
+            vizard_model_offset_m=[self.viz_offset_x.value(), self.viz_offset_y.value(), self.viz_offset_z.value()],
+            vizard_model_rotation_deg=[self.viz_rotation_z.value(), self.viz_rotation_y.value(),
+                                        self.viz_rotation_x.value()],
+            vizard_model_scale=[self.viz_scale_x.value(), self.viz_scale_y.value(), self.viz_scale_z.value()],
         )
         config.validate()  # raises ScenarioValidationError with a specific message on anything bad
         return config
+
+    def _viz_model_to_dataclass_path(self) -> str | None:
+        if not self.viz_model_group.isChecked():
+            return None
+        path = self.viz_model_path_edit.text().strip()
+        return path or None
+
+    def _on_browse_viz_model(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(self, "Select a 3D model (.obj)", "", "Wavefront OBJ (*.obj)")
+        if path:
+            self.viz_model_path_edit.setText(path)
 
     def _station_keeping_to_dataclass(self) -> StationKeepingConfig | None:
         if not self.station_keeping_group.isChecked():
