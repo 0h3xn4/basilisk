@@ -111,13 +111,38 @@ if [[ "$install_desktop_entry" -eq 1 ]] && [[ -n "${XDG_DATA_HOME:-${HOME:-}}" ]
     mkdir -p "$applications_dir"
     sed "s|@INSTALL_PREFIX@|$prefix|g" "$script_dir/missionstudio.desktop.in" > "$applications_dir/missionstudio.desktop"
     desktop_status="Desktop entry installed to $applications_dir/missionstudio.desktop"
+
+    # Renders the app icon (gui/icons.py -- procedurally drawn via
+    # QPainter, no bitmap asset shipped in the repo) into the standard
+    # XDG hicolor icon theme location, so Icon=missionstudio in the
+    # .desktop entry above resolves to it instead of falling back to a
+    # generic icon. Needs the 'gui' extra (PySide6, just installed above)
+    # and a Qt platform plugin able to render off-screen, which the
+    # 'offscreen' plugin always provides -- no display/X server needed,
+    # even on a headless install. Non-fatal: a failure here (e.g. no Qt
+    # platform plugins at all) still leaves a working desktop entry, just
+    # with the generic fallback icon.
+    icons_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
+    mkdir -p "$icons_dir"
+    if QT_QPA_PLATFORM=offscreen python3 -c "
+from missionstudio.gui.icons import ensure_icon_file
+ensure_icon_file('$icons_dir/missionstudio.png')
+" 2>/dev/null; then
+        icon_status="App icon installed to $icons_dir/missionstudio.png"
+    else
+        icon_status="Could not render the app icon (non-fatal) -- the desktop entry will use a generic icon."
+    fi
 else
     desktop_status="Desktop entry skipped."
+    icon_status=""
 fi
 
 echo
 echo "Installed missionstudio to $venv_dir"
 echo "$desktop_status"
+if [[ -n "$icon_status" ]]; then
+    echo "$icon_status"
+fi
 echo "$basilisk_status"
 echo
 echo "Launch it with: $launcher gui"

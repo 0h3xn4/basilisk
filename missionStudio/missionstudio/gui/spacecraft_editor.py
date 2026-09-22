@@ -65,6 +65,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -176,6 +177,26 @@ def _spin(minimum: float, maximum: float, decimals: int = 4, step: float = 1.0, 
     return box
 
 
+def _scrollable(content: QWidget) -> QScrollArea:
+    """Wraps a tab page in its own scroll area. Without this, a
+    QTabWidget sizes EVERY tab to fit whichever tab page is tallest (a
+    well-known Qt behavior -- its internal QStackedWidget's size hint is
+    the max across all pages, not just the current one), so one busy tab
+    (e.g. "Power / propulsion / link budget", with five stacked group
+    boxes) forced every other tab -- including "Orbit / mass", whose own
+    content is a third the height -- to render with a huge dead-space gap
+    at the bottom of its group box. Each tab scrolling independently
+    fixes that and keeps the dialog itself from growing unreasonably
+    tall, same reasoning as ``gui.scenario_editor.ScenarioEditorWidget``'s
+    own top-level QScrollArea.
+    """
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll.setWidget(content)
+    return scroll
+
+
 class SpacecraftEditorDialog(QDialog):
     """Edits one :class:`SpacecraftConfig` in place. Construct with an
     existing config to edit it, or ``None`` for a fresh default.
@@ -279,7 +300,7 @@ class SpacecraftEditorDialog(QDialog):
         if config is not None:
             self.orbit_widget.from_dataclass(config.orbit)
 
-        tabs.addTab(orbit_tab, "Orbit / mass")
+        tabs.addTab(_scrollable(orbit_tab), "Orbit / mass")
 
         # -- Sensors / actuators tab (Phase 2) --------------------------------
         sensors_tab = QWidget()
@@ -293,7 +314,7 @@ class SpacecraftEditorDialog(QDialog):
         if config is not None:
             self.sensor_list.from_list(config.sensors)
             self.actuator_list.from_list(config.actuators)
-        self._sensors_tab_index = tabs.addTab(sensors_tab, "Sensors / actuators")
+        self._sensors_tab_index = tabs.addTab(_scrollable(sensors_tab), "Sensors / actuators")
 
         # -- Attitude control (FSW) tab (Phase 2) -----------------------------
         fsw_tab = QWidget()
@@ -339,7 +360,7 @@ class SpacecraftEditorDialog(QDialog):
         fsw_layout.addWidget(control_hint_label)
         self.control_params_edit = QPlainTextEdit(json.dumps(config.control_params if config else {}, indent=2))
         fsw_layout.addWidget(self.control_params_edit)
-        self._fsw_tab_index = tabs.addTab(fsw_tab, "Attitude control (FSW)")
+        self._fsw_tab_index = tabs.addTab(_scrollable(fsw_tab), "Attitude control (FSW)")
 
         # -- Power budget / RF link budget tab (Phase 4) ----------------------
         # Both are OFF by default (unchecked group box) -- turning one on is
@@ -523,7 +544,7 @@ class SpacecraftEditorDialog(QDialog):
         power_layout.addWidget(self.rf_link_group)
         power_layout.addStretch(1)
 
-        tabs.addTab(power_tab, "Power / propulsion / link budget")
+        tabs.addTab(_scrollable(power_tab), "Power / propulsion / link budget")
 
         # -- Vizard 3D model tab (Phase 5) -------------------------------------
         # PURELY COSMETIC -- see SpacecraftConfig.vizard_model_path's
@@ -576,7 +597,7 @@ class SpacecraftEditorDialog(QDialog):
 
         viz_model_layout.addWidget(self.viz_model_group)
         viz_model_layout.addStretch(1)
-        tabs.addTab(viz_model_tab, "Vizard model (cosmetic)")
+        tabs.addTab(_scrollable(viz_model_tab), "Vizard model (cosmetic)")
 
         if self._orbit_only:
             tabs.setTabVisible(self._sensors_tab_index, False)

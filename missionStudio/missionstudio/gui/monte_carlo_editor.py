@@ -253,7 +253,7 @@ class MonteCarloGroupWidget(QGroupBox):
     changed = Signal()
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__("Monte Carlo (Phase 3)", parent)
+        super().__init__("Monte Carlo", parent)
         layout = QVBoxLayout(self)
 
         form = QFormLayout()

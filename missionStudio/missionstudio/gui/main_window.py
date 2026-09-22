@@ -43,7 +43,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QSplitter,
+    QStyle,
     QTabWidget,
+    QToolBar,
 )
 
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
@@ -114,22 +116,26 @@ class MainWindow(QMainWindow):
 
     # -- menu ---------------------------------------------------------------
     def _build_menu(self) -> None:
+        style = self.style()
         file_menu = self.menuBar().addMenu("&File")
 
-        new_action = QAction("&New Scenario", self)
+        new_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "&New Scenario", self)
         new_action.setShortcut(QKeySequence.StandardKey.New)
+        new_action.setToolTip("New Scenario (Ctrl+N)")
         new_action.triggered.connect(self.on_new)
         file_menu.addAction(new_action)
         self.new_action = new_action
 
-        open_action = QAction("&Open...", self)
+        open_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "&Open...", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.setToolTip("Open a scenario file (Ctrl+O)")
         open_action.triggered.connect(self.on_open)
         file_menu.addAction(open_action)
         self.open_action = open_action
 
-        save_action = QAction("&Save", self)
+        save_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "&Save", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_action.setToolTip("Save (Ctrl+S)")
         save_action.triggered.connect(self.on_save)
         file_menu.addAction(save_action)
         self.save_action = save_action
@@ -147,26 +153,63 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
         run_menu = self.menuBar().addMenu("&Run")
-        run_action = QAction("&Run Simulation", self)
+        run_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay), "&Run Simulation", self)
         run_action.setShortcut("Ctrl+R")
+        run_action.setToolTip("Run Simulation (Ctrl+R)")
         run_action.triggered.connect(self.on_run)
         run_menu.addAction(run_action)
         self.run_action = run_action
 
-        check_kernels_action = QAction("&Check Kernels", self)
+        check_kernels_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
+                                        "&Check Kernels", self)
+        check_kernels_action.setToolTip("Check/fetch SPICE kernels")
         check_kernels_action.triggered.connect(self.kernel_status_widget.refresh)
         run_menu.addAction(check_kernels_action)
         self.check_kernels_action = check_kernels_action
 
-        vizard_action = QAction("&Vizard...", self)
+        vizard_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DesktopIcon), "&Vizard...", self)
+        vizard_action.setToolTip("Configure Vizard visualization for the next run")
         vizard_action.triggered.connect(self.on_configure_vizard)
         run_menu.addAction(vizard_action)
         self.vizard_action = vizard_action
 
-        monte_carlo_action = QAction("Run &Monte Carlo...", self)
+        monte_carlo_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward),
+                                      "Run &Monte Carlo...", self)
+        monte_carlo_action.setToolTip("Run a Monte Carlo batch")
         monte_carlo_action.triggered.connect(self.on_run_monte_carlo)
         run_menu.addAction(monte_carlo_action)
         self.monte_carlo_action = monte_carlo_action
+
+        self._build_toolbar()
+
+    def _build_toolbar(self) -> None:
+        """Puts the SAME QAction instances the menu bar uses onto a
+        QToolBar -- one signal connection per action, both surfaces always
+        agree (enabled/disabled state included, e.g. while a run is in
+        flight -- see :meth:`_set_running`).
+        """
+        toolbar = QToolBar("Main", self)
+        toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(toolbar)
+
+        toolbar.addAction(self.new_action)
+        toolbar.addAction(self.open_action)
+        toolbar.addAction(self.save_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.run_action)
+        toolbar.addAction(self.monte_carlo_action)
+        toolbar.addAction(self.vizard_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.check_kernels_action)
+
+        # "Run Simulation" is the app's primary call-to-action -- visually
+        # distinguished with the accent color (see theme.py's
+        # QToolButton#primaryToolButton rule), same idea as a web app's
+        # primary button.
+        run_button = toolbar.widgetForAction(self.run_action)
+        if run_button is not None:
+            run_button.setObjectName("primaryToolButton")
 
     def _update_window_title(self) -> None:
         name = self._current_path.name if self._current_path else "untitled"

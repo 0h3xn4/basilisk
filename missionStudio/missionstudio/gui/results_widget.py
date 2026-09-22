@@ -57,6 +57,7 @@ class ResultsWidget(QWidget):
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.axes = self.figure.add_subplot(111)
         layout.addWidget(self.canvas)
+        self._redraw()  # shows the empty-state message immediately, not just after the first set_result() call
 
     def set_result(self, result: ResultSet | None) -> None:
         self._result = result
@@ -83,6 +84,16 @@ class ResultsWidget(QWidget):
                 self.axes.set_ylabel(f"{name}{unit_suffix}")
                 self.axes.legend()
                 self.axes.grid(True, linewidth=0.3)
+        else:
+            # Previously just a blank white canvas with no explanation --
+            # confusing on first launch, before any run has happened (part
+            # of the "looks unfinished" feedback this addresses).
+            self.axes.set_axis_off()
+            self.axes.text(
+                0.5, 0.5, "Run a simulation to see results here",
+                ha="center", va="center", transform=self.axes.transAxes,
+                fontsize=11, color="#8A93A3",
+            )
         self.canvas.draw_idle()
 
     def _on_export(self) -> None:

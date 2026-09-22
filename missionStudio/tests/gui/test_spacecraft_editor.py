@@ -16,6 +16,42 @@ def test_dialog_default_spacecraft(qtbot):
     assert sc.inertia_kg_m2 == [10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0]
 
 
+def test_dialog_every_tab_is_independently_scrollable(qtbot):
+    """Regression test: QTabWidget sizes EVERY tab page to fit whichever
+    page is tallest (its internal QStackedWidget's size hint is the max
+    across ALL pages, not just the current one) -- without each tab
+    wrapped in its own QScrollArea, the "Power / propulsion / link
+    budget" tab (five stacked group boxes) forced every other tab,
+    including "Orbit / mass", to render with a huge dead-space gap and
+    made the whole dialog's natural size well over 1000px tall. Caught by
+    actually rendering the dialog and looking at it, not from reading the
+    layout code.
+    """
+    from PySide6.QtWidgets import QScrollArea
+
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    for i in range(dialog.tabs.count()):
+        assert isinstance(dialog.tabs.widget(i), QScrollArea), f"tab {i} ({dialog.tabs.tabText(i)!r}) isn't scrollable"
+
+
+def test_dialog_natural_size_stays_reasonable(qtbot):
+    """A loose upper bound, not a pixel-exact check: guards against the
+    whole-dialog-height blowing up again (it briefly reached ~1450px
+    tall before the per-tab QScrollArea fix -- see the test above) without
+    being so tight that an unrelated, legitimate content change trips it.
+    """
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.wait(10)
+    assert dialog.sizeHint().height() < 800
+
+
 def test_dialog_edits_existing_config(qtbot):
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
     from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig

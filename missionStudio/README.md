@@ -689,6 +689,49 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   -keeping on the same spacecraft). `missionstudio run` prints a
   "Constant-thrust summary" line per spacecraft, same idea as the
   existing station-keeping summary.
+* **A real visual theme, an app icon, a toolbar, and assorted UI polish.**
+  Direct user feedback: "looks very unfinished... not very intuitive and
+  comfortable". The app previously ran on whatever the platform's native
+  Qt style happened to render, with no icon and no toolbar. Now:
+  * `gui/theme.py` -- one QSS stylesheet + palette (`apply_theme()`,
+    called once from `gui/app.py`), on top of Qt's "Fusion" base style
+    (the one built-in style that renders identically, and predictably
+    styleable via QSS, across Linux/macOS/Windows). A small, consistent
+    color system (one neutral slate scale + one accent blue, reused
+    everywhere -- focus rings, selection highlight, the primary action
+    button, progress bars) rather than per-widget rules picked ad hoc.
+    Pure presentation layer: no widget's behavior, signals, or layout
+    structure changed because of it.
+  * `gui/icons.py` -- the app icon, drawn procedurally with `QPainter`
+    (a central body + an inclined orbit ellipse + a satellite dot) rather
+    than shipped as a bitmap asset, so there's no binary file to keep in
+    sync with the theme's colors. Used as the window/taskbar icon
+    (`app.py`) and, rendered to a real PNG under the standard XDG
+    hicolor icon theme location, the Linux desktop entry's icon
+    (`packaging/install.sh`, closing a gap that `Icon=missionstudio` was
+    falling back to a generic icon).
+  * `MainWindow` gained a toolbar (New/Open/Save, Run Simulation/Monte
+    Carlo/Vizard/Check Kernels) using the SAME `QAction` instances the
+    menu bar already had -- one signal connection each, so toolbar and
+    menu always agree, including which actions are disabled while a run
+    is in flight. "Run Simulation" is visually the primary action
+    (accent-colored), the same "one obvious main button" convention a
+    web app would use.
+  * The results panel used to be a blank white plot with no explanation
+    before any run -- now shows "Run a simulation to see results here".
+  * `SpacecraftEditorDialog`'s five tabs used to share ONE height (a
+    `QTabWidget` sizes every tab to fit whichever page is tallest, a
+    real, easy-to-miss Qt behavior -- the "Power / propulsion / link
+    budget" tab's five stacked groups forced "Orbit / mass", a third the
+    height, to render with a large dead-space gap, and pushed the whole
+    dialog's natural size to over 1000px tall). Caught by actually
+    rendering the dialog and looking at it, not from reading the layout
+    code. Fixed: each tab now scrolls independently (`_scrollable()`),
+    same pattern `gui.scenario_editor.ScenarioEditorWidget`'s own
+    top-level form already used.
+  * The Monte Carlo group box was labeled "Monte Carlo (Phase 3)" --
+    internal development-phase numbering with no meaning to an end user,
+    now just "Monte Carlo".
 
 ## Repository layout
 
@@ -716,7 +759,9 @@ missionStudio/
       spacecraft_templates.py        -- Phase 5: reusable spacecraft "bus" templates (no Basilisk needed)
     gui/
       app.py                         -- QApplication entry point
-      main_window.py                 -- MainWindow: File/Run menus, ties everything together
+      theme.py                       -- Phase 5: app-wide QSS stylesheet + palette
+      icons.py                       -- Phase 5: procedurally-drawn app icon
+      main_window.py                 -- MainWindow: File/Run menus + toolbar, ties everything together
       scenario_editor.py             -- the full scenario form + live validation
       spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW, power/propulsion/link budget)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
