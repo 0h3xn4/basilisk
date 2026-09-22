@@ -1,0 +1,158 @@
+"""Tests for missionstudio.schema -- no Basilisk import, runs anywhere."""
+
+import json
+
+import pytest
+
+from missionstudio.schema import (
+    GravityConfig,
+    GroundStationConfig,
+    OrbitIC,
+    Scenario,
+    ScenarioValidationError,
+    SensorConfig,
+    SpacecraftConfig,
+    load_scenario,
+)
+
+
+def _minimal_scenario(**overrides) -> Scenario:
+    defaults = dict(
+        name="test scenario",
+        epoch_utc="2030-01-01T00:00:00",
+        spacecraft=[
+            SpacecraftConfig(
+                name="sat-1",
+                orbit=OrbitIC(
+                    type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.001,
+                    inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=0.0,
+                ),
+            )
+        ],
+    )
+    defaults.update(overrides)
+    return Scenario(**defaults)
+
+
+def test_minimal_scenario_validates():
+    _minimal_scenario().validate()
+
+
+def test_round_trip_save_load(tmp_path):
+    scenario = _minimal_scenario(description="round-trip check")
+    path = tmp_path / "scenario.json"
+    scenario.save(path)
+
+    loaded = load_scenario(path)
+    assert loaded.name == scenario.name
+    assert loaded.epoch_utc == scenario.epoch_utc
+    assert loaded.description == "round-trip check"
+    assert len(loaded.spacecraft) == 1
+    assert loaded.spacecraft[0].orbit.semi_major_axis_km == 7000.0
+    assert loaded.schema_version == scenario.schema_version
+
+
+def test_round_trip_preserves_every_field_category(tmp_path):
+    scenario = _minimal_scenario()
+    scenario.gravity = GravityConfig(central_body="earth", central_body_degree=10,
+                                      third_body_perturbers=["sun", "moon"])
+    scenario.ground_stations = [GroundStationConfig(name="gs-1", latitude_deg=40.0, longitude_deg=-105.0)]
+    scenario.spacecraft[0].sensors = [SensorConfig(kind="star_tracker", name="st-1", params={"noise_arcsec": 5.0})]
+
+    path = tmp_path / "scenario.json"
+    scenario.save(path)
+    loaded = load_scenario(path)
+
+    assert loaded.gravity.central_body_degree == 10
+    assert loaded.gravity.third_body_perturbers == ["sun", "moon"]
+    assert loaded.ground_stations[0].name == "gs-1"
+    assert loaded.spacecraft[0].sensors[0].kind == "star_tracker"
+    assert loaded.spacecraft[0].sensors[0].params["noise_arcsec"] == 5.0
+
+
+def test_saved_file_is_plain_readable_json(tmp_path):
+    path = tmp_path / "scenario.json"
+    _minimal_scenario().save(path)
+    # round-trips through plain json.loads with no custom decoder -- this
+    # is a "human-readable JSON", not a pickle, per the project requirement.
+    data = json.loads(path.read_text())
+    assert data["name"] == "test scenario"
+    assert data["schema_version"] == 1
+
+
+@pytest.mark.parametrize("bad_field,bad_value,match", [
+    ("name", "", "name must not be empty"),
+    ("epoch_utc", "not-a-date", "not a valid ISO 8601"),
+])
+def test_scenario_level_validation_errors(bad_field, bad_value, match):
+    scenario = _minimal_scenario(**{bad_field: bad_value})
+    with pytest.raises(ScenarioValidationError, match=match):
+        scenario.validate()
+
+
+def test_zero_spacecraft_rejected():
+    scenario = _minimal_scenario(spacecraft=[])
+    with pytest.raises(ScenarioValidationError, match="at least one spacecraft"):
+        scenario.validate()
+
+
+def test_duplicate_spacecraft_names_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft.append(SpacecraftConfig(name="sat-1", orbit=sc.spacecraft[0].orbit))
+    with pytest.raises(ScenarioValidationError, match="unique"):
+        sc.validate()
+
+
+def test_unsupported_central_body_rejected():
+    sc = _minimal_scenario()
+    sc.gravity = GravityConfig(central_body="pluto")
+    with pytest.raises(ScenarioValidationError, match="must be one of"):
+        sc.validate()
+
+
+def test_invalid_eccentricity_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].orbit.eccentricity = 1.2  # hyperbolic, out of this schema's supported range
+    with pytest.raises(ScenarioValidationError, match="0 <= eccentricity < 1"):
+        sc.validate()
+
+
+def test_cartesian_orbit_requires_full_vectors():
+    orbit = OrbitIC(type="cartesian", position_km=[7000.0, 0.0])  # only 2 elements, missing velocity
+    with pytest.raises(ScenarioValidationError, match="3-element"):
+        orbit.validate()
+
+
+def test_tle_orbit_requires_both_lines():
+    orbit = OrbitIC(type="tle", tle_line1="1 25544U ...")
+    with pytest.raises(ScenarioValidationError, match="both tle_line1 and tle_line2"):
+        orbit.validate()
+
+
+def test_space_weather_local_file_requires_path():
+    sc = _minimal_scenario()
+    sc.space_weather.source = "local_file"
+    sc.space_weather.local_file_path = None
+    with pytest.raises(ScenarioValidationError, match="local_file_path was not set"):
+        sc.validate()
+
+
+def test_load_scenario_malformed_json_gives_clear_error(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not valid json")
+    with pytest.raises(ScenarioValidationError, match="not valid JSON"):
+        load_scenario(path)
+
+
+def test_load_scenario_missing_schema_version_gives_clear_error(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({"name": "no version"}))
+    with pytest.raises(ScenarioValidationError, match="missing required top-level 'schema_version'"):
+        load_scenario(path)
+
+
+def test_load_scenario_future_schema_version_gives_clear_error(tmp_path):
+    path = tmp_path / "future.json"
+    path.write_text(json.dumps({"schema_version": 999, "name": "from the future", "epoch_utc": "2030-01-01T00:00:00"}))
+    with pytest.raises(ScenarioValidationError, match="upgrade missionStudio"):
+        load_scenario(path)

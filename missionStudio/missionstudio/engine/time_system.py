@@ -1,0 +1,154 @@
+#
+#  ISC License
+#
+#  Copyright (c) 2026, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+#
+#  Permission to use, copy, modify, and/or distribute this software for any
+#  purpose with or without fee is hereby granted, provided that the above
+#  copyright notice and this permission notice appear in all copies.
+#
+#  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+#  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+#  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+#  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+#  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+#  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+r"""
+Single source of truth for time/epoch handling.
+
+``schema.scenario.Scenario.epoch_utc`` (an ISO 8601 UTC string) is the ONE
+stored representation of a scenario's epoch -- every other representation
+(SPICE ET, TAI, TT, or a Basilisk ``EpochMsg``) is DERIVED from it by this
+module, on demand, rather than separately stored anywhere (schema, GUI
+state, ...) and left free to drift out of sync. Every other part of
+missionStudio that needs a time conversion should call into this module,
+not roll its own SPICE/datetime math.
+
+Requires a Basilisk build (imports ``Basilisk.architecture.messaging`` and
+the ``pyswice`` CSPICE wrapper) -- cannot be executed in this development
+sandbox (no Basilisk build here; see ``missionStudio/README.md``).
+
+Provenance of the SPICE call sequence below
+--------------------------------------------
+:func:`utc_to_et` and :func:`et_to_utc_iso` copy the exact
+``furnsh_c``/``str2et_c``/``doubleArray``/``et2utc_c``/``unload_c`` call
+sequence from ``Basilisk.utilities.simHelpers.timeStringToGregorianUTCMsg``
+(verified by directly reading that function's source in this checkout, not
+from memory) -- that is the one place in this codebase known to call
+``pyswice`` correctly, including the easy-to-get-wrong ``doubleArray``
+marshalling ``str2et_c`` needs for its output-pointer argument.
+
+:func:`epoch_times`'s TAI/TT conversions use ``pyswice.unitim_c()``, which
+is NOT called anywhere else in this checkout, so it has not been verified
+by example the way the above two have. Its exposure is confirmed by
+reading ``src/topLevelModules/pyswice/pyswice.i``: that file wraps the
+*entire* public CSPICE API via ``#include "SpiceUsr.h"``, excluding only
+four unrelated functions (``illumg_c``, ``prefix_c``, ``ekucei_c``,
+``ekuced_c``) -- ``unitim_c`` is not among them, so it is exposed as
+``pyswice.unitim_c``. Per the same file's typemap rules, a plain
+``SpiceDouble`` return value (which is what CSPICE's ``unitim_c`` has --
+unlike ``str2et_c``, it returns its result directly rather than through an
+output pointer) should map straight through to a Python ``float`` with no
+``doubleArray`` marshalling needed. This reasoning has not been checked
+against a real build in this sandbox; verify (or fix) on first use.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from dataclasses import dataclass
+from datetime import datetime
+
+from Basilisk.utilities.supportDataTools.dataFetcher import DataFile, get_path
+
+try:
+    import pyswice
+except ImportError as exc:  # pragma: no cover - only hit without a Basilisk build
+    raise ImportError(
+        "missionstudio.engine.time_system requires the pyswice CSPICE wrapper, which ships "
+        "with a Basilisk build. Build Basilisk (see missionStudio/README.md) before using this module."
+    ) from exc
+
+
+def utc_iso_to_spice_string(epoch_utc: str) -> str:
+    """``'2030-01-01T00:00:00'`` -> a SPICE-recognizable time string
+    (``'2030 JAN 01 00:00:00.000 (UTC)'``), matching the exact format
+    ``missionAnalysis/mission_config.py``'s ``EPOCH_SPICE_STRING`` already
+    uses elsewhere in this repo.
+    """
+    dt = datetime.fromisoformat(epoch_utc)
+    return dt.strftime("%Y %b %d %H:%M:%S.000 (UTC)").upper()
+
+
+@contextlib.contextmanager
+def _leap_second_kernel_loaded():
+    """Load ``naif0012.tls`` for the duration of the ``with`` block, then
+    unload it -- mirrors ``simHelpers.timeStringToGregorianUTCMsg()``'s
+    own ``furnsh_c``/``unload_c`` pairing exactly, so repeated calls in one
+    process don't leak kernel-pool entries.
+    """
+    lsk_path = str(get_path(DataFile.EphemerisData.naif0012))
+    pyswice.furnsh_c(lsk_path)
+    try:
+        yield
+    finally:
+        pyswice.unload_c(lsk_path)
+
+
+def utc_to_et(epoch_utc: str) -> float:
+    """UTC ISO 8601 string -> ET (TDB seconds past the J2000 epoch)."""
+    spice_string = utc_iso_to_spice_string(epoch_utc)
+    with _leap_second_kernel_loaded():
+        et_out = pyswice.new_doubleArray(1)
+        try:
+            pyswice.str2et_c(spice_string, et_out)
+            return pyswice.doubleArray_getitem(et_out, 0)
+        finally:
+            pyswice.delete_doubleArray(et_out)  # free the SWIG-allocated array (leaked otherwise)
+
+
+def et_to_utc_iso(et: float) -> str:
+    """ET (TDB seconds past J2000) -> UTC ISO 8601 string, e.g.
+    ``'2030-01-01T00:00:00.000000'``.
+    """
+    with _leap_second_kernel_loaded():
+        return pyswice.et2utc_c(et, "ISOC", 6, 255, "Yo")
+
+
+@dataclass
+class EpochTimes:
+    """All the standard time-system representations of one epoch, computed
+    together so the GUI/CLI never has to re-derive (or accidentally
+    re-diverge) any of them relative to each other.
+    """
+
+    utc_iso: str
+    et_s: float   # Ephemeris Time / Barycentric Dynamical Time (TDB), seconds past J2000
+    tai_s: float  # International Atomic Time, seconds past J2000
+    tt_s: float   # Terrestrial Time, seconds past J2000 (CSPICE calls this "TDT")
+
+
+def epoch_times(epoch_utc: str) -> EpochTimes:
+    """Compute ET/TAI/TT for a UTC epoch. See the module docstring for the
+    TAI/TT conversion's verification status.
+    """
+    et = utc_to_et(epoch_utc)
+    with _leap_second_kernel_loaded():
+        tai = pyswice.unitim_c(et, "ET", "TAI")
+        tt = pyswice.unitim_c(et, "ET", "TDT")
+    return EpochTimes(utc_iso=epoch_utc, et_s=et, tai_s=tai, tt_s=tt)
+
+
+def build_epoch_msg(epoch_utc: str):
+    """Build a standalone Basilisk ``EpochMsg`` for the given UTC epoch.
+    Thin wrapper over ``simHelpers.timeStringToGregorianUTCMsg()`` -- kept
+    here so every other missionStudio module asks THIS module for it
+    instead of importing ``simHelpers`` directly (single source of truth,
+    see module docstring).
+    """
+    from Basilisk.utilities import simHelpers
+
+    return simHelpers.timeStringToGregorianUTCMsg(utc_iso_to_spice_string(epoch_utc))
