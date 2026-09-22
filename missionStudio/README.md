@@ -622,6 +622,31 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   `locationPointing`'s `fsw_params["target_body"]` option now show an
   explicit in-dialog warning instead of silently accepting a
   configuration that fails only when the simulation actually runs.
+* **Sensor/actuator body-frame direction vectors get dedicated X/Y/Z spin
+  boxes**, not a bare 3-element array inside the params JSON box -- see
+  `gui.sensor_actuator_editor`'s module docstring for exactly why
+  DIRECTION (not position) is the one thing about sensor/actuator
+  "placement" that actually affects the physics these Basilisk modules
+  simulate here, plus a Normalize button since Basilisk does not
+  renormalize a non-unit vector itself.
+* **Reusable spacecraft "bus" templates.** A brand-new spacecraft used to
+  start from `SpacecraftConfig()`'s bare dataclass defaults (100 kg, flat
+  10 kg*m^2 inertia, no sensors/actuators/power/attitude control) -- a
+  placeholder, not anything resembling a real vehicle. The new
+  `engine.spacecraft_templates` module (pure schema data, no Basilisk
+  import, same split as `engine.constellation`) ships three starting
+  points -- a passive 3U CubeSat (drag/SRP enabled, no ADCS, good for
+  orbit-only delta-V/lifetime studies), a 3-axis-stabilized 3U CubeSat
+  (coarse sun sensor + 3 reaction wheels + `sunSafePoint` + a small power
+  budget), and a 100 kg ESPA-class smallsat (star tracker + coarse sun
+  sensor + 3 reaction wheels + `inertial3D` + a ~1 m-class power budget) --
+  each internally consistent and validated, with rounded,
+  order-of-magnitude-reasonable numbers (never a fabricated-precision
+  datasheet figure; see that module's docstring). The spacecraft list's
+  new "New from template..." button (next to "Add...") opens a small
+  picker, then the ordinary `SpacecraftEditorDialog` pre-filled with the
+  chosen template so the user still sets the actual name/orbit/anything
+  else themselves, exactly like editing any other spacecraft.
 
 ## Repository layout
 
@@ -646,6 +671,7 @@ missionStudio/
       link_budget.py                 -- Phase 4: downlink RF link-margin estimate (no Basilisk needed)
       orbit_maintenance.py           -- Phase 4: station-keeping + phasing-keeping controllers, delta-V/propellant bookkeeping (needs Basilisk)
       constellation.py               -- Phase 4: Walker-pattern constellation generator + SeparationSchedule (no Basilisk needed)
+      spacecraft_templates.py        -- Phase 5: reusable spacecraft "bus" templates (no Basilisk needed)
     gui/
       app.py                         -- QApplication entry point
       main_window.py                 -- MainWindow: File/Run menus, ties everything together
@@ -657,6 +683,7 @@ missionStudio/
       ground_station_editor.py       -- ground station list + add/edit/remove dialog
       orbit_ic_widget.py             -- classical-elements (true/mean anomaly)/Cartesian/TLE orbit editor
       constellation_dialog.py        -- Phase 4: "Generate Walker constellation" dialog
+      spacecraft_template_dialog.py  -- Phase 5: "New from template" picker dialog
       kernel_status_widget.py        -- SPICE kernel status panel
       results_widget.py              -- matplotlib results plot + CSV export
       run_worker.py                  -- SimulationService/Monte Carlo on a background QThread

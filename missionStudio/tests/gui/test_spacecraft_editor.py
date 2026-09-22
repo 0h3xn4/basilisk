@@ -486,6 +486,92 @@ def test_list_widget_add_via_dialog(qtbot, monkeypatch):
     assert changed_count == [1]
 
 
+def test_list_widget_new_from_template(qtbot, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.engine.spacecraft_templates import SPACECRAFT_TEMPLATES
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog, SpacecraftListWidget
+    from missionstudio.gui.spacecraft_template_dialog import SpacecraftTemplateDialog
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+
+    stabilized = next(t for t in SPACECRAFT_TEMPLATES if "stabilized" in t.name.lower() and "3u" in t.name.lower())
+
+    def fake_picker_exec(self):
+        return QDialog.DialogCode.Accepted
+
+    def fake_picker_selected_template(self):
+        return stabilized
+
+    def fake_editor_exec(self):
+        return QDialog.DialogCode.Accepted  # accept whatever the template pre-filled, unchanged
+
+    monkeypatch.setattr(SpacecraftTemplateDialog, "exec", fake_picker_exec)
+    monkeypatch.setattr(SpacecraftTemplateDialog, "selected_template", fake_picker_selected_template)
+    monkeypatch.setattr(SpacecraftEditorDialog, "exec", fake_editor_exec)
+    changed_count = []
+    lw.changed.connect(lambda: changed_count.append(1))
+
+    qtbot.mouseClick(lw.new_from_template_button, Qt.MouseButton.LeftButton)
+
+    assert lw.list_widget.count() == 1
+    added = lw.to_list()[0]
+    assert len(added.actuators) == 3
+    assert added.fsw_mode == "sunSafePoint"
+    assert changed_count == [1]
+
+
+def test_list_widget_new_from_template_dedupes_name_on_collision(qtbot, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.engine.spacecraft_templates import SPACECRAFT_TEMPLATES
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog, SpacecraftListWidget
+    from missionstudio.gui.spacecraft_template_dialog import SpacecraftTemplateDialog
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+    lw.from_list([SpacecraftConfig(name="template",
+                                    orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0],
+                                                  velocity_km_s=[0, 7.5, 0]))])
+
+    passive = next(t for t in SPACECRAFT_TEMPLATES if "passive" in t.name.lower())
+
+    monkeypatch.setattr(SpacecraftTemplateDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(SpacecraftTemplateDialog, "selected_template", lambda self: passive)
+    captured_names = []
+
+    def fake_editor_exec(self):
+        captured_names.append(self.name_edit.text())
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(SpacecraftEditorDialog, "exec", fake_editor_exec)
+
+    qtbot.mouseClick(lw.new_from_template_button, Qt.MouseButton.LeftButton)
+
+    assert lw.list_widget.count() == 2
+    assert captured_names == ["template-2"]  # "template" already taken by the pre-existing spacecraft
+
+
+def test_list_widget_new_from_template_cancel_does_nothing(qtbot, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.spacecraft_editor import SpacecraftListWidget
+    from missionstudio.gui.spacecraft_template_dialog import SpacecraftTemplateDialog
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+    monkeypatch.setattr(SpacecraftTemplateDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+
+    qtbot.mouseClick(lw.new_from_template_button, Qt.MouseButton.LeftButton)
+
+    assert lw.list_widget.count() == 0
+
+
 def test_list_widget_edit_and_remove(qtbot, monkeypatch):
     from PySide6.QtWidgets import QDialog
 

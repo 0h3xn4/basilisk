@@ -627,13 +627,16 @@ class SpacecraftListWidget(QWidget):
         self.edit_button = QPushButton("Edit...")
         self.remove_button = QPushButton("Remove")
         self.generate_constellation_button = QPushButton("Generate Walker constellation...")
+        self.new_from_template_button = QPushButton("New from template...")
         button_row.addWidget(self.add_button)
+        button_row.addWidget(self.new_from_template_button)
         button_row.addWidget(self.edit_button)
         button_row.addWidget(self.remove_button)
         button_row.addWidget(self.generate_constellation_button)
         layout.addLayout(button_row)
 
         self.add_button.clicked.connect(self._on_add)
+        self.new_from_template_button.clicked.connect(self._on_new_from_template)
         self.edit_button.clicked.connect(self._on_edit)
         self.remove_button.clicked.connect(self._on_remove)
         self.generate_constellation_button.clicked.connect(self._on_generate_constellation)
@@ -662,6 +665,37 @@ class SpacecraftListWidget(QWidget):
             n += 1
             candidate = f"{base_name}-{n}"
         dialog.name_edit.setText(candidate)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            config = dialog.to_dataclass()
+            if config.name in existing_names:
+                QMessageBox.critical(self, "Duplicate name",
+                                      f"A spacecraft named {config.name!r} already exists.")
+                return
+            self._configs.append(config)
+            self._refresh_list()
+            self.changed.emit()
+
+    def _on_new_from_template(self) -> None:
+        from .spacecraft_template_dialog import SpacecraftTemplateDialog
+
+        picker = SpacecraftTemplateDialog(parent=self)
+        if picker.exec() != QDialog.DialogCode.Accepted:
+            return
+        template = picker.selected_template()
+        if template is None:
+            return
+
+        existing_names = {c.name for c in self._configs}
+        prefilled = template.build()
+        # default name must be unique so QListWidget entries stay distinguishable
+        base_name = prefilled.name
+        candidate, n = base_name, 1
+        while candidate in existing_names:
+            n += 1
+            candidate = f"{base_name}-{n}"
+        prefilled.name = candidate
+
+        dialog = SpacecraftEditorDialog(config=prefilled, parent=self, other_spacecraft_names=sorted(existing_names))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             config = dialog.to_dataclass()
             if config.name in existing_names:
