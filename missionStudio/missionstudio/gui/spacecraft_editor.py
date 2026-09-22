@@ -30,9 +30,16 @@ a spacecraft). Fixed now: ``to_dataclass()`` takes the ORIGINAL config (if
 editing one) and carries those fields through unless this dialog's own
 sensor/actuator/FSW editors changed them.
 
-drag/SRP are still not editable here -- ``engine.service`` still doesn't
-wire them up (see that module's docstring) -- so there is deliberately
-still no UI for them, same reasoning as before.
+drag/SRP are still not editable here -- there is deliberately no UI for
+them yet, same reasoning as before -- even though ``engine.service`` DOES
+now wire them up (Phase 4; see that module's docstring). ``to_dataclass()``
+carries ``enable_drag``/``drag_coeff``/``drag_area_m2``/``enable_srp``/
+``srp_coeff``/``srp_area_m2`` through from the original config the same
+way it does sensors/actuators/fsw_mode, so editing a spacecraft with these
+already set (e.g. from a hand-edited scenario file) doesn't silently reset
+them -- that was a real bug (found by audit, no editor ever existed to
+trigger it in the GUI itself) fixed at the same time this paragraph was
+corrected.
 """
 
 from __future__ import annotations
@@ -99,6 +106,10 @@ class SpacecraftEditorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Spacecraft" if config is None else f"Spacecraft: {config.name}")
         self._other_spacecraft_names = other_spacecraft_names or []
+        # Kept only to round-trip fields this dialog has no editor for yet
+        # (drag/SRP -- see to_dataclass()) so editing a spacecraft doesn't
+        # silently reset them to SpacecraftConfig's defaults.
+        self._config = config
 
         outer_layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -295,6 +306,20 @@ class SpacecraftEditorDialog(QDialog):
             chief_index = self.pk_chief_combo.findData(pk0.chief_spacecraft)
             if chief_index >= 0:
                 self.pk_chief_combo.setCurrentIndex(chief_index)
+            else:
+                # pk0.chief_spacecraft doesn't match any current spacecraft
+                # name (e.g. that spacecraft was renamed or removed since
+                # this config was saved). Silently falling back to index 0
+                # would swap the chief to whichever spacecraft happens to
+                # be first -- wrong, and invisible to the user. Surface the
+                # stale name as its own selectable entry instead, so
+                # to_dataclass() below still round-trips it (and
+                # SpacecraftConfig.validate()/Scenario.validate() catch it
+                # as a real error) unless the user explicitly picks a
+                # different chief.
+                self.pk_chief_combo.addItem(f"{pk0.chief_spacecraft} (not found in this scenario)",
+                                             userData=pk0.chief_spacecraft)
+                self.pk_chief_combo.setCurrentIndex(self.pk_chief_combo.count() - 1)
         power_layout.addWidget(self.phasing_keeping_group)
 
         rf_link0 = config.rf_link if config else None
@@ -372,6 +397,16 @@ class SpacecraftEditorDialog(QDialog):
             rf_link=self._rf_link_to_dataclass(),
             station_keeping=self._station_keeping_to_dataclass(),
             phasing_keeping=self._phasing_keeping_to_dataclass(),
+            # No editor for drag/SRP yet (see this module's docstring) --
+            # round-trip whatever was already on the config being edited
+            # instead of silently resetting it to SpacecraftConfig's
+            # defaults every time this spacecraft is edited.
+            enable_drag=self._config.enable_drag if self._config else False,
+            drag_coeff=self._config.drag_coeff if self._config else SpacecraftConfig.drag_coeff,
+            drag_area_m2=self._config.drag_area_m2 if self._config else SpacecraftConfig.drag_area_m2,
+            enable_srp=self._config.enable_srp if self._config else False,
+            srp_coeff=self._config.srp_coeff if self._config else SpacecraftConfig.srp_coeff,
+            srp_area_m2=self._config.srp_area_m2 if self._config else SpacecraftConfig.srp_area_m2,
         )
         config.validate()  # raises ScenarioValidationError with a specific message on anything bad
         return config

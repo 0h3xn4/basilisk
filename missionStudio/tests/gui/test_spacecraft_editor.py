@@ -291,6 +291,69 @@ def test_dialog_phasing_keeping_rejects_malformed_separation_list(qtbot):
         dialog.to_dataclass()
 
 
+def test_dialog_stale_chief_spacecraft_is_preserved_not_silently_swapped(qtbot):
+    """Regression test: pk0.chief_spacecraft naming a spacecraft that no
+    longer exists in other_spacecraft_names (e.g. renamed/removed since
+    this config was saved) used to be silently dropped -- findData()
+    returned -1, nothing set the combo's index, and it stayed on
+    whatever was first, re-targeting phasing_keeping at the WRONG chief
+    with no indication anything had changed. It must instead be
+    round-tripped as-is (surfaced as its own combo entry) so
+    to_dataclass() either preserves it or a later validate() call catches
+    it as a real, visible error -- never a silent swap.
+    """
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import OrbitIC, PhasingKeepingConfig, SpacecraftConfig, StationKeepingConfig
+
+    existing = SpacecraftConfig(
+        name="sat-follower",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        station_keeping=StationKeepingConfig(target_altitude_km=550.0, deadband_km=1.5, thrust_n=0.015,
+                                              isp_s=1550.0, propellant_kg=2.5),
+        phasing_keeping=PhasingKeepingConfig(chief_spacecraft="renamed-chief", target_separation_km=[250.0]),
+    )
+    # "renamed-chief" is NOT in other_spacecraft_names -- simulates the
+    # chief having been renamed/removed after this config was saved.
+    dialog = SpacecraftEditorDialog(config=existing, other_spacecraft_names=["some-other-sat"])
+    qtbot.addWidget(dialog)
+
+    assert dialog.pk_chief_combo.currentData() == "renamed-chief"
+    got = dialog.to_dataclass()
+    assert got.phasing_keeping.chief_spacecraft == "renamed-chief"
+
+
+def test_dialog_round_trips_drag_and_srp_fields_with_no_editor(qtbot):
+    """Regression test: to_dataclass() used to build a brand new
+    SpacecraftConfig without passing enable_drag/drag_coeff/drag_area_m2/
+    enable_srp/srp_coeff/srp_area_m2 at all (there is no editor for them),
+    silently resetting them to SpacecraftConfig's defaults every time an
+    existing spacecraft with these set was edited and re-saved.
+    """
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    existing = SpacecraftConfig(
+        name="sat-drag",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        enable_drag=True,
+        drag_coeff=2.5,
+        drag_area_m2=3.3,
+        enable_srp=True,
+        srp_coeff=1.5,
+        srp_area_m2=4.4,
+    )
+    dialog = SpacecraftEditorDialog(config=existing)
+    qtbot.addWidget(dialog)
+
+    got = dialog.to_dataclass()
+    assert got.enable_drag is True
+    assert got.drag_coeff == 2.5
+    assert got.drag_area_m2 == 3.3
+    assert got.enable_srp is True
+    assert got.srp_coeff == 1.5
+    assert got.srp_area_m2 == 4.4
+
+
 def test_dialog_round_trips_phasing_keeping(qtbot):
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
     from missionstudio.schema.scenario import (
