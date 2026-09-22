@@ -59,11 +59,44 @@ dynamic effectors on one hub sum additively, the same pattern
 ``../missionAnalysis`` itself uses for drag/SRP/thrust as three separate
 effectors.
 
+Shared mass bookkeeping (audit fix)
+------------------------------------
+:class:`StationKeepingController`, :class:`PhasingKeepingController`, and
+:class:`ConstantFrameThrustController` each track propellant use and feed
+it back into ``scObject.hub.mHub`` so thrust-to-mass stays physically
+consistent as propellant depletes. An earlier version of all three
+UpdateState methods did this by unconditionally OVERWRITING
+``hub.mHub = self.dryMass + self.propellant`` (an absolute value, each
+controller's own construction-time-captured belief) every tick -- a real
+bug, found by audit and fixed here: with more than one such controller on
+the same spacecraft (``station_keeping`` + ``constant_thrust`` is an
+explicitly supported combination -- see ``ConstantThrustConfig``'s
+docstring), whichever one's ``UpdateState`` happened to run last each
+tick silently discarded the other's propellant contribution to the
+simulated mass; the same overwrite also silently undid any
+``engine.monte_carlo`` ``dry_mass_kg`` dispersion (applied to ``hub.mHub``
+once, before ``InitializeSimulation()`` -- see that module's docstring)
+the moment the first tick ran.
+
+Fixed by having each controller read the spacecraft's CURRENT
+``hub.mHub`` at the top of its own ``UpdateState`` (rather than
+recomputing an absolute value from its own captured ``dryMass``) and then
+subtract only the propellant mass it ITSELF burns that tick. This
+composes correctly no matter how many other controllers or an external
+dispersion are also adjusting the same ``hub.mHub`` -- each one's edit is
+a self-contained delta, order-independent by construction, rather than a
+snapshot that can stomp on someone else's. It also makes each
+controller's OWN delta-V bookkeeping marginally more physically accurate
+as a side effect: ``currentMass`` is now the spacecraft's real total mass
+(dry + every tank currently aboard), not just this one controller's own
+belief about it.
+
 Verification status: same as ``engine/fsw.py``/``engine/service.py`` --
 cannot be executed in this project's development sandbox (no Basilisk
 build here); the burn/bookkeeping logic is copied from
 ``../missionAnalysis``'s already-reviewed controller, not written from
-memory.
+memory (the shared-mass-bookkeeping fix above is this project's own,
+found and fixed after a full codebase audit).
 """
 
 from __future__ import annotations
@@ -78,6 +111,7 @@ from Basilisk.utilities import macros, orbitalMotion
 
 from ..schema.scenario import ConstantThrustConfig, PhasingKeepingConfig, StationKeepingConfig
 from .constellation import SeparationSchedule
+from .propellant_bookkeeping import apply_propellant_burn
 
 
 def _wrap_pm_pi(angle_rad: float) -> float:
@@ -192,16 +226,17 @@ class StationKeepingController(sysModel.SysModel):
             thrustMag = 0.0
             self.bskLogger.warning(f"{self.ModelTag}: propellant depleted, reboost inhibited")
 
-        currentMass = self.dryMass + self.propellant  # [kg]
-
-        mDot = 0.0  # [kg/s]
+        # Read the spacecraft's CURRENT total mass rather than
+        # recomputing dryMass + this controller's own propellant -- see
+        # this module's "Shared mass bookkeeping" docstring note for why.
+        currentMass = self.scObject.hub.mHub if self.scObject is not None else (self.dryMass + self.propellant)
         if thrustMag > 0.0:
             self._cumulativeDv += (thrustMag / currentMass) * dt  # [m/s]
-            mDot = thrustMag / (self.ispS * self.g0)  # [kg/s]
-            self.propellant = max(0.0, self.propellant - mDot * dt)
 
+        newMass, self.propellant, _burnedKg, mDot = apply_propellant_burn(
+            currentMass, self.propellant, thrustMag, self.ispS, dt, self.g0)
         if self.scObject is not None:
-            self.scObject.hub.mHub = self.dryMass + self.propellant
+            self.scObject.hub.mHub = newMass
 
         forceVec = np.zeros(3)
         if thrustMag > 0.0:
@@ -474,17 +509,20 @@ class PhasingKeepingController(sysModel.SysModel):
                 thrustMag = 0.0
 
         tracker = self._propellant_tracker()
-        currentMass = self.dryMass + tracker.propellant  # [kg]
+        # Read the spacecraft's CURRENT total mass rather than
+        # recomputing dryMass + tracker.propellant -- see this module's
+        # "Shared mass bookkeeping" docstring note for why.
+        currentMass = self.scObjectB.hub.mHub if self.scObjectB is not None else (self.dryMass + tracker.propellant)
 
         if thrustMag > 0.0:
             accel = thrustMag / currentMass  # [m/s^2]
             self._accumDv += accel * dt
             self._cumulativeDv += accel * dt
-            mDot = thrustMag / (self.ispS * self.g0)  # [kg/s]
-            tracker.propellant = max(0.0, tracker.propellant - mDot * dt)
 
+        newMass, tracker.propellant, _burnedKg, _mDot = apply_propellant_burn(
+            currentMass, tracker.propellant, thrustMag, self.ispS, dt, self.g0)
         if self.scObjectB is not None:
-            self.scObjectB.hub.mHub = self.dryMass + tracker.propellant
+            self.scObjectB.hub.mHub = newMass
 
         forceVec = np.zeros(3)
         if thrustMag > 0.0:
@@ -663,16 +701,18 @@ class ConstantFrameThrustController(sysModel.SysModel):
         dirHat_N = self.direction[0] * axis1 + self.direction[1] * axis2 + self.direction[2] * axis3
 
         thrustMag = self.thrustN if self.propellant > 1e-9 else 0.0  # [N]
-        currentMass = self.dryMass + self.propellant  # [kg]
+        # Read the spacecraft's CURRENT total mass rather than
+        # recomputing dryMass + this controller's own propellant -- see
+        # this module's "Shared mass bookkeeping" docstring note for why.
+        currentMass = self.scObject.hub.mHub if self.scObject is not None else (self.dryMass + self.propellant)
 
-        mDot = 0.0  # [kg/s]
         if thrustMag > 0.0:
             self._cumulativeDv += (thrustMag / currentMass) * dt  # [m/s]
-            mDot = thrustMag / (self.ispS * self.g0)  # [kg/s]
-            self.propellant = max(0.0, self.propellant - mDot * dt)
 
+        newMass, self.propellant, _burnedKg, mDot = apply_propellant_burn(
+            currentMass, self.propellant, thrustMag, self.ispS, dt, self.g0)
         if self.scObject is not None:
-            self.scObject.hub.mHub = self.dryMass + self.propellant
+            self.scObject.hub.mHub = newMass
 
         forceVec = thrustMag * dirHat_N
         if self.extForceEffector is not None:
@@ -705,7 +745,10 @@ def build_constant_thrust(scSim, task_name: str, tag: str, sc_object, dry_mass_k
     spacecraft, the caller is responsible for including both propellant
     masses in the spacecraft's initial simulated mass (they are
     independent propellant budgets/tanks, unlike station_keeping +
-    phasing_keeping which deliberately share one).
+    phasing_keeping which deliberately share one) -- see this module's
+    "Shared mass bookkeeping" docstring note for how each controller's
+    ``UpdateState`` now preserves that initial total correctly tick over
+    tick, instead of each one recomputing (and clobbering) its own.
     """
     controller = ConstantFrameThrustController(
         name=f"{tag}ConstantThrust",

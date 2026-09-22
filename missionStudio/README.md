@@ -732,6 +732,34 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   * The Monte Carlo group box was labeled "Monte Carlo (Phase 3)" --
     internal development-phase numbering with no meaning to an end user,
     now just "Monte Carlo".
+* **Fixed a silent mass-bookkeeping bug found by a full-codebase audit.**
+  `StationKeepingController`/`PhasingKeepingController`/
+  `ConstantFrameThrustController` each used to recompute an ABSOLUTE
+  `scObject.hub.mHub = dryMass + propellant` every tick, from their own
+  construction-time-captured belief about the spacecraft's mass. That's
+  fine in isolation, but two real, previously-silent failure modes fall out
+  of it: (1) `station_keeping` and the new `constant_thrust` are an
+  explicitly supported combination on the same spacecraft, and whichever
+  controller's `UpdateState` happened to run last each tick would overwrite
+  `hub.mHub`, discarding the other controller's propellant burn entirely;
+  (2) a Monte Carlo `dry_mass_kg` dispersion writes directly to `hub.mHub`
+  before any controller's first tick (see `engine.monte_carlo`'s "why
+  `SimulationService.build(initialize=False)`" docstring section) -- the
+  very first `UpdateState` call would then silently reset that dispersed
+  mass back to the nominal, undispersed value, quietly defeating the
+  dispersion for the rest of the run. Fixed at the root: all three
+  controllers now read the spacecraft's CURRENT total mass at the top of
+  each tick and subtract only what THIS tank burns THIS tick -- a
+  self-contained delta, order-independent no matter how many other
+  controllers or a prior dispersion already touched the same mass. The
+  shared fix lives in a new `engine.propellant_bookkeeping.
+  apply_propellant_burn()` (pure math, no Basilisk import -- same "pure
+  math, no Basilisk" split as `engine.constellation`/
+  `engine.spacecraft_templates`, and for the same reason:
+  `engine.orbit_maintenance` itself can never be unit-tested in a sandbox
+  without a Basilisk build, so factoring the actual arithmetic out is what
+  makes `tests/test_propellant_bookkeeping.py`'s regression coverage for
+  this bug possible at all).
 
 ## Repository layout
 
@@ -755,6 +783,7 @@ missionStudio/
       monte_carlo.py                 -- Phase 3: Basilisk.utilities.MonteCarlo bridge (needs Basilisk)
       link_budget.py                 -- Phase 4: downlink RF link-margin estimate (no Basilisk needed)
       orbit_maintenance.py           -- Phase 4/5: station-keeping + phasing-keeping + constant-frame-thrust controllers, delta-V/propellant bookkeeping (needs Basilisk)
+      propellant_bookkeeping.py      -- Phase 5: shared per-tick mass/propellant delta math (no Basilisk needed)
       constellation.py               -- Phase 4: Walker-pattern constellation generator + SeparationSchedule (no Basilisk needed)
       spacecraft_templates.py        -- Phase 5: reusable spacecraft "bus" templates (no Basilisk needed)
     gui/
