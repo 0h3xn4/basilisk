@@ -109,6 +109,30 @@ class ScenarioEditorWidget(QWidget):
         self.name_edit.textChanged.connect(self.changed)
         form.addRow("Name", self.name_edit)
 
+        # First choice in the form, deliberately -- per the feature
+        # request this responds to, simulation mode should be picked
+        # "before starting with anything else". "Orbit only" is a
+        # stricter, beginner-friendly mode: Scenario.validate() rejects
+        # any spacecraft with fsw_mode/sensors/actuators/power set while
+        # this is selected (see Scenario.simulation_mode's docstring) --
+        # switching TO "Orbit only" on a scenario that already has those
+        # set will make Save/Run fail with a specific error naming what to
+        # remove, same "surface it, don't silently drop it" discipline as
+        # everywhere else in this app.
+        self.simulation_mode_combo = QComboBox()
+        self.simulation_mode_combo.addItem("Full attitude (sensors, actuators, FSW, power)",
+                                            userData="full_attitude")
+        self.simulation_mode_combo.addItem("Orbit only (cannonball -- no attitude features)",
+                                            userData="orbit_only")
+        self.simulation_mode_combo.setToolTip(
+            "Full attitude: sensors, actuators, FSW pointing/control, and power budgets are all available.\n"
+            "Orbit only: a simpler cannonball spacecraft (drag_area_m2/srp_area_m2 as its average cross-section) "
+            "for pure orbit-propagation questions (delta-V budgets, orbit lifetime, station-keeping cadence, ...) "
+            "-- no sensors/actuators/FSW/power on any spacecraft in this mode."
+        )
+        self.simulation_mode_combo.currentIndexChanged.connect(self.changed)
+        form.addRow("Simulation mode", self.simulation_mode_combo)
+
         self.epoch_edit = QLineEdit("2030-01-01T00:00:00")
         self.epoch_edit.setPlaceholderText("ISO 8601 UTC, e.g. 2030-01-01T00:00:00")
         self.epoch_edit.textChanged.connect(self.changed)
@@ -232,6 +256,7 @@ class ScenarioEditorWidget(QWidget):
         layout = QVBoxLayout(group)
         self.spacecraft_list = SpacecraftListWidget()
         self.spacecraft_list.set_central_body_provider(lambda: self.central_body_combo.currentText())
+        self.spacecraft_list.set_simulation_mode_provider(lambda: self.simulation_mode_combo.currentData())
         self.spacecraft_list.changed.connect(self.changed)
         self.spacecraft_list.changed.connect(self._refresh_monte_carlo_spacecraft_names)
         layout.addWidget(self.spacecraft_list)
@@ -263,6 +288,7 @@ class ScenarioEditorWidget(QWidget):
         scenario = Scenario(
             name=self.name_edit.text().strip(),
             epoch_utc=self.epoch_edit.text().strip(),
+            simulation_mode=self.simulation_mode_combo.currentData(),
             description=self.description_edit.toPlainText(),
             gravity=GravityConfig(
                 central_body=self.central_body_combo.currentText(),
@@ -288,6 +314,9 @@ class ScenarioEditorWidget(QWidget):
     def from_scenario(self, scenario: Scenario) -> None:
         self.name_edit.setText(scenario.name)
         self.epoch_edit.setText(scenario.epoch_utc)
+        mode_index = self.simulation_mode_combo.findData(scenario.simulation_mode)
+        if mode_index >= 0:
+            self.simulation_mode_combo.setCurrentIndex(mode_index)
         self.description_edit.setPlainText(scenario.description)
 
         self.central_body_combo.setCurrentText(scenario.gravity.central_body)

@@ -49,6 +49,7 @@ from typing import NamedTuple
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -71,6 +72,7 @@ from PySide6.QtWidgets import (
 
 from ..schema.scenario import (
     ActuatorConfig,
+    ConstantThrustConfig,
     OrbitIC,
     PhasingKeepingConfig,
     PowerConfig,
@@ -82,6 +84,7 @@ from ..schema.scenario import (
     SUPPORTED_ACTUATOR_KINDS,
     SUPPORTED_FSW_MODES,
     SUPPORTED_SENSOR_KINDS,
+    SUPPORTED_THRUST_FRAMES,
 )
 from .orbit_ic_widget import OrbitIcWidget
 from .sensor_actuator_editor import SensorActuatorListWidget
@@ -179,10 +182,18 @@ class SpacecraftEditorDialog(QDialog):
     """
 
     def __init__(self, config: SpacecraftConfig | None = None, parent: QWidget | None = None,
-                 other_spacecraft_names: list[str] | None = None):
+                 other_spacecraft_names: list[str] | None = None, simulation_mode: str = "full_attitude"):
         super().__init__(parent)
         self.setWindowTitle("Spacecraft" if config is None else f"Spacecraft: {config.name}")
         self._other_spacecraft_names = other_spacecraft_names or []
+        # See Scenario.simulation_mode's docstring: "orbit_only" hides the
+        # Sensors/actuators and FSW tabs and the Power budget group below
+        # (RF link/station-keeping/constant-thrust stay -- none need
+        # attitude). Only affects what's SHOWN here; the actual enforcement
+        # is schema-level (Scenario.validate()), so a scenario file that
+        # already has these set still round-trips correctly if the mode is
+        # later switched back to "full_attitude".
+        self._orbit_only = simulation_mode == "orbit_only"
         # Kept only to round-trip fields this dialog has no editor for yet
         # (drag/SRP -- see to_dataclass()) so editing a spacecraft doesn't
         # silently reset them to SpacecraftConfig's defaults.
@@ -190,6 +201,7 @@ class SpacecraftEditorDialog(QDialog):
 
         outer_layout = QVBoxLayout(self)
         tabs = QTabWidget()
+        self.tabs = tabs
         outer_layout.addWidget(tabs)
 
         orbit_tab = QWidget()
@@ -218,6 +230,35 @@ class SpacecraftEditorDialog(QDialog):
         inertia_form.addRow("Iyy", self.iyy)
         inertia_form.addRow("Izz", self.izz)
         layout.addWidget(inertia_group)
+
+        # Drag/SRP finally get a real editor here (Phase 5) -- previously
+        # round-tripped only (see this module's docstring history): no UI
+        # existed anywhere to actually SET them, even though engine.service
+        # has wired them into the physics since Phase 4. Needed in
+        # particular for Scenario.simulation_mode's "orbit_only" cannonball
+        # use case, where drag_area_m2/srp_area_m2 ARE the spacecraft's
+        # only physical shape.
+        drag_srp_group = QGroupBox("Atmospheric drag / solar radiation pressure")
+        drag_srp_form = QFormLayout(drag_srp_group)
+        self.enable_drag_check = QCheckBox("Enable atmospheric drag")
+        self.enable_drag_check.setChecked(config.enable_drag if config else False)
+        drag_srp_form.addRow(self.enable_drag_check)
+        self.drag_coeff = _spin(0.1, 10.0, decimals=3, step=0.1,
+                                 value=config.drag_coeff if config else SpacecraftConfig.drag_coeff)
+        drag_srp_form.addRow("Drag coefficient [-]", self.drag_coeff)
+        self.drag_area_m2 = _spin(0.0001, 1.0e6, decimals=4, step=0.1,
+                                   value=config.drag_area_m2 if config else SpacecraftConfig.drag_area_m2)
+        drag_srp_form.addRow("Drag cross-section area [m^2]", self.drag_area_m2)
+        self.enable_srp_check = QCheckBox("Enable solar radiation pressure")
+        self.enable_srp_check.setChecked(config.enable_srp if config else False)
+        drag_srp_form.addRow(self.enable_srp_check)
+        self.srp_coeff = _spin(0.0, 3.0, decimals=3, step=0.1,
+                                value=config.srp_coeff if config else SpacecraftConfig.srp_coeff)
+        drag_srp_form.addRow("SRP reflectivity coefficient [-]", self.srp_coeff)
+        self.srp_area_m2 = _spin(0.0001, 1.0e6, decimals=4, step=0.1,
+                                  value=config.srp_area_m2 if config else SpacecraftConfig.srp_area_m2)
+        drag_srp_form.addRow("SRP cross-section area [m^2]", self.srp_area_m2)
+        layout.addWidget(drag_srp_group)
 
         attitude_group = QGroupBox("Initial attitude / body rate")
         attitude_form = QFormLayout(attitude_group)
@@ -252,7 +293,7 @@ class SpacecraftEditorDialog(QDialog):
         if config is not None:
             self.sensor_list.from_list(config.sensors)
             self.actuator_list.from_list(config.actuators)
-        tabs.addTab(sensors_tab, "Sensors / actuators")
+        self._sensors_tab_index = tabs.addTab(sensors_tab, "Sensors / actuators")
 
         # -- Attitude control (FSW) tab (Phase 2) -----------------------------
         fsw_tab = QWidget()
@@ -298,7 +339,7 @@ class SpacecraftEditorDialog(QDialog):
         fsw_layout.addWidget(control_hint_label)
         self.control_params_edit = QPlainTextEdit(json.dumps(config.control_params if config else {}, indent=2))
         fsw_layout.addWidget(self.control_params_edit)
-        tabs.addTab(fsw_tab, "Attitude control (FSW)")
+        self._fsw_tab_index = tabs.addTab(fsw_tab, "Attitude control (FSW)")
 
         # -- Power budget / RF link budget tab (Phase 4) ----------------------
         # Both are OFF by default (unchecked group box) -- turning one on is
@@ -357,6 +398,43 @@ class SpacecraftEditorDialog(QDialog):
         sk_form.addRow("Propellant available [kg]", self.sk_propellant_kg)
         sk_form.addRow("Eclipse sunlit threshold [-]", self.sk_eclipse_sunlit_threshold)
         power_layout.addWidget(self.station_keeping_group)
+
+        # Independent of station keeping above -- its own propellant
+        # budget/tank (see ConstantThrustConfig's docstring). Available in
+        # EITHER simulation mode (not restricted to orbit_only): a
+        # continuous, always-on thrust with a fixed direction in a
+        # ROTATING orbit frame (VNB or RTN, re-evaluated every tick), for
+        # delta-V/propellant budgeting without needing a burn trigger.
+        ct0 = config.constant_thrust if config else None
+        self.constant_thrust_group = QGroupBox("Constant thrust (continuous, orbit-frame-relative)")
+        self.constant_thrust_group.setCheckable(True)
+        self.constant_thrust_group.setChecked(ct0 is not None)
+        ct_form = QFormLayout(self.constant_thrust_group)
+        self.ct_frame_combo = QComboBox()
+        self.ct_frame_combo.addItems(list(SUPPORTED_THRUST_FRAMES))
+        self.ct_frame_combo.setToolTip(
+            "VNB: V=velocity direction, N=orbit normal, B=V x N.\n"
+            "RTN: R=radial (outward), T=N x R (in-plane, ⊥ R), N=orbit normal.\n"
+            "Re-evaluated every tick from the spacecraft's current state."
+        )
+        if ct0 is not None:
+            index = self.ct_frame_combo.findText(ct0.frame)
+            if index >= 0:
+                self.ct_frame_combo.setCurrentIndex(index)
+        ct_form.addRow("Frame", self.ct_frame_combo)
+        ct_dir0 = ct0.direction if ct0 else [1.0, 0.0, 0.0]
+        self.ct_dir_x = _spin(-1.0, 1.0, decimals=6, step=0.1, value=ct_dir0[0])
+        self.ct_dir_y = _spin(-1.0, 1.0, decimals=6, step=0.1, value=ct_dir0[1])
+        self.ct_dir_z = _spin(-1.0, 1.0, decimals=6, step=0.1, value=ct_dir0[2])
+        ct_form.addRow("Direction [-] (3 components, in Frame above)",
+                        _hbox(self.ct_dir_x, self.ct_dir_y, self.ct_dir_z))
+        self.ct_thrust_n = _spin(1.0e-6, 1.0e4, decimals=6, step=0.001, value=ct0.thrust_n if ct0 else 0.01)
+        ct_form.addRow("Thrust [N]", self.ct_thrust_n)
+        self.ct_isp_s = _spin(1.0, 1.0e5, decimals=1, step=10.0, value=ct0.isp_s if ct0 else 1500.0)
+        ct_form.addRow("Thruster Isp [s]", self.ct_isp_s)
+        self.ct_propellant_kg = _spin(0.0, 1.0e5, decimals=3, step=0.1, value=ct0.propellant_kg if ct0 else 2.0)
+        ct_form.addRow("Propellant available [kg]", self.ct_propellant_kg)
+        power_layout.addWidget(self.constant_thrust_group)
 
         # Requires station keeping above -- shares one physical thruster/tank
         # (see schema.scenario.PhasingKeepingConfig's docstring), so this has
@@ -500,6 +578,12 @@ class SpacecraftEditorDialog(QDialog):
         viz_model_layout.addStretch(1)
         tabs.addTab(viz_model_tab, "Vizard model (cosmetic)")
 
+        if self._orbit_only:
+            tabs.setTabVisible(self._sensors_tab_index, False)
+            tabs.setTabVisible(self._fsw_tab_index, False)
+            self.power_group.setChecked(False)
+            self.power_group.setVisible(False)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
@@ -536,14 +620,27 @@ class SpacecraftEditorDialog(QDialog):
 
     def to_dataclass(self) -> SpacecraftConfig:
         name = self.name_edit.text().strip()
-        fsw_mode = self.fsw_mode_combo.currentData()
-        fsw_params = self._parse_json_object(self.fsw_params_edit, "FSW params")
-        missing = _fsw_missing_required_keys(fsw_mode, fsw_params)
-        if missing:
-            raise ValueError(
-                f"FSW mode {fsw_mode!r} is missing required params key(s): {', '.join(missing)} -- "
-                "use 'Reset to template' for a working example"
-            )
+        if self._orbit_only:
+            # Tabs/group are hidden above -- force-clear rather than trust
+            # their (stale, possibly pre-populated-from-an-existing-config)
+            # widget state, so this dialog can never itself produce a
+            # config that violates Scenario.simulation_mode's "orbit_only"
+            # rule (see that field's docstring), regardless of what was on
+            # the spacecraft being edited before the scenario's mode was
+            # switched to "orbit_only".
+            fsw_mode, fsw_params, sensors, actuators, power = None, {}, [], [], None
+        else:
+            fsw_mode = self.fsw_mode_combo.currentData()
+            fsw_params = self._parse_json_object(self.fsw_params_edit, "FSW params")
+            missing = _fsw_missing_required_keys(fsw_mode, fsw_params)
+            if missing:
+                raise ValueError(
+                    f"FSW mode {fsw_mode!r} is missing required params key(s): {', '.join(missing)} -- "
+                    "use 'Reset to template' for a working example"
+                )
+            sensors = self.sensor_list.to_list()
+            actuators = self.actuator_list.to_list()
+            power = self._power_to_dataclass()
         config = SpacecraftConfig(
             name=name,
             orbit=self.orbit_widget.to_dataclass(),
@@ -555,25 +652,22 @@ class SpacecraftEditorDialog(QDialog):
             ],
             sigma_bn_init=[self.sigma1.value(), self.sigma2.value(), self.sigma3.value()],
             omega_bn_b_init_rad_s=[self.omega1.value(), self.omega2.value(), self.omega3.value()],
-            sensors=self.sensor_list.to_list(),
-            actuators=self.actuator_list.to_list(),
+            sensors=sensors,
+            actuators=actuators,
             fsw_mode=fsw_mode,
             fsw_params=fsw_params,
             control_params=self._parse_json_object(self.control_params_edit, "Control gains"),
-            power=self._power_to_dataclass(),
+            power=power,
             rf_link=self._rf_link_to_dataclass(),
             station_keeping=self._station_keeping_to_dataclass(),
             phasing_keeping=self._phasing_keeping_to_dataclass(),
-            # No editor for drag/SRP yet (see this module's docstring) --
-            # round-trip whatever was already on the config being edited
-            # instead of silently resetting it to SpacecraftConfig's
-            # defaults every time this spacecraft is edited.
-            enable_drag=self._config.enable_drag if self._config else False,
-            drag_coeff=self._config.drag_coeff if self._config else SpacecraftConfig.drag_coeff,
-            drag_area_m2=self._config.drag_area_m2 if self._config else SpacecraftConfig.drag_area_m2,
-            enable_srp=self._config.enable_srp if self._config else False,
-            srp_coeff=self._config.srp_coeff if self._config else SpacecraftConfig.srp_coeff,
-            srp_area_m2=self._config.srp_area_m2 if self._config else SpacecraftConfig.srp_area_m2,
+            constant_thrust=self._constant_thrust_to_dataclass(),
+            enable_drag=self.enable_drag_check.isChecked(),
+            drag_coeff=self.drag_coeff.value(),
+            drag_area_m2=self.drag_area_m2.value(),
+            enable_srp=self.enable_srp_check.isChecked(),
+            srp_coeff=self.srp_coeff.value(),
+            srp_area_m2=self.srp_area_m2.value(),
             vizard_model_path=self._viz_model_to_dataclass_path(),
             vizard_model_offset_m=[self.viz_offset_x.value(), self.viz_offset_y.value(), self.viz_offset_z.value()],
             vizard_model_rotation_deg=[self.viz_rotation_z.value(), self.viz_rotation_y.value(),
@@ -604,6 +698,17 @@ class SpacecraftEditorDialog(QDialog):
             isp_s=self.sk_isp_s.value(),
             propellant_kg=self.sk_propellant_kg.value(),
             eclipse_sunlit_threshold=self.sk_eclipse_sunlit_threshold.value(),
+        )
+
+    def _constant_thrust_to_dataclass(self) -> ConstantThrustConfig | None:
+        if not self.constant_thrust_group.isChecked():
+            return None
+        return ConstantThrustConfig(
+            frame=self.ct_frame_combo.currentText(),
+            direction=[self.ct_dir_x.value(), self.ct_dir_y.value(), self.ct_dir_z.value()],
+            thrust_n=self.ct_thrust_n.value(),
+            isp_s=self.ct_isp_s.value(),
+            propellant_kg=self.ct_propellant_kg.value(),
         )
 
     def _phasing_keeping_to_dataclass(self) -> PhasingKeepingConfig | None:
@@ -686,6 +791,13 @@ class SpacecraftListWidget(QWidget):
         # that could silently drift out of sync with it. Falls back to
         # "earth" when unset (e.g. this widget used standalone in a test).
         self._central_body_provider = None
+        # Set by the owning ScenarioEditorWidget (see
+        # set_simulation_mode_provider) so every SpacecraftEditorDialog
+        # this widget opens reflects the scenario's CURRENT simulation
+        # mode. Falls back to "full_attitude" when unset (e.g. this widget
+        # used standalone in a test) -- see Scenario.simulation_mode's
+        # docstring.
+        self._simulation_mode_provider = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -720,6 +832,17 @@ class SpacecraftListWidget(QWidget):
         """
         self._central_body_provider = provider
 
+    def set_simulation_mode_provider(self, provider) -> None:
+        """``provider`` is a zero-argument callable returning the
+        scenario's current ``simulation_mode`` ("full_attitude" or
+        "orbit_only"), e.g. ``lambda: self.simulation_mode_combo.currentData()``
+        from ``ScenarioEditorWidget``.
+        """
+        self._simulation_mode_provider = provider
+
+    def _simulation_mode(self) -> str:
+        return self._simulation_mode_provider() if self._simulation_mode_provider else "full_attitude"
+
     def _refresh_list(self) -> None:
         self.list_widget.clear()
         for config in self._configs:
@@ -727,7 +850,8 @@ class SpacecraftListWidget(QWidget):
 
     def _on_add(self) -> None:
         existing_names = {c.name for c in self._configs}
-        dialog = SpacecraftEditorDialog(parent=self, other_spacecraft_names=sorted(existing_names))
+        dialog = SpacecraftEditorDialog(parent=self, other_spacecraft_names=sorted(existing_names),
+                                         simulation_mode=self._simulation_mode())
         # default name must be unique so QListWidget entries stay distinguishable
         base_name = dialog.name_edit.text()
         candidate, n = base_name, 1
@@ -765,7 +889,8 @@ class SpacecraftListWidget(QWidget):
             candidate = f"{base_name}-{n}"
         prefilled.name = candidate
 
-        dialog = SpacecraftEditorDialog(config=prefilled, parent=self, other_spacecraft_names=sorted(existing_names))
+        dialog = SpacecraftEditorDialog(config=prefilled, parent=self, other_spacecraft_names=sorted(existing_names),
+                                         simulation_mode=self._simulation_mode())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             config = dialog.to_dataclass()
             if config.name in existing_names:
@@ -781,7 +906,8 @@ class SpacecraftListWidget(QWidget):
         if row < 0:
             return
         other_names = sorted(c.name for i, c in enumerate(self._configs) if i != row)
-        dialog = SpacecraftEditorDialog(config=self._configs[row], parent=self, other_spacecraft_names=other_names)
+        dialog = SpacecraftEditorDialog(config=self._configs[row], parent=self, other_spacecraft_names=other_names,
+                                         simulation_mode=self._simulation_mode())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_config = dialog.to_dataclass()
             other_names = {c.name for i, c in enumerate(self._configs) if i != row}

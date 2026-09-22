@@ -366,12 +366,15 @@ def test_dialog_stale_chief_spacecraft_is_preserved_not_silently_swapped(qtbot):
     assert got.phasing_keeping.chief_spacecraft == "renamed-chief"
 
 
-def test_dialog_round_trips_drag_and_srp_fields_with_no_editor(qtbot):
+def test_dialog_round_trips_drag_and_srp_fields(qtbot):
     """Regression test: to_dataclass() used to build a brand new
     SpacecraftConfig without passing enable_drag/drag_coeff/drag_area_m2/
-    enable_srp/srp_coeff/srp_area_m2 at all (there is no editor for them),
-    silently resetting them to SpacecraftConfig's defaults every time an
-    existing spacecraft with these set was edited and re-saved.
+    enable_srp/srp_coeff/srp_area_m2 at all (there was no editor for them
+    at the time), silently resetting them to SpacecraftConfig's defaults
+    every time an existing spacecraft with these set was edited and
+    re-saved. There is now a real editor (drag_srp_group) -- this checks
+    both that it round-trips an existing config's values AND (below) that
+    editing it actually changes what to_dataclass() returns.
     """
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
     from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
@@ -389,6 +392,13 @@ def test_dialog_round_trips_drag_and_srp_fields_with_no_editor(qtbot):
     dialog = SpacecraftEditorDialog(config=existing)
     qtbot.addWidget(dialog)
 
+    assert dialog.enable_drag_check.isChecked()
+    assert dialog.drag_coeff.value() == 2.5
+    assert dialog.drag_area_m2.value() == 3.3
+    assert dialog.enable_srp_check.isChecked()
+    assert dialog.srp_coeff.value() == 1.5
+    assert dialog.srp_area_m2.value() == 4.4
+
     got = dialog.to_dataclass()
     assert got.enable_drag is True
     assert got.drag_coeff == 2.5
@@ -396,6 +406,132 @@ def test_dialog_round_trips_drag_and_srp_fields_with_no_editor(qtbot):
     assert got.enable_srp is True
     assert got.srp_coeff == 1.5
     assert got.srp_area_m2 == 4.4
+
+
+def test_dialog_drag_srp_editor_actually_edits(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    assert not dialog.enable_drag_check.isChecked()  # default off
+
+    dialog.enable_drag_check.setChecked(True)
+    dialog.drag_coeff.setValue(2.7)
+    dialog.drag_area_m2.setValue(0.05)
+    dialog.enable_srp_check.setChecked(True)
+    dialog.srp_coeff.setValue(1.4)
+    dialog.srp_area_m2.setValue(0.05)
+
+    sc = dialog.to_dataclass()
+    assert sc.enable_drag is True
+    assert sc.drag_coeff == 2.7
+    assert sc.drag_area_m2 == 0.05
+    assert sc.enable_srp is True
+    assert sc.srp_coeff == 1.4
+    assert sc.srp_area_m2 == 0.05
+
+
+def test_dialog_defaults_to_no_constant_thrust(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    assert not dialog.constant_thrust_group.isChecked()
+    sc = dialog.to_dataclass()
+    assert sc.constant_thrust is None
+
+
+def test_dialog_builds_constant_thrust_when_group_checked(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    dialog.constant_thrust_group.setChecked(True)
+    dialog.ct_frame_combo.setCurrentText("RTN")
+    dialog.ct_dir_x.setValue(0.0)
+    dialog.ct_dir_y.setValue(1.0)
+    dialog.ct_dir_z.setValue(0.0)
+    dialog.ct_thrust_n.setValue(0.05)
+    dialog.ct_isp_s.setValue(2000.0)
+    dialog.ct_propellant_kg.setValue(1.5)
+
+    sc = dialog.to_dataclass()
+    assert sc.constant_thrust is not None
+    assert sc.constant_thrust.frame == "RTN"
+    assert sc.constant_thrust.direction == [0.0, 1.0, 0.0]
+    assert sc.constant_thrust.thrust_n == 0.05
+    assert sc.constant_thrust.isp_s == 2000.0
+    assert sc.constant_thrust.propellant_kg == 1.5
+
+
+def test_dialog_round_trips_constant_thrust(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import ConstantThrustConfig, OrbitIC, SpacecraftConfig
+
+    existing = SpacecraftConfig(
+        name="sat-thrust",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        constant_thrust=ConstantThrustConfig(frame="VNB", direction=[1.0, 0.0, 0.0], thrust_n=0.02,
+                                              isp_s=1800.0, propellant_kg=3.0),
+    )
+    dialog = SpacecraftEditorDialog(config=existing)
+    qtbot.addWidget(dialog)
+    assert dialog.constant_thrust_group.isChecked()
+    assert dialog.ct_frame_combo.currentText() == "VNB"
+
+    got = dialog.to_dataclass()
+    assert got.constant_thrust == existing.constant_thrust
+
+
+def test_dialog_orbit_only_mode_hides_attitude_tabs_and_power(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog(simulation_mode="orbit_only")
+    qtbot.addWidget(dialog)
+    assert not dialog.tabs.isTabVisible(dialog._sensors_tab_index)
+    assert not dialog.tabs.isTabVisible(dialog._fsw_tab_index)
+    # isHidden() (not isVisible()): tracks whether THIS widget was
+    # explicitly hidden, independent of whether the dialog itself was ever
+    # shown (it isn't, in this test) -- isVisible() would be False either
+    # way since the dialog is never .show()n.
+    assert dialog.power_group.isHidden()
+
+
+def test_dialog_orbit_only_mode_force_clears_attitude_fields(qtbot):
+    """Even if a spacecraft being edited already has sensors/actuators/
+    fsw_mode/power set (e.g. the scenario's mode was just switched to
+    orbit_only without yet touching this spacecraft), the dialog must not
+    let those hidden, stale values silently pass through to_dataclass().
+    """
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import OrbitIC, PowerConfig, SensorConfig, SpacecraftConfig
+
+    existing = SpacecraftConfig(
+        name="sat-orbit-only",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        sensors=[SensorConfig(kind="imu", name="imu-1")],
+        fsw_mode="hillPoint",
+        power=PowerConfig(panel_area_m2=1.0, panel_efficiency=0.29),
+    )
+    dialog = SpacecraftEditorDialog(config=existing, simulation_mode="orbit_only")
+    qtbot.addWidget(dialog)
+
+    sc = dialog.to_dataclass()
+    assert sc.sensors == []
+    assert sc.actuators == []
+    assert sc.fsw_mode is None
+    assert sc.power is None
+    sc.validate()  # must not raise
+
+
+def test_dialog_full_attitude_mode_keeps_tabs_visible(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog(simulation_mode="full_attitude")
+    qtbot.addWidget(dialog)
+    assert dialog.tabs.isTabVisible(dialog._sensors_tab_index)
+    assert dialog.tabs.isTabVisible(dialog._fsw_tab_index)
+    assert not dialog.power_group.isHidden()
 
 
 def test_dialog_defaults_to_no_vizard_model(qtbot):

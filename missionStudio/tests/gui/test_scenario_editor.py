@@ -42,6 +42,35 @@ def test_full_round_trip_matches_loaded_scenario(widget):
     assert got.spacecraft[0].orbit == scenario.spacecraft[0].orbit
 
 
+def test_simulation_mode_defaults_to_full_attitude(widget):
+    assert widget.simulation_mode_combo.currentData() == "full_attitude"
+    assert widget.spacecraft_list._simulation_mode() == "full_attitude"
+
+
+def test_simulation_mode_round_trips(widget):
+    from missionstudio.schema import load_scenario
+
+    scenario = load_scenario(_SCENARIO_PATH)
+    scenario.simulation_mode = "orbit_only"
+    scenario.spacecraft[0].sensors = []
+    scenario.spacecraft[0].actuators = []
+    scenario.spacecraft[0].fsw_mode = None
+    scenario.spacecraft[0].power = None
+    widget.from_scenario(scenario)
+
+    assert widget.simulation_mode_combo.currentData() == "orbit_only"
+    got = widget.to_scenario()
+    assert got.simulation_mode == "orbit_only"
+
+
+def test_simulation_mode_combo_drives_spacecraft_list_provider(widget):
+    widget.simulation_mode_combo.setCurrentIndex(widget.simulation_mode_combo.findData("orbit_only"))
+    assert widget.spacecraft_list._simulation_mode() == "orbit_only"
+
+    widget.simulation_mode_combo.setCurrentIndex(widget.simulation_mode_combo.findData("full_attitude"))
+    assert widget.spacecraft_list._simulation_mode() == "full_attitude"
+
+
 def test_third_body_perturbers_round_trip(widget):
     from missionstudio.schema.scenario import GravityConfig, Scenario, SpacecraftConfig, OrbitIC
 

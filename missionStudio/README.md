@@ -658,6 +658,37 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   spacecraft editor's new "Vizard model (cosmetic)" tab says so up front,
   same "don't offer a control that looks like it does something it
   doesn't" discipline as everywhere else in this app.
+* **Orbit-only simulation mode, plus a constant-frame thrust maneuver.**
+  `Scenario.simulation_mode` ("full_attitude", the default and everything
+  this schema always supported, or "orbit_only") is the first field in
+  the scenario editor's form, chosen before anything else per the
+  feature request this responds to. "Orbit only" is a stricter,
+  beginner-friendly mode for pure orbit-propagation questions (delta-V
+  budgets, orbit lifetime, station-keeping cadence, ...): no spacecraft
+  may have `fsw_mode`/`sensors`/`actuators`/`power` set (`Scenario.
+  validate()` rejects it with a specific per-field error), so the
+  spacecraft editor hides the Sensors/actuators and FSW tabs and the
+  Power budget group while it's selected -- the spacecraft is simulated
+  as a cannonball with `drag_area_m2`/`srp_area_m2` (which finally got a
+  real editor too, on the Orbit/mass tab -- previously round-tripped only,
+  with no UI to actually SET them anywhere) as its average cross-section.
+  `station_keeping`/`phasing_keeping`/the new `constant_thrust` remain
+  available in EITHER mode, since none of them need attitude knowledge.
+
+  `SpacecraftConfig.constant_thrust` is new: a continuous (always-on),
+  constant-magnitude thrust with a fixed direction in a ROTATING orbit
+  frame -- VNB (velocity/orbit-normal/binormal) or RTN (radial/
+  transverse/orbit-normal), re-evaluated every simulation tick from the
+  spacecraft's current state (`engine.orbit_maintenance._vnb_basis`/
+  `_rtn_basis`) -- rather than a direction fixed in the inertial frame,
+  which would drift relative to the orbit as the spacecraft moves. Delta
+  -V/propellant bookkeeping mirrors `StationKeepingConfig`'s own rocket
+  -equation approach (station-keeping's burn model itself is UNCHANGED --
+  still a fixed prograde reboost -- this is a separate, independent
+  mechanism with its own propellant tank, addable alongside station
+  -keeping on the same spacecraft). `missionstudio run` prints a
+  "Constant-thrust summary" line per spacecraft, same idea as the
+  existing station-keeping summary.
 
 ## Repository layout
 
@@ -680,7 +711,7 @@ missionStudio/
       vizard.py                      -- Phase 2: Vizard integration (needs Basilisk, imported lazily)
       monte_carlo.py                 -- Phase 3: Basilisk.utilities.MonteCarlo bridge (needs Basilisk)
       link_budget.py                 -- Phase 4: downlink RF link-margin estimate (no Basilisk needed)
-      orbit_maintenance.py           -- Phase 4: station-keeping + phasing-keeping controllers, delta-V/propellant bookkeeping (needs Basilisk)
+      orbit_maintenance.py           -- Phase 4/5: station-keeping + phasing-keeping + constant-frame-thrust controllers, delta-V/propellant bookkeeping (needs Basilisk)
       constellation.py               -- Phase 4: Walker-pattern constellation generator + SeparationSchedule (no Basilisk needed)
       spacecraft_templates.py        -- Phase 5: reusable spacecraft "bus" templates (no Basilisk needed)
     gui/
