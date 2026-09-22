@@ -137,6 +137,11 @@ def test_space_weather_local_file_requires_path():
         sc.validate()
 
 
+def test_load_scenario_missing_file_gives_clear_error(tmp_path):
+    with pytest.raises(ScenarioValidationError, match="could not read file"):
+        load_scenario(tmp_path / "does_not_exist.json")
+
+
 def test_load_scenario_malformed_json_gives_clear_error(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{not valid json")

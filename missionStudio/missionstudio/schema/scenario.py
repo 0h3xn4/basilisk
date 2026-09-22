@@ -265,7 +265,14 @@ class SimSettings:
     duration_days: float = 1.0
     dynamics_task_rate_s: float = 10.0
     integrator: str = "rkf78"  # see SUPPORTED_INTEGRATORS
-    earth_grav_degree: int = 10  # only relevant when gravity.central_body_degree > 0
+
+    # NOTE: gravity-field degree/order lives on GravityConfig.central_body_degree,
+    # not here -- an earlier draft of this schema had a second,
+    # SimSettings.earth_grav_degree field that duplicated it, which meant
+    # the two could disagree (one saying "point-mass", the other holding a
+    # stale nonzero degree) with no validation catching it. Fixed before
+    # anything (the GUI, saved scenario files) came to depend on the
+    # redundant field -- there is deliberately only one place to set this now.
 
     def validate(self) -> None:
         _require(self.duration_days > 0, "sim_settings.duration_days must be > 0")
@@ -352,7 +359,14 @@ def load_scenario(path: "str | Path") -> Scenario:
 
     path = Path(path)
     try:
-        raw = json.loads(path.read_text())
+        text = path.read_text()
+    except OSError as exc:
+        # Covers a missing file, a directory given by mistake, a
+        # permissions error, etc. -- all "can't read this path" failures,
+        # not just the literal FileNotFoundError case.
+        raise ScenarioValidationError(f"{path}: could not read file ({exc.strerror or exc})") from exc
+    try:
+        raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ScenarioValidationError(f"{path}: not valid JSON ({exc})") from exc
 

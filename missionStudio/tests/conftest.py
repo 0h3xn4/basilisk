@@ -1,36 +1,46 @@
 """Shared pytest fixtures/markers for the missionStudio test suite.
 
-This checkout does not have a built Basilisk Python package available (see
-``missionStudio/README.md`` -- a from-source build was attempted and
-failed because this development sandbox's network policy blocks Conan
-Center). Tests that need ``import Basilisk`` are marked with
-``@pytest.mark.requires_basilisk`` and are auto-skipped (not silently
-passed, not errored) when Basilisk isn't importable, so:
+Two independent "is this optional dependency installed" markers, both
+auto-skipping (not failing collection, not silently passing) rather than
+erroring the whole run when the corresponding install extra is missing:
 
-* running the suite here honestly reports what could and couldn't be
-  checked, instead of the whole run failing at collection time or a
-  Basilisk-dependent test being miscounted as "passed", and
-* the exact same test file runs those tests for real, no changes needed,
-  the moment it's executed on a machine with Basilisk built.
+* ``requires_basilisk``: needs a built Basilisk Python package. This
+  development sandbox doesn't have one (see ``missionStudio/README.md`` --
+  a from-source build was attempted and failed because this sandbox's
+  network policy blocks Conan Center).
+* ``requires_gui``: needs PySide6 (the ``gui`` extra, ``pip install
+  -e ".[gui]"``). Also forces ``QT_QPA_PLATFORM=offscreen`` before any Qt
+  import happens (unless the environment already set ``QT_QPA_PLATFORM``
+  explicitly) so the GUI test suite runs on a machine with no display --
+  this is how it is genuinely exercised in this development sandbox too,
+  not just designed to work that way in theory.
 """
 
 import importlib.util
+import os
 
 import pytest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 BASILISK_AVAILABLE = importlib.util.find_spec("Basilisk") is not None
+GUI_AVAILABLE = importlib.util.find_spec("PySide6") is not None
 
 
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "requires_basilisk: test needs a built Basilisk Python package (auto-skipped without one)"
     )
+    config.addinivalue_line(
+        "markers", "requires_gui: test needs PySide6 (the 'gui' extra; auto-skipped without it)"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if BASILISK_AVAILABLE:
-        return
-    skip_marker = pytest.mark.skip(reason="Basilisk is not installed/built in this environment")
+    skip_basilisk = pytest.mark.skip(reason="Basilisk is not installed/built in this environment")
+    skip_gui = pytest.mark.skip(reason="PySide6 is not installed (pip install -e '.[gui]')")
     for item in items:
-        if "requires_basilisk" in item.keywords:
-            item.add_marker(skip_marker)
+        if not BASILISK_AVAILABLE and "requires_basilisk" in item.keywords:
+            item.add_marker(skip_basilisk)
+        if not GUI_AVAILABLE and "requires_gui" in item.keywords:
+            item.add_marker(skip_gui)

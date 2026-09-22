@@ -30,10 +30,20 @@ Deliberately narrow, matching exactly what the two-body analytical
 validation scenario (``scenarios/two_body_validation.json``,
 ``tests/test_two_body_validation.py``) needs and nothing more:
 
-* Central-body gravity only: point-mass (``gravity.central_body_degree == 0``)
-  or Earth spherical harmonics (> 0, GGM03S -- the same gravity file
-  already used in ``../missionAnalysis``). Third-body perturbers are
-  VALIDATED by the schema but not yet added as perturbing bodies here.
+* Central-body gravity, point-mass (``gravity.central_body_degree == 0``)
+  or spherical harmonics (> 0, Earth-only for now -- GGM03S, the same
+  gravity file already used in ``../missionAnalysis``), PLUS third-body
+  point-mass perturbers (``gravity.third_body_perturbers``): both the
+  central body and every perturber are created via
+  ``gravBodyFactory.createBodies()`` and then ``addBodiesTo(sc_object)``
+  attaches ALL of them as gravitational contributors to each spacecraft
+  -- this is the exact same mechanism (verified, not assumed: see
+  ``../missionAnalysis/run_constellation_mission.py``'s own comment on
+  ``addBodiesTo()``) that already gives the Moon and Sun as automatic
+  third-body perturbers there, with no extra per-body wiring needed
+  beyond creating them. An earlier version of this docstring claimed
+  third-body perturbers were schema-only and not actually wired up here;
+  that was wrong (this service already adds them) and has been corrected.
 * One or more spacecraft, each from a classical-elements, Cartesian, or
   TLE initial condition (:class:`~missionstudio.schema.OrbitIC`).
 * Orbital dynamics only -- attitude integrates (Basilisk always integrates
@@ -43,8 +53,11 @@ validation scenario (``scenarios/two_body_validation.json``,
 Explicitly NOT wired up yet (validated by the schema and carried through
 save/load starting now, so the schema doesn't need to change shape later,
 but silently ignored by this service until the phase that implements it):
-drag, SRP, third-body gravity, sensors, actuators, FSW modes, ground
-stations, space weather, Monte Carlo.
+drag, SRP, sensors, actuators, FSW modes, ground stations, space weather,
+Monte Carlo. The Phase 1 GUI (see ``gui/``) deliberately does not expose
+editors for any of these either, for the same reason: a control that
+looks like it configures simulated behavior but silently doesn't is worse
+than not offering it yet.
 
 Verification status
 --------------------
@@ -212,7 +225,7 @@ class SimulationService:
                     "with that body's gravity-field file."
                 )
             central_body.useSphericalHarmonicsGravityModel(
-                str(get_path(DataFile.LocalGravData.GGM03S)), sim_settings.earth_grav_degree
+                str(get_path(DataFile.LocalGravData.GGM03S)), gravity.central_body_degree
             )
         mu = central_body.mu
         self.mu = mu

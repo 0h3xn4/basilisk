@@ -65,8 +65,7 @@
   "sim_settings": {
     "duration_days": 0.2,
     "dynamics_task_rate_s": 30.0,
-    "integrator": "rkf78",
-    "earth_grav_degree": 10
+    "integrator": "rkf78"
   },
   "description": "Single spacecraft, Earth point-mass gravity only (gravity.central_body_degree=0), near-circular LEO-ish orbit, propagated for several orbital periods. Used by tests/test_two_body_validation.py to check the propagated state against an independent analytical Kepler-equation solution and against conservation of specific orbital energy and angular momentum -- this is the end-to-end validation scenario with known analytical results required before this tool is trusted for anything else.",
   "schema_version": 1
