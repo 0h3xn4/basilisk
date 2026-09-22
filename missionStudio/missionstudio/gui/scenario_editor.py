@@ -231,6 +231,7 @@ class ScenarioEditorWidget(QWidget):
         group = QGroupBox("Spacecraft")
         layout = QVBoxLayout(group)
         self.spacecraft_list = SpacecraftListWidget()
+        self.spacecraft_list.set_central_body_provider(lambda: self.central_body_combo.currentText())
         self.spacecraft_list.changed.connect(self.changed)
         self.spacecraft_list.changed.connect(self._refresh_monte_carlo_spacecraft_names)
         layout.addWidget(self.spacecraft_list)

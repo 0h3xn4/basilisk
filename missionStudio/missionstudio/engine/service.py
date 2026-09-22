@@ -158,7 +158,7 @@ from Basilisk.utilities import SimulationBaseClass, macros, orbitalMotion, simHe
 from Basilisk.utilities.supportDataTools.dataFetcher import DataFile, get_path
 
 from ..schema.scenario import OrbitIC, Scenario
-from . import fsw, kernels, time_system, vizard
+from . import fsw, kernels, link_budget, orbit_maintenance, time_system, vizard
 from .results import ResultSet, TimeSeries
 from .vizard import VizardRequest
 
@@ -244,6 +244,11 @@ class _SpacecraftHandle:
     rw_speed_recorder: Optional[object] = None
     num_rw: int = 0
     sensor_recorders: Dict[str, object] = field(default_factory=dict)  # sensor.name -> (kind, recorder)
+    battery_recorder: Optional[object] = None  # Phase 4: only set if sc_config.power was configured
+    battery_module: Optional[object] = None  # Phase 4: the simpleBattery.SimpleBattery itself, for engine.vizard
+    station_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.station_keeping was configured
+    eclipse_out_msg: Optional[object] = None  # Phase 4: only set if power or station_keeping was configured
+    phasing_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.phasing_keeping was configured
 
 
 class SimulationService:
@@ -263,6 +268,8 @@ class SimulationService:
         self._ground_locations: Dict[str, object] = {}
         self._mag_field_model = None
         self._access_recorders: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> recorder
+        self._access_out_msgs: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> accessOutMsg, for engine.vizard
+        self._eclipse_object = None  # Phase 4: only built if some spacecraft has power or station_keeping configured
 
     @property
     def spacecraft_handles(self) -> Dict[str, "_SpacecraftHandle"]:
@@ -374,13 +381,44 @@ class SimulationService:
                 self.scSim, dyn_task_name, central_body_state_out_msg, central_body.radEquator
             )
 
+        # Phase 4: power budget (schema.scenario.PowerConfig) and
+        # station-keeping's eclipse-gated reboost burn
+        # (schema.scenario.StationKeepingConfig) both need the real eclipse
+        # shadow factor -- built once, shared by every spacecraft that has
+        # EITHER configured (see the per-spacecraft loop below), exactly
+        # like the ground locations/magnetic-field model above. Unlike the
+        # WMM magnetic-field model, eclipse geometry isn't Earth-specific,
+        # so this isn't gated on gravity.central_body == "earth".
+        needs_eclipse = any(sc.power is not None or sc.station_keeping is not None for sc in scenario.spacecraft)
+        if needs_eclipse:
+            if self._sun_state_out_msg is None:
+                raise SimulationServiceError(
+                    "a spacecraft has a power budget or station-keeping configured, but 'sun' is not one "
+                    "of this scenario's SPICE-tracked bodies -- simpleSolarPanel/the eclipse gate needs a "
+                    "sun ephemeris. Add 'sun' to gravity.third_body_perturbers."
+                )
+            from Basilisk.simulation import eclipse
+
+            self._eclipse_object = eclipse.Eclipse()
+            self._eclipse_object.ModelTag = "eclipse"
+            self._eclipse_object.sunInMsg.subscribeTo(self._sun_state_out_msg)
+            self._eclipse_object.addPlanetToModel(central_body_state_out_msg)
+            self.scSim.AddModelToTask(dyn_task_name, self._eclipse_object, 370)
+
         sc_objects_in_order: List = []
         rw_effectors_in_order: List = []
+        eclipse_index = 0  # only incremented for spacecraft that actually have power or station_keeping configured
 
         for sc_config in scenario.spacecraft:
             sc_object = spacecraft.Spacecraft()
             sc_object.ModelTag = sc_config.name
-            sc_object.hub.mHub = sc_config.dry_mass_kg
+            # See SpacecraftConfig.dry_mass_kg's docstring: station-keeping
+            # propellant is additional mass on top of the dry mass, not
+            # already counted in it.
+            initial_mass_kg = sc_config.dry_mass_kg
+            if sc_config.station_keeping is not None:
+                initial_mass_kg += sc_config.station_keeping.propellant_kg
+            sc_object.hub.mHub = initial_mass_kg
             sc_object.hub.IHubPntBc_B = simHelpers.np2EigenMatrix3d(sc_config.inertia_kg_m2)
             sc_object.hub.sigma_BNInit = [[v] for v in sc_config.sigma_bn_init]
             sc_object.hub.omega_BN_BInit = [[v] for v in sc_config.omega_bn_b_init_rad_s]
@@ -414,6 +452,71 @@ class SimulationService:
                 for sensor in sc_config.sensors:
                     handle.sensor_recorders[sensor.name] = (sensor.kind, sensor_out_msgs[sensor.name].recorder())
                     self.scSim.AddModelToTask(dyn_task_name, handle.sensor_recorders[sensor.name][1])
+
+            # Phase 4: this spacecraft's eclipse output message, shared by
+            # the power-budget and station-keeping blocks below -- added to
+            # the shared eclipse model at most once per spacecraft (adding
+            # it twice would desync eclipseOutMsgs' indexing from
+            # sc_objects_in_order for every spacecraft after it).
+            sc_eclipse_out_msg = None
+            if sc_config.power is not None or sc_config.station_keeping is not None:
+                self._eclipse_object.addSpacecraftToModel(sc_object.scStateOutMsg)
+                sc_eclipse_out_msg = self._eclipse_object.eclipseOutMsgs[eclipse_index]
+                eclipse_index += 1
+                handle.eclipse_out_msg = sc_eclipse_out_msg
+
+            # -- Phase 4: power budget, independent of fsw_mode/sensors like
+            # the sensor block above -- a real simpleSolarPanel/battery, not
+            # an analytical estimate, so generated power tracks the actual
+            # simulated attitude (panel-normal-to-sun angle) and eclipse
+            # state (see schema.scenario.PowerConfig's docstring). Ported
+            # from ../missionAnalysis/power_budget.py's wiring pattern,
+            # trimmed to a constant bus load (no per-subsystem duty-cycle
+            # loads -- missionStudio has no EO-instrument/downlink data
+            # model to gate them against).
+            if sc_config.power is not None:
+                from Basilisk.simulation import simpleBattery, simplePowerSink, simpleSolarPanel
+
+                power_config = sc_config.power
+
+                panel = simpleSolarPanel.SimpleSolarPanel()
+                panel.ModelTag = f"{sc_config.name}SolarPanel"
+                panel.setPanelParameters(power_config.panel_normal_b, power_config.panel_area_m2,
+                                          power_config.panel_efficiency)
+                panel.stateInMsg.subscribeTo(sc_object.scStateOutMsg)
+                panel.sunInMsg.subscribeTo(self._sun_state_out_msg)
+                panel.sunEclipseInMsg.subscribeTo(sc_eclipse_out_msg)
+                self.scSim.AddModelToTask(dyn_task_name, panel, 50)
+
+                bus_sink = simplePowerSink.SimplePowerSink()
+                bus_sink.ModelTag = f"{sc_config.name}BusPowerSink"
+                bus_sink.nodePowerOut = -power_config.bus_idle_power_w  # [W] static always-on load
+                self.scSim.AddModelToTask(dyn_task_name, bus_sink, 50)
+
+                battery = simpleBattery.SimpleBattery()
+                battery.ModelTag = f"{sc_config.name}Battery"
+                battery.storageCapacity = power_config.battery_capacity_wh * 3600.0  # [W*s]
+                battery.storedCharge_Init = (
+                    power_config.battery_initial_soc * power_config.battery_capacity_wh * 3600.0
+                )  # [W*s]
+                battery.addPowerNodeToModel(panel.nodePowerOutMsg)
+                battery.addPowerNodeToModel(bus_sink.nodePowerOutMsg)
+                # Lower priority than the panel/sink above (50) so it reads
+                # this tick's fresh generation/load values, not last tick's.
+                self.scSim.AddModelToTask(dyn_task_name, battery, 40)
+
+                handle.battery_recorder = battery.batPowerOutMsg.recorder()
+                self.scSim.AddModelToTask(dyn_task_name, handle.battery_recorder)
+                handle.battery_module = battery
+
+            # -- Phase 4: station-keeping (schema.scenario.StationKeepingConfig)
+            # -- independent of fsw_mode/sensors/power like the blocks
+            # above; see engine.orbit_maintenance's module docstring.
+            if sc_config.station_keeping is not None:
+                handle.station_keeping_controller = orbit_maintenance.build_station_keeping(
+                    self.scSim, dyn_task_name, sc_config.name, sc_object, mu, central_body.radEquator,
+                    sc_config.dry_mass_kg, sc_config.station_keeping, eclipse_out_msg=sc_eclipse_out_msg,
+                )
 
             if sc_config.actuators and sc_config.fsw_mode is None:
                 raise SimulationServiceError(
@@ -474,6 +577,36 @@ class SimulationService:
             rw_effectors_in_order.append(rw_effector_for_viz)
             self._handles[sc_config.name] = handle
 
+        # Phase 4: constellation phasing-keeping (schema.scenario.PhasingKeepingConfig)
+        # -- needs every spacecraft's sc_object/StationKeepingController to
+        # already exist (a follower's chief may be defined later in
+        # scenario.spacecraft than the follower itself), so this is its
+        # own pass after the main per-spacecraft loop above, mirroring
+        # access analysis/Vizard setup below. Scenario.validate() already
+        # guarantees phasing_keeping implies station_keeping on the same
+        # spacecraft and that chief_spacecraft names a real spacecraft.
+        spacecraft_by_name = {sc_config.name: sc_config for sc_config in scenario.spacecraft}
+        for sc_config in scenario.spacecraft:
+            if sc_config.phasing_keeping is None:
+                continue
+            chief_config = spacecraft_by_name[sc_config.phasing_keeping.chief_spacecraft]
+            if chief_config.orbit.type != "classical_elements":
+                raise SimulationServiceError(
+                    f"{sc_config.name}: phasing_keeping.chief_spacecraft "
+                    f"{chief_config.name!r}'s orbit must be type 'classical_elements' (phasing needs its "
+                    f"semi-major axis) -- got {chief_config.orbit.type!r}"
+                )
+            follower_handle = self._handles[sc_config.name]
+            chief_handle = self._handles[chief_config.name]
+            follower_handle.phasing_keeping_controller = orbit_maintenance.build_phasing_keeping(
+                self.scSim, dyn_task_name, sc_config.name, mu,
+                chief_sc_object=chief_handle.sc_object, follower_sc_object=follower_handle.sc_object,
+                follower_station_keeping_controller=follower_handle.station_keeping_controller,
+                follower_eclipse_out_msg=follower_handle.eclipse_out_msg,
+                chief_semi_major_axis_km=chief_config.orbit.semi_major_axis_km,
+                config=sc_config.phasing_keeping,
+            )
+
         # Phase 3: access analysis -- every ground station sees every
         # spacecraft, now that all spacecraft exist (see fsw.add_access_analysis).
         # accessOutMsgs[i] corresponds to sc_objects_in_order[i]: fsw.add_access_analysis
@@ -482,16 +615,29 @@ class SimulationService:
         for gs_name, ground_location in self._ground_locations.items():
             fsw.add_access_analysis(ground_location, sc_objects_in_order)
             for index, sc_object in enumerate(sc_objects_in_order):
-                recorder = ground_location.accessOutMsgs[index].recorder()
+                access_out_msg = ground_location.accessOutMsgs[index]
+                recorder = access_out_msg.recorder()
                 self.scSim.AddModelToTask(dyn_task_name, recorder)
                 self._access_recorders[(gs_name, sc_object.ModelTag)] = recorder
+                self._access_out_msgs[(gs_name, sc_object.ModelTag)] = access_out_msg
 
         if self.vizard_request is not None:
+            battery_by_spacecraft = {
+                name: handle.battery_module for name, handle in self._handles.items()
+                if handle.battery_module is not None
+            }
+            station_keeping_by_spacecraft = {
+                name: handle.station_keeping_controller for name, handle in self._handles.items()
+                if handle.station_keeping_controller is not None
+            }
             try:
                 vizard.enable_vizard(
                     self.scSim, dyn_task_name, sc_objects_in_order, self.vizard_request,
                     rw_effectors_by_spacecraft=rw_effectors_in_order,
                     ground_stations=self._ground_locations, central_body_name=gravity.central_body,
+                    battery_by_spacecraft=battery_by_spacecraft,
+                    station_keeping_by_spacecraft=station_keeping_by_spacecraft,
+                    access_out_msgs=self._access_out_msgs,
                 )
             except vizard.VizardError as exc:
                 raise SimulationServiceError(str(exc)) from exc
@@ -556,6 +702,43 @@ class SimulationService:
                 elif kind == "magnetometer":
                     result.add(TimeSeries(series_name, sensor_t_s, ("x", "y", "z"), recorder.tam_S, units="T"))
 
+            if handle.battery_recorder is not None:
+                battery_t_s = handle.battery_recorder.times() * macros.NANO2SEC
+                result.add(TimeSeries(f"{name}.battery_charge", battery_t_s, ("charge",),
+                                       np.asarray(handle.battery_recorder.storageLevel) / 3600.0, units="W*hr"))
+                result.add(TimeSeries(f"{name}.battery_net_power", battery_t_s, ("net_power",),
+                                       handle.battery_recorder.currentNetPower, units="W"))
+
+            if handle.station_keeping_controller is not None:
+                controller = handle.station_keeping_controller
+                sk_t_s = np.asarray(controller.tLog)
+                result.add(TimeSeries(f"{name}.station_keeping.altitude", sk_t_s, ("raw", "smoothed"),
+                                       np.column_stack([controller.altLog, controller.smoothAltLog]), units="m"))
+                result.add(TimeSeries(f"{name}.station_keeping.burn_on", sk_t_s, ("burn_on",),
+                                       np.asarray(controller.burnLog), units="-"))
+                result.add(TimeSeries(f"{name}.station_keeping.propellant_remaining", sk_t_s,
+                                       ("propellant_remaining",), np.asarray(controller.propellantLog), units="kg"))
+                result.add(TimeSeries(f"{name}.station_keeping.delta_v", sk_t_s, ("cumulative_delta_v",),
+                                       np.asarray(controller.deltaVLog), units="m/s"))
+
+            if handle.phasing_keeping_controller is not None:
+                phase_controller = handle.phasing_keeping_controller
+                pk_t_s = np.asarray(phase_controller.tLog)
+                result.add(TimeSeries(f"{name}.phasing_keeping.separation_error", pk_t_s, ("error_deg",),
+                                       np.asarray(phase_controller.errorDegLog), units="deg"))
+                result.add(TimeSeries(f"{name}.phasing_keeping.state", pk_t_s, ("state",),
+                                       np.asarray(phase_controller.stateLog, dtype=float), units="-"))
+                # This controller's OWN delta-V only -- see
+                # engine.orbit_maintenance.PhasingKeepingController's
+                # docstring: propellant/tank is shared with (and already
+                # fully reflected in) {name}.station_keeping.propellant_remaining
+                # above, but each controller tracks its own delta-V
+                # separately, so total delta-V for this spacecraft is the
+                # sum of this series' final value and
+                # {name}.station_keeping.delta_v's.
+                result.add(TimeSeries(f"{name}.phasing_keeping.delta_v", pk_t_s, ("cumulative_delta_v",),
+                                       np.asarray(phase_controller.deltaVLog), units="m/s"))
+
         for (gs_name, sc_name), recorder in self._access_recorders.items():
             access_t_s = recorder.times() * macros.NANO2SEC
             series_name = f"{gs_name}.access_to_{sc_name}"
@@ -567,4 +750,17 @@ class SimulationService:
                                    recorder.elevation, units="rad"))
             result.add(TimeSeries(f"{series_name}.azimuth", access_t_s, ("azimuth",),
                                    recorder.azimuth, units="rad"))
+
+        # Phase 4: link-budget margin -- a reported estimate computed from
+        # the access-analysis series just added above (see
+        # engine.link_budget's module docstring for what this does and does
+        # NOT account for), only for spacecraft that opted in via
+        # schema.scenario.RFLinkConfig.
+        for sc_config in scenario.spacecraft:
+            if sc_config.rf_link is None:
+                continue
+            for gs_config in scenario.ground_stations:
+                result.add(link_budget.link_margin_series(
+                    result, gs_config.name, sc_config.name, sc_config.rf_link, gs_config
+                ))
         return result

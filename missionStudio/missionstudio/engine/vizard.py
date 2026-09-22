@@ -84,6 +84,63 @@ reading ``vizStructures.h`` directly, but setting them was NOT exercised
 against a real running Vizard instance (no display in this development
 sandbox to confirm the rendered result) -- report back if the camera/
 orbit-line behavior doesn't match what's documented here.
+
+Live-data panels (fixed after user feedback that the live Vizard stream
+wasn't "understandable" -- a moving dot with no other readout doesn't
+answer "is the battery draining, is the tank running dry, is this pass
+actually in contact with the ground")
+-------------------------------------------------------------------------
+Three more ``VizSettings``/``vizInterface`` structures, all populated from
+REAL, already-simulated messages (nothing here is a static snapshot or an
+analytical estimate -- see each source module's own docstring):
+
+* **Battery state of charge** -- a Vizard ``GenericStorage`` bar panel per
+  spacecraft with ``PowerConfig`` configured, wired directly to that
+  spacecraft's ``simpleBattery.SimpleBattery.batPowerOutMsg``
+  (``engine.service``). Pattern copied from
+  ``examples/MultiSatBskSim/scenariosMultiSat/scenario_StationKeepingMultiSat.py``
+  (a real, shipped Basilisk example -- not guessed).
+* **Station-keeping propellant remaining** -- a second ``GenericStorage``
+  panel per spacecraft with ``StationKeepingConfig`` configured, wired to
+  ``engine.orbit_maintenance.StationKeepingController.fuelTankOutMsg`` (a
+  real ``FuelTankMsgPayload`` that controller publishes specifically for
+  this -- see its own module docstring). Same example's pattern for the
+  "Tank" panel.
+* **Ground-station access windows** -- one ``GenericSensor`` marker per
+  (ground station, spacecraft) pair that Phase 3's access analysis tracks,
+  changing color LIVE between "no access" and "access" as
+  ``groundLocation.GroundLocation``'s already-computed ``hasAccess`` flag
+  changes each tick. ``GenericSensor`` has no boolean/message-driven color
+  input on its own -- it takes an integer "mode" via a
+  ``DeviceCmdMsgPayload``, so :func:`enable_vizard` adds one small bridge
+  ``SysModel`` per pair (defined locally inside this function, not at
+  module scope, to keep this module's own Basilisk import lazy -- see
+  below) that republishes ``AccessMsgPayload.hasAccess`` as that command
+  value. Per ``GenericSensor``'s own field comment in ``vizStructures.h``
+  ("Modes 0 and 1 will use the 0th color, Mode 2 will use the color
+  indexed to 1"), the bridge commands 0 for no-access and 2 (not 1) for
+  access, so the two colors actually differ. This marker's position/
+  boresight (``r_SB_B``/``normalVector``) is a placeholder (body origin,
+  +X) since neither the schema nor Basilisk's ``groundLocation`` model a
+  real antenna mounting direction -- it is a status indicator, not an
+  antenna visualization (compare ``Transceiver``/comm-ring visualization,
+  which needs a real data-node system this project does not have -- see
+  ``PowerConfig``'s docstring on scope).
+
+None of this feeds back into simulated physics or the exported CSV/plot
+data -- ``engine.service.run()`` already reports the same battery/
+propellant/access numbers there; this only makes them visible live in
+Vizard too.
+
+Verification status: the ``GenericStorage``/battery+fuel-tank wiring
+matches a real, shipped multi-satellite Basilisk example line-for-line
+(cited above). The ``GenericSensor``/``DeviceCmdMsgPayload``/bridge-module
+wiring matches the field-level pattern in a second real shipped example
+(``examples/scenarioGroundLocationImaging.py``), but the specific
+"republish an access flag as a sensor mode" composition is this module's
+own, not copied from an example verbatim -- like the camera/orbit-line
+work above, none of this was exercised against a real running Vizard
+instance (no display in this development sandbox).
 """
 
 from __future__ import annotations
@@ -124,7 +181,10 @@ class VizardRequest:
 def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardRequest,
                    rw_effectors_by_spacecraft: Optional[List] = None,
                    ground_stations: Optional[Dict[str, object]] = None,
-                   central_body_name: str = "earth"):
+                   central_body_name: str = "earth",
+                   battery_by_spacecraft: Optional[Dict[str, object]] = None,
+                   station_keeping_by_spacecraft: Optional[Dict[str, object]] = None,
+                   access_out_msgs: Optional[Dict[tuple, object]] = None):
     """Call once, after every spacecraft/sensor/actuator/FSW module for
     this run has been added to ``scSim`` and BEFORE ``InitializeSimulation()``
     (matches every ``vizSupport.enableUnityVisualization`` call site in
@@ -138,7 +198,19 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
             docstring.
         ground_stations: ``{name: groundLocation.GroundLocation}`` for
             every ``GroundStationConfig`` already built for this scenario.
+        battery_by_spacecraft: ``{spacecraft_name: simpleBattery.SimpleBattery}``
+            for every spacecraft with ``PowerConfig`` set -- see module
+            docstring's "Live-data panels" section.
+        station_keeping_by_spacecraft: ``{spacecraft_name: engine.orbit_maintenance.StationKeepingController}``
+            for every spacecraft with ``StationKeepingConfig`` set -- same
+            section.
+        access_out_msgs: ``{(ground_station_name, spacecraft_name): groundLocation.accessOutMsgs[i]}``
+            for every station/spacecraft pair Phase 3's access analysis
+            tracks (``engine.service``'s own ``_access_out_msgs``) -- same
+            section.
     """
+    from Basilisk.architecture import messaging, sysModel
+    from Basilisk.simulation import vizInterface
     from Basilisk.utilities import vizSupport
 
     if request.save_file and request.live_stream:
@@ -150,12 +222,104 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
         save_path = Path(request.save_file)
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
+    battery_by_spacecraft = battery_by_spacecraft or {}
+    station_keeping_by_spacecraft = station_keeping_by_spacecraft or {}
+    access_out_msgs = access_out_msgs or {}
+
+    class _AccessIndicatorBridge(sysModel.SysModel):
+        """See this module's docstring, "Live-data panels" section,
+        "Ground-station access windows" bullet, for why this exists and
+        why 0/2 (not 0/1) are the two command values used.
+        """
+
+        _NO_ACCESS_CMD = 0
+        _ACCESS_CMD = 2
+
+        def __init__(self, name: str, access_out_msg):
+            super().__init__()
+            self.ModelTag = name
+            self.accessInMsg = messaging.AccessMsgReader()
+            self.accessInMsg.subscribeTo(access_out_msg)
+            self.cmdOutMsg = messaging.DeviceCmdMsg()
+
+        def Reset(self, CurrentSimNanos):
+            pass
+
+        def UpdateState(self, CurrentSimNanos):
+            has_access = bool(self.accessInMsg().hasAccess)
+            payload = messaging.DeviceCmdMsgPayload()
+            payload.deviceCmd = self._ACCESS_CMD if has_access else self._NO_ACCESS_CMD
+            self.cmdOutMsg.write(payload, CurrentSimNanos, self.moduleID)
+
+    generic_storage_list: List[Optional[list]] = []
+    generic_sensor_list: List[Optional[list]] = []
+    spacecraft_with_storage_panel: List[str] = []
+    spacecraft_with_sensor_labels: List[str] = []
+
+    for sc_object in sc_objects:
+        sc_name = sc_object.ModelTag
+        storages = []
+
+        battery = battery_by_spacecraft.get(sc_name)
+        if battery is not None:
+            panel = vizInterface.GenericStorage()
+            panel.label = "Battery"
+            panel.type = "Battery"
+            panel.units = "W-s"
+            panel.color = vizInterface.IntVector(vizSupport.toRGBA255("red") + vizSupport.toRGBA255("lightgreen"))
+            panel.thresholds = vizInterface.IntVector([20])  # [%] below this, use the first (red) color
+            battery_reader = messaging.PowerStorageStatusMsgReader()
+            battery_reader.subscribeTo(battery.batPowerOutMsg)
+            panel.batteryStateInMsg = battery_reader
+            storages.append(panel)
+
+        controller = station_keeping_by_spacecraft.get(sc_name)
+        if controller is not None:
+            panel = vizInterface.GenericStorage()
+            panel.label = "Propellant"
+            panel.type = "Propellant Tank"
+            panel.units = "kg"
+            panel.color = vizInterface.IntVector(vizSupport.toRGBA255("cyan"))
+            tank_reader = messaging.FuelTankMsgReader()
+            tank_reader.subscribeTo(controller.fuelTankOutMsg)
+            panel.fuelTankStateInMsg = tank_reader
+            storages.append(panel)
+
+        generic_storage_list.append(storages or None)
+        if storages:
+            spacecraft_with_storage_panel.append(sc_name)
+
+        sensors = []
+        for (gs_name, paired_sc_name), access_out_msg in access_out_msgs.items():
+            if paired_sc_name != sc_name:
+                continue
+            bridge = _AccessIndicatorBridge(f"{sc_name}_{gs_name}_accessIndicator", access_out_msg)
+            scSim.AddModelToTask(task_name, bridge)
+
+            cmd_reader = messaging.DeviceCmdMsgReader()
+            cmd_reader.subscribeTo(bridge.cmdOutMsg)
+
+            sensor = vizInterface.GenericSensor()
+            sensor.r_SB_B = [0.0, 0.0, 0.0]  # placeholder -- see module docstring
+            sensor.normalVector = [1.0, 0.0, 0.0]  # placeholder -- see module docstring
+            sensor.fieldOfView.push_back(0.1)  # [rad] small symbolic cone, not a real antenna beamwidth
+            sensor.color = vizInterface.IntVector(vizSupport.toRGBA255("red") + vizSupport.toRGBA255("lightgreen"))
+            sensor.label = f"Access: {gs_name}"
+            sensor.genericSensorCmdInMsg = cmd_reader
+            sensors.append(sensor)
+
+        generic_sensor_list.append(sensors or None)
+        if sensors:
+            spacecraft_with_sensor_labels.append(sc_name)
+
     try:
         viz = vizSupport.enableUnityVisualization(
             scSim, task_name, sc_objects,
             saveFile=str(request.save_file) if request.save_file else None,
             liveStream=request.live_stream,
             rwEffectorList=rw_effectors_by_spacecraft,
+            genericStorageList=generic_storage_list if any(generic_storage_list) else None,
+            genericSensorList=generic_sensor_list if any(generic_sensor_list) else None,
         )
     except Exception as exc:  # noqa: BLE001 -- report ANY Vizard setup failure with a specific message
         raise VizardError(f"vizSupport.enableUnityVisualization failed: {exc}") from exc
@@ -180,5 +344,21 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
             r_GP_P=list(gs.r_LP_P_Init), fieldOfView=field_of_view,
             color="cyan", label=gs_name,
         )
+
+    # showGenericStoragePanel/showGenericSensorLabels default to "use Vizard's
+    # own default" (which may be off) unless explicitly requested per
+    # spacecraft -- without this, a live battery/propellant panel or access
+    # -window label could silently not be visible despite being wired up.
+    # ONE setInstrumentGuiSetting call per spacecraft (not one per flag):
+    # each call appends a new entry to vizSupport's own module-level
+    # settings list rather than merging into an existing one, so a
+    # spacecraft needing both flags must set them together.
+    for sc_name in set(spacecraft_with_storage_panel) | set(spacecraft_with_sensor_labels):
+        kwargs = {}
+        if sc_name in spacecraft_with_storage_panel:
+            kwargs["showGenericStoragePanel"] = True
+        if sc_name in spacecraft_with_sensor_labels:
+            kwargs["showGenericSensorLabels"] = True
+        vizSupport.setInstrumentGuiSetting(viz, spacecraftName=sc_name, **kwargs)
 
     return viz

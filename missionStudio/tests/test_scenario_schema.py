@@ -11,10 +11,14 @@ from missionstudio.schema import (
     GroundStationConfig,
     MonteCarloConfig,
     OrbitIC,
+    PhasingKeepingConfig,
+    PowerConfig,
+    RFLinkConfig,
     Scenario,
     ScenarioValidationError,
     SensorConfig,
     SpacecraftConfig,
+    StationKeepingConfig,
     load_scenario,
 )
 
@@ -430,3 +434,231 @@ def test_phase2_fields_round_trip_through_save_load(tmp_path):
     assert loaded.spacecraft[0].actuators[0].params["gsHat_B"] == [0, 1, 0]
     assert loaded.spacecraft[0].fsw_mode == "hillPoint"
     assert loaded.spacecraft[0].control_params == {"K": 4.0, "P": 25.0}
+
+
+def test_power_and_rf_link_default_to_none():
+    sc = _minimal_scenario()
+    assert sc.spacecraft[0].power is None
+    assert sc.spacecraft[0].rf_link is None
+    sc.validate()  # must not raise -- neither field is required
+
+
+def test_power_config_round_trips_through_save_load(tmp_path):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.2, panel_efficiency=0.29,
+                                          bus_idle_power_w=25.0, battery_capacity_wh=120.0,
+                                          battery_initial_soc=0.9)
+    sc.spacecraft[0].rf_link = RFLinkConfig(tx_power_w=15.0, frequency_hz=8.2e9, data_rate_bps=1.0e6)
+
+    path = tmp_path / "scenario.json"
+    sc.save(path)
+    loaded = load_scenario(path)
+
+    assert isinstance(loaded.spacecraft[0].power, PowerConfig)
+    assert loaded.spacecraft[0].power.panel_area_m2 == 1.2
+    assert loaded.spacecraft[0].power.battery_initial_soc == 0.9
+    assert isinstance(loaded.spacecraft[0].rf_link, RFLinkConfig)
+    assert loaded.spacecraft[0].rf_link.tx_power_w == 15.0
+    assert loaded.spacecraft[0].rf_link.frequency_hz == 8.2e9
+
+
+def test_power_config_rejects_invalid_panel_efficiency():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.0, panel_efficiency=1.5)
+    with pytest.raises(ScenarioValidationError, match="panel_efficiency"):
+        sc.validate()
+
+
+def test_power_config_rejects_invalid_initial_soc():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.0, panel_efficiency=0.3, battery_initial_soc=1.5)
+    with pytest.raises(ScenarioValidationError, match="battery_initial_soc"):
+        sc.validate()
+
+
+def test_rf_link_config_rejects_non_positive_data_rate():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].rf_link = RFLinkConfig(tx_power_w=10.0, frequency_hz=8.0e9, data_rate_bps=0.0)
+    with pytest.raises(ScenarioValidationError, match="data_rate_bps"):
+        sc.validate()
+
+
+def test_ground_station_rejects_non_positive_system_noise_temp():
+    gs = GroundStationConfig(name="gs1", latitude_deg=0.0, longitude_deg=0.0, system_noise_temp_k=0.0)
+    with pytest.raises(ScenarioValidationError, match="system_noise_temp_k"):
+        gs.validate()
+
+
+def test_old_scenario_file_without_power_or_rf_link_keys_still_loads(tmp_path):
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "name": "old scenario", "epoch_utc": "2030-01-01T00:00:00",
+        "spacecraft": [{
+            "name": "sat-1",
+            "orbit": {"type": "cartesian", "position_km": [7000, 0, 0], "velocity_km_s": [0, 7.5, 0]},
+        }],
+    }))
+    loaded = load_scenario(path)
+    assert loaded.spacecraft[0].power is None
+    assert loaded.spacecraft[0].rf_link is None
+    assert loaded.spacecraft[0].station_keeping is None
+
+
+def test_station_keeping_defaults_to_none():
+    sc = _minimal_scenario()
+    assert sc.spacecraft[0].station_keeping is None
+    sc.validate()  # must not raise -- not required
+
+
+def test_station_keeping_round_trips_through_save_load(tmp_path):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+
+    path = tmp_path / "scenario.json"
+    sc.save(path)
+    loaded = load_scenario(path)
+
+    assert isinstance(loaded.spacecraft[0].station_keeping, StationKeepingConfig)
+    assert loaded.spacecraft[0].station_keeping.target_altitude_km == 500.0
+    assert loaded.spacecraft[0].station_keeping.propellant_kg == 2.0
+    assert loaded.spacecraft[0].station_keeping.eclipse_sunlit_threshold == 0.99  # default preserved
+
+
+def test_station_keeping_rejects_deadband_not_less_than_target_altitude():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=500.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="deadband_km"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_zero_deadband():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=0.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="deadband_km"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_non_positive_thrust():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.0, isp_s=1500.0, propellant_kg=2.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="thrust_n"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_negative_propellant():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=-1.0,
+    )
+    with pytest.raises(ScenarioValidationError, match="propellant_kg"):
+        sc.validate()
+
+
+def test_station_keeping_rejects_out_of_range_eclipse_threshold():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+        eclipse_sunlit_threshold=1.5,
+    )
+    with pytest.raises(ScenarioValidationError, match="eclipse_sunlit_threshold"):
+        sc.validate()
+
+
+def _chief_and_follower_scenario(**follower_overrides):
+    chief = SpacecraftConfig(
+        name="chief",
+        orbit=OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.0,
+                      inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=0.0),
+    )
+    follower_kwargs = dict(
+        name="follower",
+        orbit=OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.0,
+                      inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=10.0),
+        station_keeping=StationKeepingConfig(target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01,
+                                              isp_s=1500.0, propellant_kg=2.0),
+        phasing_keeping=PhasingKeepingConfig(chief_spacecraft="chief", target_separation_km=[100.0]),
+    )
+    follower_kwargs.update(follower_overrides)
+    follower = SpacecraftConfig(**follower_kwargs)
+    return Scenario(name="phasing test", epoch_utc="2030-01-01T00:00:00", spacecraft=[chief, follower])
+
+
+def test_phasing_keeping_defaults_to_none():
+    sc = _minimal_scenario()
+    assert sc.spacecraft[0].phasing_keeping is None
+    sc.validate()  # must not raise
+
+
+def test_phasing_keeping_round_trips_through_save_load(tmp_path):
+    scenario = _chief_and_follower_scenario()
+    path = tmp_path / "phasing.json"
+    scenario.save(path)
+    loaded = load_scenario(path)
+
+    follower = next(sc for sc in loaded.spacecraft if sc.name == "follower")
+    assert isinstance(follower.phasing_keeping, PhasingKeepingConfig)
+    assert follower.phasing_keeping.chief_spacecraft == "chief"
+    assert follower.phasing_keeping.target_separation_km == [100.0]
+    assert follower.phasing_keeping.tolerance_fraction == 0.10  # default preserved
+
+
+def test_phasing_keeping_requires_station_keeping_on_same_spacecraft():
+    scenario = _chief_and_follower_scenario(station_keeping=None)
+    with pytest.raises(ScenarioValidationError, match="requires station_keeping"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_chief_being_itself():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.chief_spacecraft = "follower"
+    with pytest.raises(ScenarioValidationError, match="cannot be the spacecraft itself"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_unknown_chief_spacecraft():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.chief_spacecraft = "no-such-satellite"
+    with pytest.raises(ScenarioValidationError, match="chief_spacecraft"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_empty_target_separation():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.target_separation_km = []
+    with pytest.raises(ScenarioValidationError, match="target_separation_km"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_non_positive_target_separation():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.target_separation_km = [100.0, 0.0]
+    with pytest.raises(ScenarioValidationError, match="target_separation_km"):
+        scenario.validate()
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("reconfiguration_interval_days", -1.0, "reconfiguration_interval_days"),
+    ("tolerance_fraction", 0.0, "tolerance_fraction"),
+    ("restore_tolerance_fraction", 0.0, "restore_tolerance_fraction"),
+    ("correction_window_days", 0.0, "correction_window_days"),
+    ("max_drift_days", 0.0, "max_drift_days"),
+    ("max_delta_semi_major_axis_km", 0.0, "max_delta_semi_major_axis_km"),
+])
+def test_phasing_keeping_rejects_bad_tuning_knobs(field, value, match):
+    scenario = _chief_and_follower_scenario()
+    setattr(scenario.spacecraft[1].phasing_keeping, field, value)
+    with pytest.raises(ScenarioValidationError, match=match):
+        scenario.validate()
+
+
+def test_phasing_keeping_full_scenario_validates():
+    scenario = _chief_and_follower_scenario()
+    scenario.validate()  # must not raise

@@ -1,4 +1,4 @@
-# missionStudio (Phase 3)
+# missionStudio (Phase 4)
 
 A standalone, GUI-based mission-analysis application for Linux, using the
 Basilisk astrodynamics framework (AVS Lab, University of Colorado Boulder)
@@ -7,10 +7,15 @@ every capability maps to a specific Basilisk module (see the capability
 matrix delivered earlier in this project's history) or is explicitly
 flagged as custom/out-of-scope, never fabricated.
 
-This is **Phase 3** of the roadmap: Monte Carlo + ground-station access
-analysis + packaging, on top of Phase 0's backend foundations, Phase 1's
-PySide6 GUI/CLI, and Phase 2's attitude/sensors/actuators/Vizard work. See
-"What Phase 3 adds" below for exactly what that means.
+This is **Phase 4** of the roadmap: usability fixes and mission-analysis
+outputs driven directly by real GUI usage feedback -- a more informative
+Vizard default view (including live data panels), live run/Monte Carlo
+progress feedback, mean-anomaly orbit input, real power-budget/link
+-budget/station-keeping/phasing-keeping results, and a Walker-pattern
+constellation generator -- on top of Phase 0's backend foundations, Phase
+1's PySide6 GUI/CLI, Phase 2's attitude/sensors/actuators/Vizard work, and
+Phase 3's Monte Carlo + ground-station access analysis + packaging. See
+"What Phase 4 adds" below for exactly what that means.
 
 ## Getting started
 
@@ -358,6 +363,179 @@ regression test.
   missing scenario data file in the wheel, and a `./build/`-directory
   import-shadowing bug in repeated builds).
 
+## What Phase 4 adds
+
+Driven directly by feedback from actually using the Phase 3 GUI:
+
+* **Vizard's default view is now Earth-centered with the orbit visible**,
+  not locked onto the spacecraft with no context. `engine.vizard`'s
+  `VizardRequest` gained `camera_target` (defaults to the scenario's
+  central body) and `show_orbit_lines` (osculating + true trajectory
+  lines, on by default), set via `VizSettings.mainCameraTarget`/
+  `orbitLinesOn`/`trueTrajectoryLinesOn` -- `enableUnityVisualization()`
+  itself doesn't expose these. Configurable from the GUI's Vizard dialog
+  or `--vizard-camera-target`/`--vizard-no-orbit-lines` (CLI).
+* **Live feedback while a run is in progress.** `gui.main_window` used to
+  show only a static "Running..." status-bar string with no other
+  indication anything was happening. Run Simulation and Run Monte Carlo
+  now show a busy indicator (indeterminate progress bar + elapsed-time
+  label) and disable every Run-menu action until the worker finishes --
+  Basilisk exposes no per-step/per-run progress callback to drive a real
+  percentage, so this is deliberately indeterminate rather than a
+  fabricated number.
+* **Mean anomaly as a classical-elements orbit input.** `OrbitIC` gained
+  `anomaly_type` (`"true"`/`"mean"`, default `"true"` for backward
+  compatibility) and `mean_anomaly_deg`; `engine.service` converts mean to
+  true anomaly via Kepler's equation (`orbitalMotion.M2E`/`E2f`) before
+  calling `elem2rv`, which only accepts true anomaly. The GUI orbit editor
+  exposes this as a combo box next to the angle field.
+* **Real power budget.** `schema.scenario.PowerConfig` (optional, per
+  spacecraft) wires Basilisk's actual `simpleSolarPanel`/
+  `simplePowerSink`/`simpleBattery`/`eclipse` modules into
+  `engine.service` -- the same pattern `../missionAnalysis/power_budget.py`
+  already uses -- so generated power depends on the real simulated
+  attitude (panel-normal-to-sun angle) and eclipse state, not a flat duty
+  cycle. `ResultSet` gains `{spacecraft}.battery_charge` [W\*hr] and
+  `{spacecraft}.battery_net_power` [W] per spacecraft that opts in; no
+  per-subsystem (instrument/downlink) load gating is modeled yet, only a
+  constant bus load, since missionStudio has no EO-payload data model to
+  gate against (unlike `../missionAnalysis`).
+* **Downlink RF link-margin estimate.** `schema.scenario.RFLinkConfig`
+  (optional, per spacecraft) plus two new `GroundStationConfig` fields
+  (`rx_antenna_gain_dbi`, `system_noise_temp_k`) feed the new
+  `engine.link_budget` module -- a simplified free-space-path-loss Eb/N0
+  budget ported directly from `../missionAnalysis`'s
+  `_rf_link_margin_db()`. It is evaluated against the REAL simulated slant
+  range from Phase 3's access analysis (not a worst-case estimate), giving
+  `{station}.access_to_{spacecraft}.link_margin_db` in `ResultSet` --
+  `NaN` outside access windows, since there's no link (and so no
+  meaningful margin) when there's no access. Like the missionAnalysis
+  original, this is a reported ESTIMATE only (no atmosphere/rain/
+  pointing-loss/coding-gain terms) and does not feed back into simulated
+  physics anywhere.
+* **Orbit-maintenance / station-keeping automation, with delta-V and
+  propellant bookkeeping.** `schema.scenario.StationKeepingConfig`
+  (optional, per spacecraft) wires the new `engine.orbit_maintenance`
+  module -- `StationKeepingController`, ported from `../missionAnalysis`'s
+  `AltitudeKeepingController` -- into `engine.service`: a dedicated
+  `extForceTorque` effector fires a continuous prograde reboost burn
+  whenever a smoothed altitude estimate decays `deadband_km` below
+  `target_altitude_km`, gated off during eclipse and once propellant is
+  depleted. Propellant use is tracked via the rocket equation
+  (explicit-Euler) and fed back into the spacecraft's simulated mass every
+  tick, so thrust-to-mass stays physically consistent as it burns off --
+  see `SpacecraftConfig.dry_mass_kg`'s docstring for how that field's
+  meaning sharpens once `station_keeping` is set (it becomes the mass
+  *without* propellant; the initial simulated mass becomes
+  `dry_mass_kg + station_keeping.propellant_kg`). `ResultSet` gains
+  `{spacecraft}.station_keeping.altitude` (raw + smoothed),
+  `.burn_on`, `.propellant_remaining`, and `.delta_v` (cumulative);
+  `missionstudio run` also prints a one-line delta-V/propellant-used
+  summary per spacecraft so the headline numbers don't require opening a
+  CSV. This needs something actually decaying the orbit to have any
+  effect -- with only point-mass gravity (the default), altitude never
+  decays and the burn never fires; enable `SpacecraftConfig.enable_drag`
+  for a station-keeping scenario. Shares the same eclipse model
+  `PowerConfig` uses when both are configured on the same spacecraft.
+* **Constellation design: a Walker-pattern generator.** The new
+  `engine.constellation` module ("user supplies the requirement, the tool
+  designs the constellation") turns a handful of high-level numbers --
+  total satellite count, number of planes, Walker phasing factor,
+  altitude, inclination -- into a full set of `SpacecraftConfig`s with
+  every satellite's orbital elements pre-computed via the standard
+  Walker-Delta/Walker-Star RAAN/mean-anomaly formula (Vallado; Wertz's
+  SMAD). Every generated satellite is a deep copy of ONE template
+  spacecraft the user configures the normal way (mass, sensors, actuators,
+  power, station-keeping, RF link, ...) -- only `name`/`orbit` differ, so
+  designing a 12-satellite constellation is exactly as much data entry as
+  designing one satellite. Pure orbital mechanics, no Basilisk import
+  (central-body radii for the altitude-to-semi-major-axis conversion are
+  copied from Basilisk's own `astroConstants.h`, so they match what
+  `engine.service` actually simulates). Available from the GUI (spacecraft
+  list's new "Generate Walker constellation..." button -- central body is
+  read from the scenario, not independently selectable, so it can't drift
+  out of sync with what actually gets simulated) and the CLI
+  (`missionstudio generate-constellation`, `--append` to add to an
+  existing scenario instead of replacing its spacecraft).
+* **Constellation-wide phasing maintenance, with its own delta-V and
+  propellant bookkeeping.** `schema.scenario.PhasingKeepingConfig`
+  (optional, per follower spacecraft) wires
+  `engine.orbit_maintenance.PhasingKeepingController` -- ported from
+  `../missionAnalysis`'s controller of the same name -- to hold a
+  follower's along-track separation from a `chief_spacecraft` at a target
+  value (optionally stepped through a schedule of several values over the
+  mission, e.g. tightening a formation from 1000 km to 100 km every few
+  months) via a drift-orbit maneuver: a small temporary semi-major-axis
+  offset, natural drift, then a restoring burn -- the same technique a
+  differential corrector (GMAT's Target/Vary/Achieve) would normally
+  automate, done here as a direct two-body calculation re-evaluated every
+  tick. REQUIRES `station_keeping` to also be set on the same spacecraft:
+  phasing and altitude-keeping share ONE physical thruster and propellant
+  tank (this config deliberately has no `thrust_n`/`isp_s`/`propellant_kg`
+  fields of its own -- `engine.service` reads those off `station_keeping`
+  instead), with altitude-keeping taking priority whenever both want to
+  fire on the same tick. `ResultSet` gains
+  `{spacecraft}.phasing_keeping.separation_error`/`.state`/`.delta_v`
+  (its own delta-V, tracked separately from -- but drawing from the same
+  shared tank as -- `station_keeping`'s); `missionstudio run`'s
+  delta-V/propellant summary line now includes a breakdown when both are
+  configured. Not yet wired into `engine.constellation`'s Walker generator
+  automatically (each follower's chief/target-separation still needs
+  setting up by hand in the spacecraft editor after generating the
+  constellation) -- a natural follow-on if that manual step turns out to
+  be tedious in practice.
+* **Live Vizard data panels**, responding directly to "the live-stream of
+  the simulation with Vizard is not really understandable, improve" --
+  three real, already-simulated data feeds now drive native Vizard HUD
+  elements (`engine.vizard`, extended), not a static snapshot or an
+  analytical estimate:
+  * **Battery state of charge**, for any spacecraft with `PowerConfig` --
+    a `GenericStorage` bar panel wired straight to that spacecraft's
+    `simpleBattery.SimpleBattery.batPowerOutMsg`.
+  * **Station-keeping propellant remaining**, for any spacecraft with
+    `StationKeepingConfig` -- a second `GenericStorage` panel, fed by a
+    new `FuelTankMsgPayload` output
+    `engine.orbit_maintenance.StationKeepingController` now publishes
+    specifically for this (that controller still doesn't use a Basilisk
+    `fuelTank` state effector for the actual physics -- see its own
+    docstring).
+  * **Ground-station access windows** -- one `GenericSensor` marker per
+    (station, spacecraft) pair Phase 3's access analysis tracks, changing
+    color live between "no access"/"access" as the real, already
+    -simulated `hasAccess` flag changes, via a small bridge module this
+    phase adds (`GenericSensor` takes an integer mode, not a boolean, so
+    something has to republish `hasAccess` as one -- see `engine.vizard`'s
+    docstring for exactly how and why 0/2, not 0/1, are the two values
+    used).
+
+  The battery/propellant panel pattern is copied line-for-line from a
+  real, shipped Basilisk example
+  (`examples/MultiSatBskSim/scenariosMultiSat/scenario_StationKeepingMultiSat.py`);
+  the access-window bridge composes verified pieces
+  (`examples/scenarioGroundLocationImaging.py`'s `GenericSensor`/
+  `DeviceCmdMsgPayload` wiring, `../missionAnalysis/attitude_controllers.py`'s
+  `AccessMsgReader` usage) in a way that's this module's own, not copied
+  from one example -- like the Phase 4 camera/orbit-line work, none of
+  this has been checked against a real running Vizard display (no display
+  in this development sandbox). A live **link-margin** panel was
+  considered and deliberately NOT built: Vizard's `GenericStorage` only
+  accepts Battery/DataStorage/FuelTank-shaped messages, and forcing a dB
+  margin value through the DataStorage shape would need a fabricated
+  adapter message with no natural floor/ceiling -- the link-margin numbers
+  stay exactly where they already were (the plotted/exported
+  `.link_margin_db` series from `engine.link_budget`), which is the
+  honest choice over a misleading gauge.
+
+`PowerConfig`, `RFLinkConfig`, `StationKeepingConfig`, and
+`PhasingKeepingConfig` all default to `None` (off) on every existing
+scenario -- turning any one on is the only input needed; the GUI's new
+"Power / propulsion / link budget" spacecraft-editor tab (its "Phasing
+keeping" group reads the chief-spacecraft choice from the OTHER
+spacecraft already in the scenario, not a free-text field, so it can't
+name one that doesn't exist) and the ground-station editor's two new
+fields are pre-filled with reasonable placeholder defaults, matching this
+phase's "user only supplies numbers, the tool does the rest" design goal.
+
 ## Repository layout
 
 ```
@@ -378,16 +556,20 @@ missionStudio/
       fsw.py                         -- Phase 2: attitude nav/guidance/control/actuation chain (needs Basilisk)
       vizard.py                      -- Phase 2: Vizard integration (needs Basilisk, imported lazily)
       monte_carlo.py                 -- Phase 3: Basilisk.utilities.MonteCarlo bridge (needs Basilisk)
+      link_budget.py                 -- Phase 4: downlink RF link-margin estimate (no Basilisk needed)
+      orbit_maintenance.py           -- Phase 4: station-keeping + phasing-keeping controllers, delta-V/propellant bookkeeping (needs Basilisk)
+      constellation.py               -- Phase 4: Walker-pattern constellation generator + SeparationSchedule (no Basilisk needed)
     gui/
       app.py                         -- QApplication entry point
       main_window.py                 -- MainWindow: File/Run menus, ties everything together
       scenario_editor.py             -- the full scenario form + live validation
-      spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW)
+      spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW, power/propulsion/link budget)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
       vizard_dialog.py               -- Phase 2: "enable Vizard for the next run" dialog
       monte_carlo_editor.py          -- Phase 3: Monte Carlo settings + dispersion list editor
       ground_station_editor.py       -- ground station list + add/edit/remove dialog
-      orbit_ic_widget.py             -- classical-elements/Cartesian/TLE orbit editor
+      orbit_ic_widget.py             -- classical-elements (true/mean anomaly)/Cartesian/TLE orbit editor
+      constellation_dialog.py        -- Phase 4: "Generate Walker constellation" dialog
       kernel_status_widget.py        -- SPICE kernel status panel
       results_widget.py              -- matplotlib results plot + CSV export
       run_worker.py                  -- SimulationService/Monte Carlo on a background QThread
@@ -399,6 +581,8 @@ missionStudio/
     test_scenario_schema.py
     test_spaceweather.py
     test_results.py
+    test_link_budget.py              -- Phase 4
+    test_constellation.py            -- Phase 4
     test_cli.py
     test_two_body_validation.py      -- requires_basilisk
     gui/
@@ -408,6 +592,7 @@ missionStudio/
       test_vizard_dialog.py
       test_monte_carlo_editor.py
       test_ground_station_editor.py
+      test_constellation_dialog.py   -- Phase 4
       test_scenario_editor.py
       test_results_widget.py
       test_kernel_status_widget.py
@@ -423,20 +608,25 @@ python3 -m pip install -e ".[dev,gui]"
 python3 -m pytest tests/ -v
 ```
 
-Without Basilisk on `PYTHONPATH`, this runs 150 tests (schema, space
-weather, results, CLI, and the full PySide6 GUI, run headless) and skips
-7 whose premise is specifically "Basilisk is unavailable", per
-`tests/conftest.py`.
+Without Basilisk on `PYTHONPATH`, this runs 262 tests (schema, space
+weather, results, link budget, constellation generation, CLI, and the
+full PySide6 GUI, run headless) and skips 2 whose premise is specifically
+"Basilisk is unavailable", per `tests/conftest.py`.
 
 With Basilisk installed (`pip install "bsk[all]"` -- see "Getting
-started" above), genuinely run in this project's own sandbox: 143 tests
-pass (the 7 above now run for real instead of skipping) and 2 fail --
-both in `test_two_body_validation.py`, both failing at the SPICE kernel
--download step because that sandbox's network blocks the NAIF kernel host
-specifically, not because of a code defect (see the honesty note above).
-On a machine with ordinary internet access, expect all 152 to pass; if
-`test_two_body_validation.py` fails there for a different reason, that's
-a real bug worth reporting.
+started" above), the 2 skips above run for real instead of skipping.
+Last genuinely verified in this project's own sandbox as of the Phase 3
+work (before Phase 4's additions, whose Basilisk-dependent code --
+`engine.service`'s power/station-keeping/phasing-keeping wiring,
+`engine.orbit_maintenance` -- has NOT been run against a real Basilisk
+build in this sandbox, only written directly against verified API call
+sequences; see each module's own "Verification status" docstring note):
+`test_two_body_validation.py`
+failed at the SPICE kernel-download step because that sandbox's network
+blocks the NAIF kernel host specifically, not because of a code defect
+(see the honesty note above). On a machine with ordinary internet access,
+expect that one to pass too; if it fails there for a different reason,
+that's a real bug worth reporting.
 
 `packaging/build_wheel.sh`/`install.sh` are NOT run by `pytest` (they're
 shell scripts that build/install a real wheel, not something worth
@@ -629,18 +819,36 @@ specifically:
 
 ## What's next
 
-This completes the three phases originally scoped for this project
-(Phase 0: backend foundations; Phase 1: GUI shell + CLI; Phase 2:
-attitude/sensors/actuators/Vizard; Phase 3: Monte Carlo + access analysis
-+ packaging). The "Known limitations" list above is the honest map of
-what's left: a handful of schema-valid-but-not-wired-up options (celestial
--body `locationPointing` targets, thrusters, magnetic torque rods,
-non-Earth spherical harmonics/magnetometer), navigation error modeling,
-richer Monte Carlo retention, and -- the one requiring something this
-development sandbox's network policy specifically blocks -- a full
-simulation run past SPICE kernel loading, to get the first true
-end-to-end confirmation (including `test_two_body_validation.py`'s
-analytical check) on top of everything up to that point already being
+Phase 4 (see "What Phase 4 adds" above) responded to the first round of
+real GUI usage feedback. Still open from that same feedback, scoped but
+not yet built:
+
+* **`engine.constellation`'s Walker generator doesn't auto-wire
+  `PhasingKeepingConfig`** for the satellites it produces -- each
+  follower's chief/target-separation still needs setting up by hand in
+  the spacecraft editor afterward (see "What Phase 4 adds" above). A
+  natural, well-scoped follow-on once that manual step is felt to be
+  tedious in practice: the generator already knows each plane's
+  membership and phase ordering, so it could assign chief = "first
+  satellite in the plane" and a sensible default target separation
+  automatically.
+* **A live link-margin gauge in Vizard** -- deliberately not built this
+  phase (see "What Phase 4 adds" above for why forcing it through
+  `GenericStorage` would need a fabricated adapter message); if this
+  becomes worth doing anyway, the RIGHT path is a real custom Vizard
+  protobuf message/panel type, not a reused Battery/DataStorage/FuelTank
+  shape.
+
+Beyond that, the "Known limitations" list above is the rest of the honest
+map: a handful of schema-valid-but-not-wired-up options (celestial-body
+`locationPointing` targets, thrusters, magnetic torque rods, non-Earth
+spherical harmonics/magnetometer), navigation error modeling, richer Monte
+Carlo retention, and -- the one requiring something this development
+sandbox's network policy specifically blocks -- a full simulation run past
+SPICE kernel loading, to get the first true end-to-end confirmation
+(including `test_two_body_validation.py`'s analytical check, and the new
+Phase 4 power-budget/link-budget/station-keeping/phasing-keeping/
+Vizard-panel wiring) on top of everything up to that point already being
 verified against a real Basilisk install. None of it is blocked on a
 design decision; each item is scoped and documented at its own call site
 for whoever picks it up next.

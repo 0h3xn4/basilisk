@@ -223,9 +223,191 @@ class ActuatorConfig:
 
 
 @dataclass
+class PowerConfig:
+    """A spacecraft's power budget: a body-fixed solar panel, a constant
+    "bus" housekeeping load, and a battery -- Basilisk's real
+    ``simpleSolarPanel``/``simplePowerSink``/``simpleBattery`` modules
+    (see ``engine.service``, ported from the same wiring pattern
+    ``../missionAnalysis/power_budget.py`` already uses), not an
+    analytical estimate: generated power depends on the scenario's actual
+    simulated attitude (panel-normal-to-sun angle) and eclipse state, so
+    this needs a spacecraft's orbit to actually pass through sunlight and
+    shadow -- there is no separate "power budget mode" to turn on beyond
+    setting this field. ``None`` (the default) means no power budget is
+    simulated for that spacecraft at all, matching every scenario written
+    before this field existed.
+    """
+
+    panel_area_m2: float  # [m^2] total deployed solar panel area
+    panel_efficiency: float  # [-] fraction of incident solar power converted to electrical power, 0 < x <= 1
+    panel_normal_b: list = field(default_factory=lambda: [0.0, 0.0, 1.0])  # body-frame unit vector
+    bus_idle_power_w: float = 0.0  # [W] constant always-on avionics/thermal/ADCS housekeeping load
+    battery_capacity_wh: float = 100.0  # [W*hr]
+    battery_initial_soc: float = 1.0  # [-] initial state of charge, fraction of capacity, 0 <= x <= 1
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(self.panel_area_m2 > 0, f"{spacecraft_name}: power.panel_area_m2 must be > 0")
+        _require(0.0 < self.panel_efficiency <= 1.0,
+                  f"{spacecraft_name}: power.panel_efficiency must be in (0, 1]")
+        _require(len(self.panel_normal_b) == 3,
+                  f"{spacecraft_name}: power.panel_normal_b must be a 3-element [x, y, z] list")
+        _require(self.bus_idle_power_w >= 0, f"{spacecraft_name}: power.bus_idle_power_w must be >= 0")
+        _require(self.battery_capacity_wh > 0, f"{spacecraft_name}: power.battery_capacity_wh must be > 0")
+        _require(0.0 <= self.battery_initial_soc <= 1.0,
+                  f"{spacecraft_name}: power.battery_initial_soc must be in [0, 1]")
+
+
+@dataclass
+class RFLinkConfig:
+    """A spacecraft's downlink transmitter, for a reported link-margin
+    ESTIMATE only (``engine.link_budget``) -- a simplified free-space-path
+    -loss Eb/N0 budget (no atmosphere/rain/pointing-loss/coding-gain
+    terms), ported directly from ``../missionAnalysis``'s
+    ``run_constellation_mission.py::_rf_link_margin_db()``. It is evaluated
+    against the real simulated slant range from ``engine.service``'s
+    ground-station access analysis, but it does NOT feed back into the
+    simulated physics anywhere (no data-rate/duty-cycle simulation) --
+    see :class:`PowerConfig` for what IS actually simulated. ``None`` (the
+    default) means no link margin is computed for that spacecraft.
+    """
+
+    tx_power_w: float  # [W] downlink transmitter RF output power
+    frequency_hz: float  # [Hz] downlink carrier frequency
+    data_rate_bps: float  # [bit/s] downlink data rate
+    tx_antenna_gain_dbi: float = 0.0  # [dBi] spacecraft downlink antenna gain
+    implementation_loss_db: float = 2.0  # [dB] combined pointing/polarization/implementation loss
+    required_ebno_db: float = 6.0  # [dB] required Eb/N0 for the assumed modulation/coding
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(self.tx_power_w > 0, f"{spacecraft_name}: rf_link.tx_power_w must be > 0")
+        _require(self.frequency_hz > 0, f"{spacecraft_name}: rf_link.frequency_hz must be > 0")
+        _require(self.data_rate_bps > 0, f"{spacecraft_name}: rf_link.data_rate_bps must be > 0")
+        _require(self.implementation_loss_db >= 0,
+                  f"{spacecraft_name}: rf_link.implementation_loss_db must be >= 0")
+
+
+@dataclass
+class StationKeepingConfig:
+    """Automated altitude/semi-major-axis station-keeping for one
+    spacecraft, with delta-V and propellant bookkeeping
+    (``engine.orbit_maintenance``, ported from
+    ``../missionAnalysis``'s ``AltitudeKeepingController``): fires a
+    continuous low-thrust reboost burn (prograde, along the inertial
+    velocity direction) whenever a smoothed altitude estimate decays past
+    ``deadband_km`` below ``target_altitude_km``, holding the burn until
+    altitude is restored -- simple deadband/hysteresis control, gated off
+    during eclipse (approximates a solar-electric bus that can't run the
+    thruster off battery alone) and inhibited once propellant is
+    depleted. Propellant use is tracked via the rocket equation and fed
+    back into the spacecraft's simulated mass every tick, so thrust-to
+    -mass stays physically consistent as propellant burns off -- see
+    ``SpacecraftConfig.dry_mass_kg``'s docstring for how that interacts
+    with ``propellant_kg`` below.
+
+    This assumes something is actually decaying the orbit -- with only
+    point-mass gravity (this schema's default), altitude never decays and
+    the burn simply never fires. Enable atmospheric drag
+    (``SpacecraftConfig.enable_drag``) for this to have any effect.
+    ``None`` (the default) means no station-keeping is simulated for that
+    spacecraft.
+    """
+
+    target_altitude_km: float  # [km] altitude above the central body's equatorial radius to maintain
+    deadband_km: float  # [km] how far below target_altitude_km before a reboost burn starts
+    thrust_n: float  # [N] reboost thruster thrust
+    isp_s: float  # [s] reboost thruster specific impulse
+    propellant_kg: float  # [kg] initial propellant mass available for station-keeping
+    eclipse_sunlit_threshold: float = 0.99  # [-] shadow factor above which the spacecraft is treated as sunlit
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(self.target_altitude_km > 0, f"{spacecraft_name}: station_keeping.target_altitude_km must be > 0")
+        _require(0.0 < self.deadband_km < self.target_altitude_km,
+                  f"{spacecraft_name}: station_keeping.deadband_km must be > 0 and < target_altitude_km")
+        _require(self.thrust_n > 0, f"{spacecraft_name}: station_keeping.thrust_n must be > 0")
+        _require(self.isp_s > 0, f"{spacecraft_name}: station_keeping.isp_s must be > 0")
+        _require(self.propellant_kg >= 0, f"{spacecraft_name}: station_keeping.propellant_kg must be >= 0")
+        _require(0.0 < self.eclipse_sunlit_threshold <= 1.0,
+                  f"{spacecraft_name}: station_keeping.eclipse_sunlit_threshold must be in (0, 1]")
+
+
+@dataclass
+class PhasingKeepingConfig:
+    """Constellation-wide phasing maintenance: holds this (follower)
+    spacecraft's along-track separation from a ``chief_spacecraft`` at a
+    target value via a drift-orbit maneuver (a temporary semi-major-axis
+    offset, natural drift, then a restoring burn) --
+    ``engine.orbit_maintenance.PhasingKeepingController``, ported from
+    ``../missionAnalysis``'s controller of the same name. Built for
+    exactly the constellations ``engine.constellation`` generates (a set
+    of co-planar, same-altitude satellites), but works for any two
+    spacecraft sharing an orbital plane and altitude.
+
+    Requires ``station_keeping`` to ALSO be set on this same spacecraft:
+    phasing and altitude-keeping share ONE physical thruster and
+    propellant tank (this config deliberately has no
+    ``thrust_n``/``isp_s``/``propellant_kg`` fields of its own --
+    ``engine.service`` reads those from ``station_keeping`` instead, so
+    there is no way for the two to accidentally disagree about the same
+    hardware), with altitude-keeping taking priority whenever both want to
+    fire on the same tick -- see the controller's own docstring for why.
+
+    ``target_separation_km`` is one or more along-track distances [km]
+    ahead of the chief; with more than one entry, the target steps through
+    them every ``reconfiguration_interval_days`` (holding at the last one
+    once the list is exhausted) -- e.g. ``[1000, 500, 100]`` with
+    ``reconfiguration_interval_days=90`` tightens the formation baseline
+    roughly every 3 months. A single entry holds that separation for the
+    whole mission. The remaining fields are maneuver-tuning knobs with
+    reasonable ported defaults (``../missionAnalysis/mission_config.py``)
+    -- widen ``tolerance_fraction``/``restore_tolerance_fraction`` for
+    fewer, larger corrections, or narrow them for tighter formation
+    -keeping at the cost of more frequent burns; there is no single
+    "correct" answer, it depends on the mission's own ops concept.
+    """
+
+    chief_spacecraft: str
+    target_separation_km: list  # [km] one or more along-track distances ahead of the chief
+    reconfiguration_interval_days: float = 90.0  # [day] only matters if target_separation_km has >1 entry
+    tolerance_fraction: float = 0.10  # [-] trigger threshold, as a fraction of the current target separation
+    restore_tolerance_fraction: float = 0.02  # [-] "close enough, stop drifting" threshold, same units
+    correction_window_days: float = 21.0  # [day] target time to null a fresh phasing error
+    max_drift_days: float = 90.0  # [day] safety cap on the drift coast phase
+    max_delta_semi_major_axis_km: float = 3.0  # [km] safety clamp on the drift-orbit SMA offset
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(bool(self.chief_spacecraft),
+                  f"{spacecraft_name}: phasing_keeping.chief_spacecraft must not be empty")
+        _require(self.chief_spacecraft != spacecraft_name,
+                  f"{spacecraft_name}: phasing_keeping.chief_spacecraft cannot be the spacecraft itself")
+        _require(len(self.target_separation_km) >= 1,
+                  f"{spacecraft_name}: phasing_keeping.target_separation_km needs at least one entry")
+        _require(all(d > 0 for d in self.target_separation_km),
+                  f"{spacecraft_name}: phasing_keeping.target_separation_km entries must all be > 0")
+        _require(self.reconfiguration_interval_days >= 0,
+                  f"{spacecraft_name}: phasing_keeping.reconfiguration_interval_days must be >= 0")
+        _require(0.0 < self.tolerance_fraction,
+                  f"{spacecraft_name}: phasing_keeping.tolerance_fraction must be > 0")
+        _require(0.0 < self.restore_tolerance_fraction,
+                  f"{spacecraft_name}: phasing_keeping.restore_tolerance_fraction must be > 0")
+        _require(self.correction_window_days > 0,
+                  f"{spacecraft_name}: phasing_keeping.correction_window_days must be > 0")
+        _require(self.max_drift_days > 0,
+                  f"{spacecraft_name}: phasing_keeping.max_drift_days must be > 0")
+        _require(self.max_delta_semi_major_axis_km > 0,
+                  f"{spacecraft_name}: phasing_keeping.max_delta_semi_major_axis_km must be > 0")
+
+
+@dataclass
 class SpacecraftConfig:
     name: str
     orbit: OrbitIC
+    # [kg] The spacecraft's mass WITHOUT station-keeping propellant. With
+    # station_keeping unset (the default), this is simply the whole
+    # spacecraft's simulated mass, exactly as before StationKeepingConfig
+    # existed. With station_keeping set, engine.service initializes the
+    # simulated mass to dry_mass_kg + station_keeping.propellant_kg, and
+    # the station-keeping controller depletes it back toward dry_mass_kg
+    # as propellant burns -- see StationKeepingConfig's docstring.
     dry_mass_kg: float = 100.0
     inertia_kg_m2: list = field(default_factory=lambda: [10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0])
     sigma_bn_init: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -255,6 +437,11 @@ class SpacecraftConfig:
     # {"K": ..., "P": ...} MRP feedback control gains; see
     # engine.fsw.DEFAULT_MRP_GAINS for the defaults used when a key is absent.
     control_params: dict = field(default_factory=dict)
+
+    power: Optional[PowerConfig] = None
+    rf_link: Optional[RFLinkConfig] = None
+    station_keeping: Optional[StationKeepingConfig] = None
+    phasing_keeping: Optional[PhasingKeepingConfig] = None
 
     def validate(self) -> None:
         _require(bool(self.name), "spacecraft.name must not be empty")
@@ -301,6 +488,18 @@ class SpacecraftConfig:
                           f"{self.name}: reaction_wheel {actuator.name!r} needs params['gsHat_B'] "
                           "as a 3-element body-frame spin-axis unit vector")
 
+        if self.power is not None:
+            self.power.validate(self.name)
+        if self.rf_link is not None:
+            self.rf_link.validate(self.name)
+        if self.station_keeping is not None:
+            self.station_keeping.validate(self.name)
+        if self.phasing_keeping is not None:
+            _require(self.station_keeping is not None,
+                      f"{self.name}: phasing_keeping requires station_keeping to also be set on this spacecraft "
+                      "-- they share one physical thruster/propellant tank (see PhasingKeepingConfig's docstring)")
+            self.phasing_keeping.validate(self.name)
+
 
 @dataclass
 class GravityConfig:
@@ -324,12 +523,18 @@ class GroundStationConfig:
     longitude_deg: float
     altitude_m: float = 0.0
     min_elevation_deg: float = 10.0
+    # Receive-side link-budget parameters -- only meaningful for a
+    # spacecraft that also has RFLinkConfig set (see engine.link_budget);
+    # harmless, unused defaults otherwise.
+    rx_antenna_gain_dbi: float = 0.0  # [dBi] ground station receive antenna gain
+    system_noise_temp_k: float = 290.0  # [K] ground receiver system noise temperature
 
     def validate(self) -> None:
         _require(bool(self.name), "ground_station.name must not be empty")
         _require(-90.0 <= self.latitude_deg <= 90.0, f"{self.name}: latitude_deg must be in [-90, 90]")
         _require(-180.0 <= self.longitude_deg <= 180.0, f"{self.name}: longitude_deg must be in [-180, 180]")
         _require(0.0 <= self.min_elevation_deg < 90.0, f"{self.name}: min_elevation_deg must be in [0, 90)")
+        _require(self.system_noise_temp_k > 0, f"{self.name}: system_noise_temp_k must be > 0")
 
 
 @dataclass
@@ -478,6 +683,11 @@ class Scenario:
                 _require(target_gs in gs_names,
                           f"{sc.name}: fsw_params['target_ground_station'] {target_gs!r} is not one of "
                           f"this scenario's ground_stations {gs_names}")
+        for sc in self.spacecraft:
+            if sc.phasing_keeping is not None:
+                _require(sc.phasing_keeping.chief_spacecraft in names,
+                          f"{sc.name}: phasing_keeping.chief_spacecraft {sc.phasing_keeping.chief_spacecraft!r} "
+                          f"is not one of this scenario's spacecraft {names}")
         self.space_weather.validate()
         self.sim_settings.validate()
         self.monte_carlo.validate()
@@ -508,7 +718,17 @@ class Scenario:
             orbit = OrbitIC(**sc.pop("orbit"))
             sensors = [SensorConfig(**s) for s in sc.pop("sensors", [])]
             actuators = [ActuatorConfig(**a) for a in sc.pop("actuators", [])]
-            spacecraft.append(SpacecraftConfig(orbit=orbit, sensors=sensors, actuators=actuators, **sc))
+            power_data = sc.pop("power", None)
+            power = PowerConfig(**power_data) if power_data is not None else None
+            rf_link_data = sc.pop("rf_link", None)
+            rf_link = RFLinkConfig(**rf_link_data) if rf_link_data is not None else None
+            station_keeping_data = sc.pop("station_keeping", None)
+            station_keeping = StationKeepingConfig(**station_keeping_data) if station_keeping_data is not None else None
+            phasing_keeping_data = sc.pop("phasing_keeping", None)
+            phasing_keeping = PhasingKeepingConfig(**phasing_keeping_data) if phasing_keeping_data is not None else None
+            spacecraft.append(SpacecraftConfig(orbit=orbit, sensors=sensors, actuators=actuators,
+                                                power=power, rf_link=rf_link, station_keeping=station_keeping,
+                                                phasing_keeping=phasing_keeping, **sc))
 
         return Scenario(
             gravity=gravity, sim_settings=sim_settings, space_weather=space_weather,
