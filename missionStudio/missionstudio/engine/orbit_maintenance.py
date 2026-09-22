@@ -76,7 +76,7 @@ from Basilisk.architecture import messaging, sysModel
 from Basilisk.simulation import extForceTorque
 from Basilisk.utilities import macros, orbitalMotion
 
-from ..schema.scenario import PhasingKeepingConfig, StationKeepingConfig
+from ..schema.scenario import ConstantThrustConfig, PhasingKeepingConfig, StationKeepingConfig
 from .constellation import SeparationSchedule
 
 
@@ -554,5 +554,176 @@ def build_phasing_keeping(scSim, task_name: str, tag: str, mu: float, chief_sc_o
     # Thruster-arbitration link: phasing pauses while the follower's own
     # altitude controller is actively reboosting (see UpdateState).
     controller.altitudeControllerB = follower_station_keeping_controller
+    scSim.AddModelToTask(task_name, controller)
+    return controller
+
+
+def _vnb_basis(r_vec: np.ndarray, v_vec: np.ndarray):
+    """(V, N, B) unit vectors of the velocity-normal-binormal frame at this
+    instant: V = velocity direction, N = orbit-normal (angular-momentum
+    direction, r x v), B = V x N (completes the right-handed triad).
+    Re-evaluated fresh from the spacecraft's CURRENT r/v every call -- this
+    is an osculating, instantaneously-rotating frame, not a fixed one.
+    """
+    v_hat = v_vec / np.linalg.norm(v_vec)
+    h_vec = np.cross(r_vec, v_vec)
+    n_hat = h_vec / np.linalg.norm(h_vec)
+    b_hat = np.cross(v_hat, n_hat)
+    return v_hat, n_hat, b_hat
+
+
+def _rtn_basis(r_vec: np.ndarray, v_vec: np.ndarray):
+    """(R, T, N) unit vectors of the radial-transverse-normal frame at this
+    instant: R = radial (outward from the central body), N = orbit-normal
+    (angular-momentum direction, r x v), T = N x R (completes the
+    right-handed triad; in-plane, perpendicular to R -- coincides with the
+    velocity direction only at periapsis/apoapsis or for a circular orbit,
+    NOT in general, unlike VNB's V). Re-evaluated fresh every call, like
+    :func:`_vnb_basis`.
+    """
+    r_hat = r_vec / np.linalg.norm(r_vec)
+    h_vec = np.cross(r_vec, v_vec)
+    n_hat = h_vec / np.linalg.norm(h_vec)
+    t_hat = np.cross(n_hat, r_hat)
+    return r_hat, t_hat, n_hat
+
+
+class ConstantFrameThrustController(sysModel.SysModel):
+    """Continuous (always-on), constant-magnitude thrust with a fixed
+    DIRECTION IN A ROTATING FRAME (VNB or RTN -- see
+    :class:`schema.scenario.ConstantThrustConfig`'s docstring for why: an
+    orbit-only "cannonball" scenario needs a delta-V/propellant budgeting
+    tool that doesn't require any attitude modeling, and a thrust
+    direction fixed in the INERTIAL frame would drift relative to the
+    orbit as the spacecraft moves -- VNB/RTN are the standard
+    astrodynamics frames for exactly this, re-evaluated every tick from
+    the spacecraft's current state, see :func:`_vnb_basis`/:func:`_rtn_basis`).
+
+    Propellant/delta-V bookkeeping (explicit-Euler rocket equation, mass
+    fed back into ``scObject.hub.mHub``) is the same approach
+    :class:`StationKeepingController` uses, just with no
+    altitude-deadband/eclipse trigger -- this fires every tick until
+    propellant is exhausted (then silently stays at zero thrust, same as
+    station-keeping's own depletion behavior, just without the repeated
+    per-tick warning log -- running out is the expected steady state for
+    a continuous-thrust budget scenario, not a surprise).
+
+    Construct via :func:`build_constant_thrust` rather than directly.
+    """
+
+    def __init__(self, name: str, frame: str, direction, thrust_n: float, isp_s: float,
+                 dry_mass_kg: float, propellant_kg: float, g0_mps2: float = 9.80665):
+        super().__init__()
+        self.ModelTag = name
+
+        self.scStateInMsg = messaging.SCStatesMsgReader()
+        # Live propellant telemetry for Vizard's GenericStorage "fuel tank"
+        # panel -- same rationale as StationKeepingController's own
+        # fuelTankOutMsg (see that class's docstring).
+        self.fuelTankOutMsg = messaging.FuelTankMsg()
+
+        # Wired up externally (see build_constant_thrust): the
+        # extForceTorque effector this controller commands, and the
+        # spacecraft hub whose mass it updates as propellant depletes.
+        self.extForceEffector = None
+        self.scObject = None
+
+        self.frame = frame  # "VNB" or "RTN" -- trusted pre-validated (ConstantThrustConfig.validate())
+        direction_arr = np.array(direction, dtype=float)
+        norm = np.linalg.norm(direction_arr)
+        self.direction = direction_arr / norm if norm > 0.0 else direction_arr  # unit vector in `frame`
+        self.thrustN = thrust_n  # [N]
+        self.ispS = isp_s  # [s]
+        self.g0 = g0_mps2  # [m/s^2]
+        self.dryMass = dry_mass_kg  # [kg]
+        self.propellant = propellant_kg  # [kg]
+        self._initialPropellantKg = propellant_kg  # [kg] fixed tank capacity, for fuelTankOutMsg.maxFuelMass
+
+        self._lastT: Optional[float] = None  # [s]
+        self.tLog: list = []
+        self.propellantLog: list = []
+        self.deltaVLog: list = []
+        self._cumulativeDv = 0.0  # [m/s]
+
+    def Reset(self, CurrentSimNanos):
+        self._lastT = CurrentSimNanos * macros.NANO2SEC
+        if self.extForceEffector is not None:
+            self.extForceEffector.extForce_N = [0.0, 0.0, 0.0]
+
+    def UpdateState(self, CurrentSimNanos):
+        t = CurrentSimNanos * macros.NANO2SEC  # [s]
+        dt = t - self._lastT if self._lastT is not None else 0.0  # [s]
+        self._lastT = t
+
+        scState = self.scStateInMsg()
+        rVec = np.array(scState.r_BN_N)  # [m]
+        vVec = np.array(scState.v_BN_N)  # [m/s]
+
+        axis1, axis2, axis3 = _vnb_basis(rVec, vVec) if self.frame == "VNB" else _rtn_basis(rVec, vVec)
+        dirHat_N = self.direction[0] * axis1 + self.direction[1] * axis2 + self.direction[2] * axis3
+
+        thrustMag = self.thrustN if self.propellant > 1e-9 else 0.0  # [N]
+        currentMass = self.dryMass + self.propellant  # [kg]
+
+        mDot = 0.0  # [kg/s]
+        if thrustMag > 0.0:
+            self._cumulativeDv += (thrustMag / currentMass) * dt  # [m/s]
+            mDot = thrustMag / (self.ispS * self.g0)  # [kg/s]
+            self.propellant = max(0.0, self.propellant - mDot * dt)
+
+        if self.scObject is not None:
+            self.scObject.hub.mHub = self.dryMass + self.propellant
+
+        forceVec = thrustMag * dirHat_N
+        if self.extForceEffector is not None:
+            self.extForceEffector.extForce_N = forceVec.tolist()
+
+        fuelTankMsg = messaging.FuelTankMsgPayload()
+        fuelTankMsg.fuelMass = self.propellant  # [kg]
+        fuelTankMsg.fuelMassDot = -mDot  # [kg/s] negative: mass decreasing
+        fuelTankMsg.maxFuelMass = self._initialPropellantKg  # [kg]
+        self.fuelTankOutMsg.write(fuelTankMsg, CurrentSimNanos, self.moduleID)
+
+        self.tLog.append(t)
+        self.propellantLog.append(self.propellant)
+        self.deltaVLog.append(self._cumulativeDv)
+
+
+def build_constant_thrust(scSim, task_name: str, tag: str, sc_object, dry_mass_kg: float,
+                           config: ConstantThrustConfig) -> ConstantFrameThrustController:
+    """Builds and wires one spacecraft's :class:`ConstantFrameThrustController`:
+    a DEDICATED ``extForceTorque`` effector -- independent of
+    station-keeping's own effector, if also configured on this spacecraft
+    (multiple dynamic effectors on one hub sum additively, same pattern
+    this module's docstring already notes for attitude-control/
+    station-keeping). Adds both to ``task_name``.
+
+    ``dry_mass_kg`` is the spacecraft's mass WITHOUT this controller's own
+    propellant, same convention as :func:`build_station_keeping`'s
+    ``dry_mass_kg`` argument -- see that function's docstring. If BOTH
+    station_keeping and constant_thrust are configured on the same
+    spacecraft, the caller is responsible for including both propellant
+    masses in the spacecraft's initial simulated mass (they are
+    independent propellant budgets/tanks, unlike station_keeping +
+    phasing_keeping which deliberately share one).
+    """
+    controller = ConstantFrameThrustController(
+        name=f"{tag}ConstantThrust",
+        frame=config.frame,
+        direction=config.direction,
+        thrust_n=config.thrust_n,
+        isp_s=config.isp_s,
+        dry_mass_kg=dry_mass_kg,
+        propellant_kg=config.propellant_kg,
+    )
+
+    thruster = extForceTorque.ExtForceTorque()
+    thruster.ModelTag = f"{tag}ConstantThrustThruster"
+    sc_object.addDynamicEffector(thruster)
+    scSim.AddModelToTask(task_name, thruster)
+
+    controller.extForceEffector = thruster
+    controller.scObject = sc_object
+    controller.scStateInMsg.subscribeTo(sc_object.scStateOutMsg)
     scSim.AddModelToTask(task_name, controller)
     return controller

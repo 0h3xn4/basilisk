@@ -286,6 +286,7 @@ class _SpacecraftHandle:
     station_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.station_keeping was configured
     eclipse_out_msg: Optional[object] = None  # Phase 4: only set if power or station_keeping was configured
     phasing_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.phasing_keeping was configured
+    constant_thrust_controller: Optional[object] = None  # Phase 5: only set if sc_config.constant_thrust was configured
 
 
 class SimulationService:
@@ -518,12 +519,16 @@ class SimulationService:
         for sc_config in scenario.spacecraft:
             sc_object = spacecraft.Spacecraft()
             sc_object.ModelTag = sc_config.name
-            # See SpacecraftConfig.dry_mass_kg's docstring: station-keeping
-            # propellant is additional mass on top of the dry mass, not
-            # already counted in it.
+            # See SpacecraftConfig.dry_mass_kg's docstring: station-keeping/
+            # constant-thrust propellant is additional mass on top of the
+            # dry mass, not already counted in it -- independent propellant
+            # budgets, so both are added if both are configured (see
+            # ConstantThrustConfig's docstring).
             initial_mass_kg = sc_config.dry_mass_kg
             if sc_config.station_keeping is not None:
                 initial_mass_kg += sc_config.station_keeping.propellant_kg
+            if sc_config.constant_thrust is not None:
+                initial_mass_kg += sc_config.constant_thrust.propellant_kg
             sc_object.hub.mHub = initial_mass_kg
             sc_object.hub.IHubPntBc_B = simHelpers.np2EigenMatrix3d(sc_config.inertia_kg_m2)
             sc_object.hub.sigma_BNInit = [[v] for v in sc_config.sigma_bn_init]
@@ -622,6 +627,18 @@ class SimulationService:
                 handle.station_keeping_controller = orbit_maintenance.build_station_keeping(
                     self.scSim, dyn_task_name, sc_config.name, sc_object, mu, central_body.radEquator,
                     sc_config.dry_mass_kg, sc_config.station_keeping, eclipse_out_msg=sc_eclipse_out_msg,
+                )
+
+            # -- Phase 5: continuous constant-frame thrust
+            # (schema.scenario.ConstantThrustConfig) -- independent of
+            # fsw_mode/sensors/power/station_keeping like the blocks above;
+            # see engine.orbit_maintenance's ConstantFrameThrustController
+            # docstring. Uses its OWN extForceTorque effector (not shared
+            # with station_keeping's), so both may be configured together.
+            if sc_config.constant_thrust is not None:
+                handle.constant_thrust_controller = orbit_maintenance.build_constant_thrust(
+                    self.scSim, dyn_task_name, sc_config.name, sc_object,
+                    sc_config.dry_mass_kg, sc_config.constant_thrust,
                 )
 
             # -- Phase 4: atmospheric drag (schema.scenario.SpacecraftConfig
@@ -907,6 +924,15 @@ class SimulationService:
                 # {name}.station_keeping.delta_v's.
                 result.add(TimeSeries(f"{name}.phasing_keeping.delta_v", pk_t_s, ("cumulative_delta_v",),
                                        np.asarray(phase_controller.deltaVLog), units="m/s"))
+
+            if handle.constant_thrust_controller is not None:
+                ct_controller = handle.constant_thrust_controller
+                ct_t_s = np.asarray(ct_controller.tLog)
+                result.add(TimeSeries(f"{name}.constant_thrust.propellant_remaining", ct_t_s,
+                                       ("propellant_remaining",), np.asarray(ct_controller.propellantLog),
+                                       units="kg"))
+                result.add(TimeSeries(f"{name}.constant_thrust.delta_v", ct_t_s, ("cumulative_delta_v",),
+                                       np.asarray(ct_controller.deltaVLog), units="m/s"))
 
         for (gs_name, sc_name), recorder in self._access_recorders.items():
             access_t_s = recorder.times() * macros.NANO2SEC

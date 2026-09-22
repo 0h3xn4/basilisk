@@ -6,6 +6,7 @@ import pytest
 
 from missionstudio.schema import (
     ActuatorConfig,
+    ConstantThrustConfig,
     DispersionConfig,
     GravityConfig,
     GroundStationConfig,
@@ -606,6 +607,150 @@ def test_station_keeping_rejects_out_of_range_eclipse_threshold():
     )
     with pytest.raises(ScenarioValidationError, match="eclipse_sunlit_threshold"):
         sc.validate()
+
+
+def test_constant_thrust_defaults_to_none():
+    sc = _minimal_scenario()
+    assert sc.spacecraft[0].constant_thrust is None
+    sc.validate()  # must not raise -- not required
+
+
+def test_constant_thrust_round_trips_through_save_load(tmp_path):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig(
+        frame="RTN", direction=[0.0, 1.0, 0.0], thrust_n=0.05, isp_s=2000.0, propellant_kg=1.5,
+    )
+
+    path = tmp_path / "scenario.json"
+    sc.save(path)
+    loaded = load_scenario(path)
+
+    assert isinstance(loaded.spacecraft[0].constant_thrust, ConstantThrustConfig)
+    assert loaded.spacecraft[0].constant_thrust.frame == "RTN"
+    assert loaded.spacecraft[0].constant_thrust.direction == [0.0, 1.0, 0.0]
+    assert loaded.spacecraft[0].constant_thrust.thrust_n == 0.05
+
+
+def test_constant_thrust_defaults_to_vnb_prograde():
+    config = ConstantThrustConfig()
+    assert config.frame == "VNB"
+    assert config.direction == [1.0, 0.0, 0.0]
+
+
+def test_constant_thrust_rejects_unknown_frame():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig(frame="LVLH")
+    with pytest.raises(ScenarioValidationError, match="frame"):
+        sc.validate()
+
+
+def test_constant_thrust_rejects_wrong_length_direction():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig(direction=[1.0, 0.0])
+    with pytest.raises(ScenarioValidationError, match="direction"):
+        sc.validate()
+
+
+def test_constant_thrust_rejects_zero_direction_vector():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig(direction=[0.0, 0.0, 0.0])
+    with pytest.raises(ScenarioValidationError, match="zero vector"):
+        sc.validate()
+
+
+def test_constant_thrust_rejects_non_positive_thrust():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig(thrust_n=0.0)
+    with pytest.raises(ScenarioValidationError, match="thrust_n"):
+        sc.validate()
+
+
+def test_constant_thrust_rejects_non_positive_isp():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig(isp_s=0.0)
+    with pytest.raises(ScenarioValidationError, match="isp_s"):
+        sc.validate()
+
+
+def test_constant_thrust_rejects_negative_propellant():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig(propellant_kg=-1.0)
+    with pytest.raises(ScenarioValidationError, match="propellant_kg"):
+        sc.validate()
+
+
+def test_constant_thrust_allowed_alongside_station_keeping():
+    """Independent propellant budgets -- see ConstantThrustConfig's
+    docstring -- so both may be set on the same spacecraft at once.
+    """
+    sc = _minimal_scenario()
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig()
+    sc.validate()  # must not raise
+
+
+def test_simulation_mode_defaults_to_full_attitude():
+    sc = _minimal_scenario()
+    assert sc.simulation_mode == "full_attitude"
+    sc.validate()  # must not raise
+
+
+def test_simulation_mode_rejects_unknown_value():
+    sc = _minimal_scenario()
+    sc.simulation_mode = "cannonball"
+    with pytest.raises(ScenarioValidationError, match="simulation_mode"):
+        sc.validate()
+
+
+def test_orbit_only_mode_rejects_fsw_mode():
+    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc.spacecraft[0].fsw_mode = "hillPoint"
+    with pytest.raises(ScenarioValidationError, match="fsw_mode"):
+        sc.validate()
+
+
+def test_orbit_only_mode_rejects_sensors():
+    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc.spacecraft[0].sensors = [SensorConfig(kind="imu", name="imu-1")]
+    with pytest.raises(ScenarioValidationError, match="sensors"):
+        sc.validate()
+
+
+def test_orbit_only_mode_rejects_actuators():
+    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc.spacecraft[0].actuators = [ActuatorConfig(kind="reaction_wheel", name="rw-1", params={"gsHat_B": [1, 0, 0]})]
+    with pytest.raises(ScenarioValidationError, match="actuators"):
+        sc.validate()
+
+
+def test_orbit_only_mode_rejects_power():
+    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.0, panel_efficiency=0.29)
+    with pytest.raises(ScenarioValidationError, match="power"):
+        sc.validate()
+
+
+def test_orbit_only_mode_allows_station_keeping_and_constant_thrust():
+    """Neither needs an attitude model -- see Scenario.simulation_mode's
+    docstring -- so both remain usable in orbit_only mode.
+    """
+    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc.spacecraft[0].station_keeping = StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
+    )
+    sc.spacecraft[0].constant_thrust = ConstantThrustConfig()
+    sc.spacecraft[0].enable_drag = True
+    sc.validate()  # must not raise
+
+
+def test_orbit_only_mode_allows_plain_cannonball_spacecraft():
+    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc.spacecraft[0].enable_drag = True
+    sc.spacecraft[0].drag_area_m2 = 2.5
+    sc.spacecraft[0].enable_srp = True
+    sc.validate()  # must not raise
 
 
 def _chief_and_follower_scenario(**follower_overrides):
