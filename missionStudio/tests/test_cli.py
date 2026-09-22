@@ -95,6 +95,23 @@ def test_run_rejects_both_vizard_flags_at_once(tmp_path, capsys):
     assert "at most one of" in capsys.readouterr().err
 
 
+def test_run_parses_vizard_camera_and_orbit_line_flags():
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "run", "scenario.json",
+        "--vizard-live-stream", "--vizard-camera-target", "sat-1", "--vizard-no-orbit-lines",
+    ])
+    assert args.vizard_camera_target == "sat-1"
+    assert args.vizard_no_orbit_lines is True
+
+
+def test_run_vizard_camera_target_defaults_to_none():
+    parser = cli.build_parser()
+    args = parser.parse_args(["run", "scenario.json"])
+    assert args.vizard_camera_target is None
+    assert args.vizard_no_orbit_lines is False
+
+
 def test_monte_carlo_rejects_scenario_without_enabled_flag(tmp_path, capsys):
     path = tmp_path / "scenario.json"
     _write_scenario(path)  # monte_carlo.enabled defaults to False

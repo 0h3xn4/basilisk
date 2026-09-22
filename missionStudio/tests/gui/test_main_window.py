@@ -207,6 +207,40 @@ def test_run_passes_vizard_request_to_worker(window, monkeypatch):
     assert captured["vizard_request"] is window._vizard_request
 
 
+def test_run_starts_busy_indicator_and_disables_other_run_actions(window, monkeypatch):
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)  # don't actually spin up the thread
+
+    window.on_run()
+    assert window._busy_timer.isActive()
+    assert not window.run_action.isEnabled()
+    assert not window.monte_carlo_action.isEnabled()  # can't start a second run while one is in flight
+    assert "Running" in window.statusBar().currentMessage()
+
+
+def test_run_finished_stops_busy_indicator_and_reenables_actions(window):
+    from missionstudio.engine.results import ResultSet
+
+    window._start_busy("Running test...")
+    window._on_run_finished(ResultSet(scenario_name="test", series={}))
+    assert not window._busy_timer.isActive()
+    assert window.run_action.isEnabled()
+    assert window.monte_carlo_action.isEnabled()
+
+
+def test_run_failed_stops_busy_indicator_and_reenables_actions(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+    window._start_busy("Running test...")
+    window._on_run_failed("boom")
+    assert not window._busy_timer.isActive()
+    assert window.run_action.isEnabled()
+    assert window.monte_carlo_action.isEnabled()
+
+
 def test_run_monte_carlo_rejects_disabled_monte_carlo(window, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
 
@@ -241,6 +275,27 @@ def test_run_monte_carlo_starts_worker_with_chosen_archive_dir(window, monkeypat
     assert window._mc_worker.archive_dir == archive_dir
     assert window._mc_worker.mc_config.num_runs == 3
     assert not window.monte_carlo_action.isEnabled()
+    assert not window.run_action.isEnabled()  # can't start a second run while one is in flight
+    assert window._busy_timer.isActive()
+
+
+def test_monte_carlo_finished_stops_busy_indicator_and_reenables_actions(window):
+    window._start_busy("Running Monte Carlo test...")
+    window._on_monte_carlo_finished([])
+    assert not window._busy_timer.isActive()
+    assert window.run_action.isEnabled()
+    assert window.monte_carlo_action.isEnabled()
+
+
+def test_monte_carlo_failed_stops_busy_indicator_and_reenables_actions(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+    window._start_busy("Running Monte Carlo test...")
+    window._on_monte_carlo_failed("boom")
+    assert not window._busy_timer.isActive()
+    assert window.run_action.isEnabled()
+    assert window.monte_carlo_action.isEnabled()
 
 
 def test_run_monte_carlo_cancel_dialog_does_not_start_worker(window, monkeypatch):

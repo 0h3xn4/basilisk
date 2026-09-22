@@ -37,6 +37,39 @@ def test_live_stream_mode(qtbot):
     assert request.save_file is None
 
 
+def test_camera_target_and_orbit_lines_default(qtbot):
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog()
+    qtbot.addWidget(dialog)
+    dialog.live_stream_radio.setChecked(True)
+    request = dialog.to_request()
+    assert request.camera_target is None  # blank field -> None -> engine.vizard defaults to central body
+    assert request.show_orbit_lines is True  # checked by default
+
+
+def test_camera_target_and_orbit_lines_overridden(qtbot):
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog()
+    qtbot.addWidget(dialog)
+    dialog.live_stream_radio.setChecked(True)
+    dialog.camera_target_edit.setText("sat-1")
+    dialog.orbit_lines_check.setChecked(False)
+    request = dialog.to_request()
+    assert request.camera_target == "sat-1"
+    assert request.show_orbit_lines is False
+
+
+def test_preselects_camera_target_and_orbit_lines(qtbot):
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    dialog = VizardDialog(current_live_stream=True, current_camera_target="earth", current_show_orbit_lines=False)
+    qtbot.addWidget(dialog)
+    assert dialog.camera_target_edit.text() == "earth"
+    assert not dialog.orbit_lines_check.isChecked()
+
+
 def test_preselects_from_current_request(qtbot):
     from missionstudio.gui.vizard_dialog import VizardDialog
 

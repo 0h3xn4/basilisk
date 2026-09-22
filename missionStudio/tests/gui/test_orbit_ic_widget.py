@@ -37,6 +37,9 @@ def test_switching_type_emits_changed_and_updates_dataclass(widget, qtbot):
 @pytest.mark.parametrize("orbit_kwargs", [
     dict(type="classical_elements", semi_major_axis_km=6800.0, eccentricity=0.01,
          inclination_deg=45.0, raan_deg=10.0, arg_periapsis_deg=20.0, true_anomaly_deg=30.0),
+    dict(type="classical_elements", semi_major_axis_km=6800.0, eccentricity=0.01,
+         inclination_deg=45.0, raan_deg=10.0, arg_periapsis_deg=20.0,
+         anomaly_type="mean", mean_anomaly_deg=15.0),
     dict(type="cartesian", position_km=[1.0, 2.0, 3.0], velocity_km_s=[4.0, 5.0, 6.0]),
     dict(type="tle", tle_line1="1 25544U", tle_line2="2 25544"),
 ])
@@ -47,6 +50,27 @@ def test_from_dataclass_round_trips(widget, orbit_kwargs):
     widget.from_dataclass(orbit)
     got = widget.to_dataclass()
     assert got == orbit
+
+
+def test_default_classical_elements_uses_true_anomaly(widget):
+    oe = widget.to_dataclass()
+    assert oe.anomaly_type == "true"
+    assert oe.true_anomaly_deg == 0.0
+    assert oe.mean_anomaly_deg is None
+
+
+def test_switching_anomaly_type_to_mean_updates_dataclass(widget, qtbot):
+    from missionstudio.schema.scenario import ANOMALY_TYPES
+
+    assert set(ANOMALY_TYPES) == {"true", "mean"}
+    with qtbot.waitSignal(widget.changed, timeout=1000):
+        widget.anomaly_type_combo.setCurrentIndex(widget.anomaly_type_combo.findData("mean"))
+    widget.anomaly_deg.setValue(42.0)
+
+    oe = widget.to_dataclass()
+    assert oe.anomaly_type == "mean"
+    assert oe.mean_anomaly_deg == 42.0
+    assert oe.true_anomaly_deg is None
 
 
 def test_from_dataclass_rejects_unknown_type(widget):

@@ -27,7 +27,12 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QLineEdit, QStackedWidget, QVBoxLayout, QWidget
 
-from ..schema.scenario import ORBIT_IC_TYPES, OrbitIC
+from ..schema.scenario import ANOMALY_TYPES, ORBIT_IC_TYPES, OrbitIC
+
+_ANOMALY_TYPE_LABELS = {
+    "true": "True anomaly [deg]",
+    "mean": "Mean anomaly [deg]",
+}
 
 _TYPE_LABELS = {
     "classical_elements": "Classical elements",
@@ -80,15 +85,27 @@ class OrbitIcWidget(QWidget):
         self.inc_deg = _spin(0.0, 180.0, decimals=4, step=1.0)
         self.raan_deg = _spin(0.0, 360.0, decimals=4, step=1.0)
         self.aop_deg = _spin(0.0, 360.0, decimals=4, step=1.0)
-        self.ta_deg = _spin(0.0, 360.0, decimals=4, step=1.0)
         form.addRow("Semi-major axis [km]", self.sma_km)
         form.addRow("Eccentricity [-]", self.ecc)
         form.addRow("Inclination [deg]", self.inc_deg)
         form.addRow("RAAN [deg]", self.raan_deg)
         form.addRow("Argument of periapsis [deg]", self.aop_deg)
-        form.addRow("True anomaly [deg]", self.ta_deg)
-        for box in (self.sma_km, self.ecc, self.inc_deg, self.raan_deg, self.aop_deg, self.ta_deg):
+
+        # One shared angle field for whichever anomaly the user wants to
+        # specify -- switching the combo box just relabels what the number
+        # means (see schema.scenario.OrbitIC.anomaly_type); it does NOT
+        # convert the displayed value, since true and mean anomaly aren't
+        # numerically close in general and silently reinterpreting a typed
+        # number would be more confusing than resetting it to 0.
+        self.anomaly_type_combo = QComboBox()
+        for anomaly_type in ANOMALY_TYPES:
+            self.anomaly_type_combo.addItem(_ANOMALY_TYPE_LABELS[anomaly_type], userData=anomaly_type)
+        self.anomaly_deg = _spin(0.0, 360.0, decimals=4, step=1.0)
+        form.addRow(self.anomaly_type_combo, self.anomaly_deg)
+
+        for box in (self.sma_km, self.ecc, self.inc_deg, self.raan_deg, self.aop_deg, self.anomaly_deg):
             box.valueChanged.connect(self.changed)
+        self.anomaly_type_combo.currentIndexChanged.connect(self.changed)
         self.stack.addWidget(page)
 
     def _build_cartesian_page(self) -> None:
@@ -126,6 +143,7 @@ class OrbitIcWidget(QWidget):
     def to_dataclass(self) -> OrbitIC:
         orbit_type = self.type_combo.currentData()
         if orbit_type == "classical_elements":
+            anomaly_type = self.anomaly_type_combo.currentData()
             return OrbitIC(
                 type=orbit_type,
                 semi_major_axis_km=self.sma_km.value(),
@@ -133,7 +151,9 @@ class OrbitIcWidget(QWidget):
                 inclination_deg=self.inc_deg.value(),
                 raan_deg=self.raan_deg.value(),
                 arg_periapsis_deg=self.aop_deg.value(),
-                true_anomaly_deg=self.ta_deg.value(),
+                anomaly_type=anomaly_type,
+                true_anomaly_deg=self.anomaly_deg.value() if anomaly_type == "true" else None,
+                mean_anomaly_deg=self.anomaly_deg.value() if anomaly_type == "mean" else None,
             )
         if orbit_type == "cartesian":
             return OrbitIC(
@@ -156,7 +176,11 @@ class OrbitIcWidget(QWidget):
             self.inc_deg.setValue(orbit.inclination_deg or 0.0)
             self.raan_deg.setValue(orbit.raan_deg or 0.0)
             self.aop_deg.setValue(orbit.arg_periapsis_deg or 0.0)
-            self.ta_deg.setValue(orbit.true_anomaly_deg or 0.0)
+            anomaly_type = orbit.anomaly_type or "true"
+            anomaly_index = self.anomaly_type_combo.findData(anomaly_type)
+            self.anomaly_type_combo.setCurrentIndex(anomaly_index if anomaly_index >= 0 else 0)
+            anomaly_value = orbit.mean_anomaly_deg if anomaly_type == "mean" else orbit.true_anomaly_deg
+            self.anomaly_deg.setValue(anomaly_value or 0.0)
         elif orbit.type == "cartesian":
             pos = orbit.position_km or [0.0, 0.0, 0.0]
             vel = orbit.velocity_km_s or [0.0, 0.0, 0.0]

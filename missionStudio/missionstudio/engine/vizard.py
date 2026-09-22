@@ -52,12 +52,38 @@ Thruster plumes (``thrEffectorList``) are NOT passed: Phase 2 does not
 wire up thruster actuators (see ``engine.fsw``'s module docstring), so
 there is nothing to visualize there yet.
 
+Default camera / orbit-line view (fixed after user feedback that Vizard
+opened locked onto the spacecraft with no context -- "improve" per that
+feedback, since a viewer that opens on an unrecognizable close-up isn't
+"understandable live data" no matter what panels are attached to it)
+-------------------------------------------------------------------------
+``enableUnityVisualization()`` on its own does not configure the VIEWER's
+starting camera or orbit-trace lines at all -- those are separate fields
+on the ``VizSettings`` message it creates (``viz.settings``), read
+directly from ``src/simulation/vizard/_GeneralModuleFiles/vizStructures.h``
+in this checkout (not guessed): ``mainCameraTarget`` ("if a valid
+spacecraft or celestial body name is provided, the main camera will be
+targeted at that body at start"), ``orbitLinesOn``/``trueTrajectoryLinesOn``
+(osculating/true orbit trace lines, off by default), and the
+``show*Labels`` flags. Left unset, Vizard falls back to its own built-in
+default, which is a spacecraft-locked view with no orbit trace -- exactly
+the complaint. :func:`enable_vizard` now sets these explicitly: camera
+targeted at the central body (an Earth-centered view with the orbit
+tracing around it, matching STK/GMAT/FreeFlyer's default framing) unless
+:attr:`VizardRequest.camera_target` names something else (a specific
+spacecraft, to watch it up close, or another body), plus both orbit-trace
+line types and spacecraft/body labels on.
+
 Verification status: ``vizSupport.enableUnityVisualization``'s signature
 and ``addLocation``'s signature were read directly from
 ``src/utilities/vizSupport.py`` in this checkout (not assumed); the
 ``rwEffectorList``/``saveFile``/``liveStream`` usage pattern matches
-``examples/scenarioAttitudeFeedbackRW.py``. Cannot be executed in this
-development sandbox (no Basilisk build here).
+``examples/scenarioAttitudeFeedbackRW.py``. The ``VizSettings`` fields
+this module now sets were confirmed to exist under these exact names by
+reading ``vizStructures.h`` directly, but setting them was NOT exercised
+against a real running Vizard instance (no display in this development
+sandbox to confirm the rendered result) -- report back if the camera/
+orbit-line behavior doesn't match what's documented here.
 """
 
 from __future__ import annotations
@@ -83,6 +109,16 @@ class VizardRequest:
 
     save_file: Optional[str] = None  # path for a .bin playback file Vizard opens after the run
     live_stream: bool = False  # stream live to a Vizard instance already running on this machine
+    # Name of the spacecraft or celestial body Vizard's main camera starts
+    # targeted at. None (the default) targets the scenario's central body --
+    # an Earth-centered view with the orbit tracing around it, matching
+    # STK/GMAT/FreeFlyer's default framing, rather than a spacecraft-locked
+    # close-up. Set this to a spacecraft name to start zoomed in on it instead.
+    camera_target: Optional[str] = None
+    # Draw osculating + true orbit-trace lines so the orbit path is visible,
+    # not just a moving dot. On by default for the same "understandable at a
+    # glance" reason as camera_target.
+    show_orbit_lines: bool = True
 
 
 def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardRequest,
@@ -123,6 +159,16 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
         )
     except Exception as exc:  # noqa: BLE001 -- report ANY Vizard setup failure with a specific message
         raise VizardError(f"vizSupport.enableUnityVisualization failed: {exc}") from exc
+
+    # See module docstring: without these, Vizard falls back to its own
+    # default (spacecraft-locked, no orbit trace) instead of an
+    # STK/GMAT/FreeFlyer-style central-body-centered view.
+    viz.settings.mainCameraTarget = request.camera_target or central_body_name
+    if request.show_orbit_lines:
+        viz.settings.orbitLinesOn = 1  # osculating orbit line, relative to parent body
+        viz.settings.trueTrajectoryLinesOn = 1  # true (propagated) trajectory line, inertial
+    viz.settings.showSpacecraftLabels = 1
+    viz.settings.showCelestialBodyLabels = 1
 
     for gs_name, gs in (ground_stations or {}).items():
         # Edge-to-edge cone angle for the access region above gs.minimumElevation
