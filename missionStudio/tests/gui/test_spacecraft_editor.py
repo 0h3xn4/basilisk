@@ -317,3 +317,122 @@ def test_list_widget_rejects_duplicate_name_on_add(qtbot, monkeypatch):
     lw._on_add()
     assert len(lw.to_list()) == 1  # not added
     assert len(critical_calls) == 1
+
+
+def test_list_widget_generate_constellation_appends_generated_spacecraft(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.constellation_dialog import WalkerConstellationDialog
+    from missionstudio.gui.spacecraft_editor import SpacecraftListWidget
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+    lw.from_list([SpacecraftConfig(
+        name="template-sat", dry_mass_kg=42.0,
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+    )])
+
+    def fake_exec(self):
+        self.total_satellites.setValue(4)
+        self.num_planes.setValue(2)
+        self.phasing_factor.setValue(0)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(WalkerConstellationDialog, "exec", fake_exec)
+    changed_calls = []
+    lw.changed.connect(lambda: changed_calls.append(1))
+
+    lw._on_generate_constellation()
+
+    configs = lw.to_list()
+    assert len(configs) == 1 + 4  # original template + 4 generated
+    generated = [c for c in configs if c.name != "template-sat"]
+    assert len(generated) == 4
+    assert all(c.dry_mass_kg == 42.0 for c in generated)  # cloned from the template
+    assert len(changed_calls) == 1
+
+
+def test_list_widget_generate_constellation_uses_default_template_when_list_empty(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.constellation_dialog import WalkerConstellationDialog
+    from missionstudio.gui.spacecraft_editor import SpacecraftListWidget
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+
+    def fake_exec(self):
+        self.total_satellites.setValue(2)
+        self.num_planes.setValue(1)
+        self.phasing_factor.setValue(0)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(WalkerConstellationDialog, "exec", fake_exec)
+    lw._on_generate_constellation()
+    assert len(lw.to_list()) == 2
+
+
+def test_list_widget_generate_constellation_reports_name_collision(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from missionstudio.gui.constellation_dialog import WalkerConstellationDialog
+    from missionstudio.gui.spacecraft_editor import SpacecraftListWidget
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+    # This name collides with the first satellite generate_walker_constellation
+    # would produce for a 1-satellite/1-plane request with the default prefix.
+    lw.from_list([SpacecraftConfig(
+        name="sat-01-01",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+    )])
+
+    def fake_exec(self):
+        self.total_satellites.setValue(1)
+        self.num_planes.setValue(1)
+        self.phasing_factor.setValue(0)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(WalkerConstellationDialog, "exec", fake_exec)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
+
+    lw._on_generate_constellation()
+    assert len(lw.to_list()) == 1  # nothing added
+    assert len(critical_calls) == 1
+
+
+def test_list_widget_generate_constellation_cancel_does_nothing(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.constellation_dialog import WalkerConstellationDialog
+    from missionstudio.gui.spacecraft_editor import SpacecraftListWidget
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+    monkeypatch.setattr(WalkerConstellationDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+    lw._on_generate_constellation()
+    assert lw.to_list() == []
+
+
+def test_list_widget_uses_central_body_provider(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.constellation_dialog import WalkerConstellationDialog
+    from missionstudio.gui.spacecraft_editor import SpacecraftListWidget
+
+    lw = SpacecraftListWidget()
+    qtbot.addWidget(lw)
+    lw.set_central_body_provider(lambda: "mars")
+
+    captured = {}
+
+    def fake_exec(self):
+        captured["central_body"] = self.to_request().central_body
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(WalkerConstellationDialog, "exec", fake_exec)
+    lw._on_generate_constellation()
+    assert captured["central_body"] == "mars"

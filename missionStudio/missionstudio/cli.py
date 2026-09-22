@@ -37,6 +37,8 @@ Usage::
     missionstudio monte-carlo scenario.json --archive-dir mc_results/
     missionstudio kernels-status
     missionstudio spaceweather-resolve scenario.json
+    missionstudio generate-constellation template.json --out constellation.json \
+        --total-satellites 12 --planes 3 --phasing-factor 1 --altitude-km 780 --inclination-deg 86.4
     missionstudio gui
 """
 
@@ -205,6 +207,57 @@ def cmd_spaceweather_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate_constellation(args: argparse.Namespace) -> int:
+    try:
+        scenario = load_scenario(args.scenario)
+    except ScenarioValidationError as exc:
+        print(f"INVALID: {exc}", file=sys.stderr)
+        return 1
+
+    if args.template_spacecraft is not None:
+        template = next((sc for sc in scenario.spacecraft if sc.name == args.template_spacecraft), None)
+        if template is None:
+            print(f"ERROR: no spacecraft named {args.template_spacecraft!r} in {args.scenario} -- "
+                  f"this scenario has: {[sc.name for sc in scenario.spacecraft]}", file=sys.stderr)
+            return 1
+    elif len(scenario.spacecraft) == 1:
+        template = scenario.spacecraft[0]
+    else:
+        print(f"ERROR: {args.scenario} has {len(scenario.spacecraft)} spacecraft -- pass "
+              "--template-spacecraft NAME to say which one to clone into the constellation", file=sys.stderr)
+        return 1
+
+    from .engine.constellation import WalkerConstellationRequest, generate_walker_constellation
+
+    # central_body always comes from the scenario itself, never an
+    # independent flag -- see gui.constellation_dialog's docstring for why
+    # a mismatch there would silently produce satellites at the wrong
+    # altitude relative to whatever body actually gets simulated.
+    request = WalkerConstellationRequest(
+        total_satellites=args.total_satellites, num_planes=args.planes, phasing_factor=args.phasing_factor,
+        altitude_km=args.altitude_km, inclination_deg=args.inclination_deg,
+        central_body=scenario.gravity.central_body, eccentricity=args.eccentricity,
+        arg_periapsis_deg=args.arg_periapsis_deg, pattern=args.pattern,
+        raan_offset_deg=args.raan_offset_deg, name_prefix=args.name_prefix,
+    )
+    try:
+        generated = generate_walker_constellation(request, template)
+    except ScenarioValidationError as exc:
+        print(f"INVALID: {exc}", file=sys.stderr)
+        return 1
+
+    scenario.spacecraft = (scenario.spacecraft + generated) if args.append else generated
+    try:
+        scenario.save(args.out)
+    except ScenarioValidationError as exc:
+        print(f"INVALID: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Generated {len(generated)} spacecraft ({args.planes} plane(s), {request.pattern} pattern) "
+          f"from template {template.name!r}, wrote {len(scenario.spacecraft)}-spacecraft scenario to {args.out}")
+    return 0
+
+
 def cmd_gui(args: argparse.Namespace) -> int:
     try:
         from .gui.app import main as gui_main
@@ -252,6 +305,33 @@ def build_parser() -> argparse.ArgumentParser:
                                   help="resolve space weather for a scenario without running it (no Basilisk needed)")
     p_sw.add_argument("scenario", type=Path)
     p_sw.set_defaults(func=cmd_spaceweather_resolve)
+
+    p_const = subparsers.add_parser(
+        "generate-constellation",
+        help="generate a Walker-pattern constellation from a template scenario (no Basilisk needed)",
+    )
+    p_const.add_argument("scenario", type=Path, help="scenario file to load the template spacecraft/gravity from")
+    p_const.add_argument("--out", type=Path, required=True, help="scenario file to write the result to")
+    p_const.add_argument("--template-spacecraft", type=str, default=None,
+                          help="name of the spacecraft to clone into the constellation (required if the input "
+                               "scenario has more than one spacecraft)")
+    p_const.add_argument("--total-satellites", type=int, required=True, help="T -- total satellite count")
+    p_const.add_argument("--planes", type=int, required=True, help="P -- number of orbital planes")
+    p_const.add_argument("--phasing-factor", type=int, required=True, help="F -- Walker phasing factor, 0 <= F < P")
+    p_const.add_argument("--altitude-km", type=float, required=True, help="circular-orbit altitude [km]")
+    p_const.add_argument("--inclination-deg", type=float, required=True, help="orbit inclination [deg]")
+    p_const.add_argument("--pattern", choices=["delta", "star"], default="delta",
+                          help="Walker-Delta (RAAN spread over 360deg) or Walker-Star (180deg); default delta")
+    p_const.add_argument("--eccentricity", type=float, default=0.0)
+    p_const.add_argument("--arg-periapsis-deg", type=float, default=0.0)
+    p_const.add_argument("--raan-offset-deg", type=float, default=0.0,
+                          help="rotates the whole constellation's RAAN reference")
+    p_const.add_argument("--name-prefix", type=str, default="sat",
+                          help="generated spacecraft are named '{prefix}-{plane:02d}-{slot:02d}'")
+    p_const.add_argument("--append", action="store_true",
+                          help="add the generated satellites to the template scenario's existing spacecraft "
+                               "instead of replacing them")
+    p_const.set_defaults(func=cmd_generate_constellation)
 
     p_gui = subparsers.add_parser("gui", help="launch the PySide6 GUI shell")
     p_gui.set_defaults(func=cmd_gui)

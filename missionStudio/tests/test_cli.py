@@ -68,6 +68,123 @@ def test_spaceweather_resolve_reports_resolution(tmp_path, capsys):
     assert "Synthetic:" in out
 
 
+def test_generate_constellation_writes_new_scenario(tmp_path, capsys):
+    path = tmp_path / "template.json"
+    _write_scenario(path)
+    out_path = tmp_path / "constellation.json"
+
+    rc = cli.main([
+        "generate-constellation", str(path), "--out", str(out_path),
+        "--total-satellites", "6", "--planes", "2", "--phasing-factor", "1",
+        "--altitude-km", "700", "--inclination-deg", "98.0",
+    ])
+    assert rc == 0
+    assert "Generated 6 spacecraft" in capsys.readouterr().out
+
+    from missionstudio.schema import load_scenario
+
+    generated = load_scenario(out_path)
+    assert len(generated.spacecraft) == 6
+    assert len({sc.name for sc in generated.spacecraft}) == 6
+    assert all(sc.orbit.type == "classical_elements" for sc in generated.spacecraft)
+
+
+def test_generate_constellation_append_keeps_existing_spacecraft(tmp_path, capsys):
+    path = tmp_path / "template.json"
+    _write_scenario(path)  # one spacecraft named "sat-1"
+    out_path = tmp_path / "constellation.json"
+
+    rc = cli.main([
+        "generate-constellation", str(path), "--out", str(out_path), "--append",
+        "--total-satellites", "2", "--planes", "1", "--phasing-factor", "0",
+        "--altitude-km", "700", "--inclination-deg", "0.0",
+    ])
+    assert rc == 0
+
+    from missionstudio.schema import load_scenario
+
+    generated = load_scenario(out_path)
+    assert len(generated.spacecraft) == 3  # original sat-1 + 2 generated
+    assert "sat-1" in {sc.name for sc in generated.spacecraft}
+
+
+def _write_scenario_with_spacecraft(path, spacecraft):
+    from missionstudio.schema import GravityConfig, Scenario
+
+    scenario = Scenario(name="cli test scenario", epoch_utc="2030-01-01T00:00:00",
+                         gravity=GravityConfig(central_body="earth", central_body_degree=0), spacecraft=spacecraft)
+    scenario.save(path)
+    return scenario
+
+
+def test_generate_constellation_requires_template_spacecraft_flag_when_ambiguous(tmp_path, capsys):
+    from missionstudio.schema import OrbitIC, SpacecraftConfig
+
+    path = tmp_path / "template.json"
+    _write_scenario_with_spacecraft(path, [
+        SpacecraftConfig(name="a", orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0],
+                                                  velocity_km_s=[0, 7.5, 0])),
+        SpacecraftConfig(name="b", orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0],
+                                                  velocity_km_s=[0, 7.5, 0])),
+    ])
+    rc = cli.main([
+        "generate-constellation", str(path), "--out", str(tmp_path / "out.json"),
+        "--total-satellites", "2", "--planes", "1", "--phasing-factor", "0",
+        "--altitude-km", "700", "--inclination-deg", "0.0",
+    ])
+    assert rc == 1
+    assert "--template-spacecraft" in capsys.readouterr().err
+
+
+def test_generate_constellation_uses_named_template_spacecraft(tmp_path, capsys):
+    from missionstudio.schema import OrbitIC, SpacecraftConfig
+
+    path = tmp_path / "template.json"
+    _write_scenario_with_spacecraft(path, [
+        SpacecraftConfig(name="a", dry_mass_kg=10.0,
+                          orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0])),
+        SpacecraftConfig(name="b", dry_mass_kg=99.0,
+                          orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0])),
+    ])
+    out_path = tmp_path / "out.json"
+    rc = cli.main([
+        "generate-constellation", str(path), "--out", str(out_path), "--template-spacecraft", "b",
+        "--total-satellites", "2", "--planes", "1", "--phasing-factor", "0",
+        "--altitude-km", "700", "--inclination-deg", "0.0",
+    ])
+    assert rc == 0
+
+    from missionstudio.schema import load_scenario
+
+    generated = load_scenario(out_path)
+    assert all(sc.dry_mass_kg == 99.0 for sc in generated.spacecraft)
+
+
+def test_generate_constellation_rejects_unknown_template_spacecraft_name(tmp_path, capsys):
+    path = tmp_path / "template.json"
+    _write_scenario(path)
+    rc = cli.main([
+        "generate-constellation", str(path), "--out", str(tmp_path / "out.json"),
+        "--template-spacecraft", "does-not-exist",
+        "--total-satellites", "2", "--planes", "1", "--phasing-factor", "0",
+        "--altitude-km", "700", "--inclination-deg", "0.0",
+    ])
+    assert rc == 1
+    assert "does-not-exist" in capsys.readouterr().err
+
+
+def test_generate_constellation_rejects_invalid_walker_parameters(tmp_path, capsys):
+    path = tmp_path / "template.json"
+    _write_scenario(path)
+    rc = cli.main([
+        "generate-constellation", str(path), "--out", str(tmp_path / "out.json"),
+        "--total-satellites", "10", "--planes", "3", "--phasing-factor", "0",  # 10 not divisible by 3
+        "--altitude-km", "700", "--inclination-deg", "0.0",
+    ])
+    assert rc == 1
+    assert "INVALID" in capsys.readouterr().err
+
+
 @pytest.mark.skipif(_BASILISK_AVAILABLE, reason="this test's premise is specifically that Basilisk is unavailable")
 def test_run_without_basilisk_reports_clear_error(tmp_path, capsys):
     path = tmp_path / "scenario.json"

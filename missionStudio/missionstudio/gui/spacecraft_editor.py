@@ -381,6 +381,12 @@ class SpacecraftListWidget(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._configs: list[SpacecraftConfig] = []
+        # Set by the owning ScenarioEditorWidget (see set_central_body_provider)
+        # so "Generate Walker constellation..." always uses this scenario's
+        # ACTUAL current central body, never an independently-selectable one
+        # that could silently drift out of sync with it. Falls back to
+        # "earth" when unset (e.g. this widget used standalone in a test).
+        self._central_body_provider = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -391,15 +397,26 @@ class SpacecraftListWidget(QWidget):
         self.add_button = QPushButton("Add...")
         self.edit_button = QPushButton("Edit...")
         self.remove_button = QPushButton("Remove")
+        self.generate_constellation_button = QPushButton("Generate Walker constellation...")
         button_row.addWidget(self.add_button)
         button_row.addWidget(self.edit_button)
         button_row.addWidget(self.remove_button)
+        button_row.addWidget(self.generate_constellation_button)
         layout.addLayout(button_row)
 
         self.add_button.clicked.connect(self._on_add)
         self.edit_button.clicked.connect(self._on_edit)
         self.remove_button.clicked.connect(self._on_remove)
+        self.generate_constellation_button.clicked.connect(self._on_generate_constellation)
         self.list_widget.itemDoubleClicked.connect(lambda _item: self._on_edit())
+
+    def set_central_body_provider(self, provider) -> None:
+        """``provider`` is a zero-argument callable returning the
+        scenario's current central-body name, e.g.
+        ``lambda: self.central_body_combo.currentText()`` from
+        ``ScenarioEditorWidget``.
+        """
+        self._central_body_provider = provider
 
     def _refresh_list(self) -> None:
         self.list_widget.clear()
@@ -447,6 +464,44 @@ class SpacecraftListWidget(QWidget):
         if row < 0:
             return
         del self._configs[row]
+        self._refresh_list()
+        self.changed.emit()
+
+    def _on_generate_constellation(self) -> None:
+        from ..engine.constellation import generate_walker_constellation
+        from ..schema.scenario import OrbitIC
+        from .constellation_dialog import WalkerConstellationDialog
+
+        central_body = self._central_body_provider() if self._central_body_provider else "earth"
+        dialog = WalkerConstellationDialog([c.name for c in self._configs], central_body=central_body, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        request = dialog.to_request()
+        template_name = dialog.selected_template_name()
+        if template_name is not None:
+            template = next(c for c in self._configs if c.name == template_name)
+        else:
+            template = SpacecraftConfig(name="template", orbit=OrbitIC(
+                type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.0,
+                inclination_deg=0.0, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=0.0,
+            ))
+
+        try:
+            generated = generate_walker_constellation(request, template)
+        except ScenarioValidationError as exc:
+            QMessageBox.critical(self, "Cannot generate constellation", str(exc))
+            return
+
+        existing_names = {c.name for c in self._configs}
+        colliding = [s.name for s in generated if s.name in existing_names]
+        if colliding:
+            QMessageBox.critical(self, "Name collision",
+                                  f"Generated spacecraft name(s) already exist in this scenario: {colliding}. "
+                                  "Change the name prefix and try again.")
+            return
+
+        self._configs.extend(generated)
         self._refresh_list()
         self.changed.emit()
 
