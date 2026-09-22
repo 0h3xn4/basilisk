@@ -270,6 +270,15 @@ class SimulationService:
         self._access_recorders: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> recorder
         self._access_out_msgs: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> accessOutMsg, for engine.vizard
         self._eclipse_object = None  # Phase 4: only built if some spacecraft has power or station_keeping configured
+        # Phase 4: retains the vizInterface module enable_vizard() returns
+        # (and, via it, every custom bridge SysModel that module registers
+        # on the task -- see engine.vizard's own comment on why those need
+        # a persistent Python reference beyond just being task-registered).
+        # Previously this return value was discarded entirely, which let
+        # those bridges be garbage-collected while still C++-task
+        # -registered -- undefined behavior that could (and did) surface
+        # as an unrelated-looking crash much later.
+        self._viz = None
 
     @property
     def spacecraft_handles(self) -> Dict[str, "_SpacecraftHandle"]:
@@ -631,7 +640,7 @@ class SimulationService:
                 if handle.station_keeping_controller is not None
             }
             try:
-                vizard.enable_vizard(
+                self._viz = vizard.enable_vizard(
                     self.scSim, dyn_task_name, sc_objects_in_order, self.vizard_request,
                     rw_effectors_by_spacecraft=rw_effectors_in_order,
                     ground_stations=self._ground_locations, central_body_name=gravity.central_body,

@@ -141,6 +141,31 @@ wiring matches the field-level pattern in a second real shipped example
 own, not copied from an example verbatim -- like the camera/orbit-line
 work above, none of this was exercised against a real running Vizard
 instance (no display in this development sandbox).
+
+**Real bug found on first actual run** (reported: ``basic_string::_M_create``,
+a C++ ``std::length_error``, thrown well after setup completed, during an
+otherwise-unrelated-looking string operation): every
+``_AccessIndicatorBridge`` instance this function created was referenced
+ONLY by a local loop variable -- ``engine.service`` discarded this
+function's return value entirely, so nothing kept those Python objects
+(or ``viz`` itself) alive past this function returning. Unlike the plain
+-data ``vizInterface`` structs (``GenericStorage``/``GenericSensor``,
+whose relevant state ``enableUnityVisualization()`` copies into its own
+C++ containers), ``_AccessIndicatorBridge`` is a custom Python
+``SysModel`` with virtual ``UpdateState``/``Reset`` methods Basilisk calls
+back into via a SWIG director -- letting the Python side of that get
+garbage-collected while the C++ side is still task-registered is
+undefined behavior, and heap corruption manifesting later as an unrelated
+string-construction crash is a textbook symptom. Every OTHER custom
+Python ``SysModel`` in this codebase (this module's own
+``StationKeepingController``/``PhasingKeepingController``,
+``../missionAnalysis``'s ``PowerLoadGate``/``InstrumentEclipseGate``) is
+deliberately kept alive by its caller storing the returned object
+somewhere persistent; this bridge class was the one place that pattern
+was broken. Fixed by attaching every bridge instance to ``viz`` itself
+(``viz._missionstudio_access_indicator_bridges``) and having
+``engine.service`` retain the returned ``viz`` (previously discarded) for
+the ``SimulationService`` instance's lifetime.
 """
 
 from __future__ import annotations
@@ -255,6 +280,17 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
     generic_sensor_list: List[Optional[list]] = []
     spacecraft_with_storage_panel: List[str] = []
     spacecraft_with_sensor_labels: List[str] = []
+    # _AccessIndicatorBridge instances MUST be kept alive by a persistent
+    # Python reference for as long as they're registered on scSim's task --
+    # they have virtual UpdateState/Reset methods Basilisk calls back into
+    # (a SWIG director), unlike the plain-data vizInterface structs below
+    # (GenericStorage/GenericSensor), whose relevant state is copied into
+    # Basilisk's own C++ containers by enableUnityVisualization() and so
+    # don't need this. A Python object garbage-collected while its C++
+    # counterpart is still task-registered is undefined behavior -- see
+    # where this list is attached to ``viz`` below, and
+    # ``engine.service``'s own retention of the returned ``viz``.
+    access_indicator_bridges: List[object] = []
 
     for sc_object in sc_objects:
         sc_name = sc_object.ModelTag
@@ -295,6 +331,7 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
                 continue
             bridge = _AccessIndicatorBridge(f"{sc_name}_{gs_name}_accessIndicator", access_out_msg)
             scSim.AddModelToTask(task_name, bridge)
+            access_indicator_bridges.append(bridge)
 
             cmd_reader = messaging.DeviceCmdMsgReader()
             cmd_reader.subscribeTo(bridge.cmdOutMsg)
@@ -323,6 +360,10 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
         )
     except Exception as exc:  # noqa: BLE001 -- report ANY Vizard setup failure with a specific message
         raise VizardError(f"vizSupport.enableUnityVisualization failed: {exc}") from exc
+
+    # Keep the access-indicator bridges alive for as long as ``viz`` is --
+    # see the comment where access_indicator_bridges is created above.
+    viz._missionstudio_access_indicator_bridges = access_indicator_bridges
 
     # See module docstring: without these, Vizard falls back to its own
     # default (spacecraft-locked, no orbit trace) instead of an
