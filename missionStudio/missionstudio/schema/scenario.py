@@ -223,6 +223,70 @@ class ActuatorConfig:
 
 
 @dataclass
+class PowerConfig:
+    """A spacecraft's power budget: a body-fixed solar panel, a constant
+    "bus" housekeeping load, and a battery -- Basilisk's real
+    ``simpleSolarPanel``/``simplePowerSink``/``simpleBattery`` modules
+    (see ``engine.service``, ported from the same wiring pattern
+    ``../missionAnalysis/power_budget.py`` already uses), not an
+    analytical estimate: generated power depends on the scenario's actual
+    simulated attitude (panel-normal-to-sun angle) and eclipse state, so
+    this needs a spacecraft's orbit to actually pass through sunlight and
+    shadow -- there is no separate "power budget mode" to turn on beyond
+    setting this field. ``None`` (the default) means no power budget is
+    simulated for that spacecraft at all, matching every scenario written
+    before this field existed.
+    """
+
+    panel_area_m2: float  # [m^2] total deployed solar panel area
+    panel_efficiency: float  # [-] fraction of incident solar power converted to electrical power, 0 < x <= 1
+    panel_normal_b: list = field(default_factory=lambda: [0.0, 0.0, 1.0])  # body-frame unit vector
+    bus_idle_power_w: float = 0.0  # [W] constant always-on avionics/thermal/ADCS housekeeping load
+    battery_capacity_wh: float = 100.0  # [W*hr]
+    battery_initial_soc: float = 1.0  # [-] initial state of charge, fraction of capacity, 0 <= x <= 1
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(self.panel_area_m2 > 0, f"{spacecraft_name}: power.panel_area_m2 must be > 0")
+        _require(0.0 < self.panel_efficiency <= 1.0,
+                  f"{spacecraft_name}: power.panel_efficiency must be in (0, 1]")
+        _require(len(self.panel_normal_b) == 3,
+                  f"{spacecraft_name}: power.panel_normal_b must be a 3-element [x, y, z] list")
+        _require(self.bus_idle_power_w >= 0, f"{spacecraft_name}: power.bus_idle_power_w must be >= 0")
+        _require(self.battery_capacity_wh > 0, f"{spacecraft_name}: power.battery_capacity_wh must be > 0")
+        _require(0.0 <= self.battery_initial_soc <= 1.0,
+                  f"{spacecraft_name}: power.battery_initial_soc must be in [0, 1]")
+
+
+@dataclass
+class RFLinkConfig:
+    """A spacecraft's downlink transmitter, for a reported link-margin
+    ESTIMATE only (``engine.link_budget``) -- a simplified free-space-path
+    -loss Eb/N0 budget (no atmosphere/rain/pointing-loss/coding-gain
+    terms), ported directly from ``../missionAnalysis``'s
+    ``run_constellation_mission.py::_rf_link_margin_db()``. It is evaluated
+    against the real simulated slant range from ``engine.service``'s
+    ground-station access analysis, but it does NOT feed back into the
+    simulated physics anywhere (no data-rate/duty-cycle simulation) --
+    see :class:`PowerConfig` for what IS actually simulated. ``None`` (the
+    default) means no link margin is computed for that spacecraft.
+    """
+
+    tx_power_w: float  # [W] downlink transmitter RF output power
+    frequency_hz: float  # [Hz] downlink carrier frequency
+    data_rate_bps: float  # [bit/s] downlink data rate
+    tx_antenna_gain_dbi: float = 0.0  # [dBi] spacecraft downlink antenna gain
+    implementation_loss_db: float = 2.0  # [dB] combined pointing/polarization/implementation loss
+    required_ebno_db: float = 6.0  # [dB] required Eb/N0 for the assumed modulation/coding
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(self.tx_power_w > 0, f"{spacecraft_name}: rf_link.tx_power_w must be > 0")
+        _require(self.frequency_hz > 0, f"{spacecraft_name}: rf_link.frequency_hz must be > 0")
+        _require(self.data_rate_bps > 0, f"{spacecraft_name}: rf_link.data_rate_bps must be > 0")
+        _require(self.implementation_loss_db >= 0,
+                  f"{spacecraft_name}: rf_link.implementation_loss_db must be >= 0")
+
+
+@dataclass
 class SpacecraftConfig:
     name: str
     orbit: OrbitIC
@@ -255,6 +319,9 @@ class SpacecraftConfig:
     # {"K": ..., "P": ...} MRP feedback control gains; see
     # engine.fsw.DEFAULT_MRP_GAINS for the defaults used when a key is absent.
     control_params: dict = field(default_factory=dict)
+
+    power: Optional[PowerConfig] = None
+    rf_link: Optional[RFLinkConfig] = None
 
     def validate(self) -> None:
         _require(bool(self.name), "spacecraft.name must not be empty")
@@ -301,6 +368,11 @@ class SpacecraftConfig:
                           f"{self.name}: reaction_wheel {actuator.name!r} needs params['gsHat_B'] "
                           "as a 3-element body-frame spin-axis unit vector")
 
+        if self.power is not None:
+            self.power.validate(self.name)
+        if self.rf_link is not None:
+            self.rf_link.validate(self.name)
+
 
 @dataclass
 class GravityConfig:
@@ -324,12 +396,18 @@ class GroundStationConfig:
     longitude_deg: float
     altitude_m: float = 0.0
     min_elevation_deg: float = 10.0
+    # Receive-side link-budget parameters -- only meaningful for a
+    # spacecraft that also has RFLinkConfig set (see engine.link_budget);
+    # harmless, unused defaults otherwise.
+    rx_antenna_gain_dbi: float = 0.0  # [dBi] ground station receive antenna gain
+    system_noise_temp_k: float = 290.0  # [K] ground receiver system noise temperature
 
     def validate(self) -> None:
         _require(bool(self.name), "ground_station.name must not be empty")
         _require(-90.0 <= self.latitude_deg <= 90.0, f"{self.name}: latitude_deg must be in [-90, 90]")
         _require(-180.0 <= self.longitude_deg <= 180.0, f"{self.name}: longitude_deg must be in [-180, 180]")
         _require(0.0 <= self.min_elevation_deg < 90.0, f"{self.name}: min_elevation_deg must be in [0, 90)")
+        _require(self.system_noise_temp_k > 0, f"{self.name}: system_noise_temp_k must be > 0")
 
 
 @dataclass
@@ -508,7 +586,12 @@ class Scenario:
             orbit = OrbitIC(**sc.pop("orbit"))
             sensors = [SensorConfig(**s) for s in sc.pop("sensors", [])]
             actuators = [ActuatorConfig(**a) for a in sc.pop("actuators", [])]
-            spacecraft.append(SpacecraftConfig(orbit=orbit, sensors=sensors, actuators=actuators, **sc))
+            power_data = sc.pop("power", None)
+            power = PowerConfig(**power_data) if power_data is not None else None
+            rf_link_data = sc.pop("rf_link", None)
+            rf_link = RFLinkConfig(**rf_link_data) if rf_link_data is not None else None
+            spacecraft.append(SpacecraftConfig(orbit=orbit, sensors=sensors, actuators=actuators,
+                                                power=power, rf_link=rf_link, **sc))
 
         return Scenario(
             gravity=gravity, sim_settings=sim_settings, space_weather=space_weather,

@@ -1,4 +1,4 @@
-# missionStudio (Phase 3)
+# missionStudio (Phase 4)
 
 A standalone, GUI-based mission-analysis application for Linux, using the
 Basilisk astrodynamics framework (AVS Lab, University of Colorado Boulder)
@@ -7,10 +7,14 @@ every capability maps to a specific Basilisk module (see the capability
 matrix delivered earlier in this project's history) or is explicitly
 flagged as custom/out-of-scope, never fabricated.
 
-This is **Phase 3** of the roadmap: Monte Carlo + ground-station access
-analysis + packaging, on top of Phase 0's backend foundations, Phase 1's
-PySide6 GUI/CLI, and Phase 2's attitude/sensors/actuators/Vizard work. See
-"What Phase 3 adds" below for exactly what that means.
+This is **Phase 4** of the roadmap: usability fixes and mission-analysis
+outputs driven directly by real GUI usage feedback -- a more informative
+Vizard default view, live run/Monte Carlo progress feedback, mean-anomaly
+orbit input, and real power-budget/link-budget results -- on top of Phase
+0's backend foundations, Phase 1's PySide6 GUI/CLI, Phase 2's
+attitude/sensors/actuators/Vizard work, and Phase 3's Monte Carlo +
+ground-station access analysis + packaging. See "What Phase 4 adds" below
+for exactly what that means.
 
 ## Getting started
 
@@ -358,6 +362,66 @@ regression test.
   missing scenario data file in the wheel, and a `./build/`-directory
   import-shadowing bug in repeated builds).
 
+## What Phase 4 adds
+
+Driven directly by feedback from actually using the Phase 3 GUI:
+
+* **Vizard's default view is now Earth-centered with the orbit visible**,
+  not locked onto the spacecraft with no context. `engine.vizard`'s
+  `VizardRequest` gained `camera_target` (defaults to the scenario's
+  central body) and `show_orbit_lines` (osculating + true trajectory
+  lines, on by default), set via `VizSettings.mainCameraTarget`/
+  `orbitLinesOn`/`trueTrajectoryLinesOn` -- `enableUnityVisualization()`
+  itself doesn't expose these. Configurable from the GUI's Vizard dialog
+  or `--vizard-camera-target`/`--vizard-no-orbit-lines` (CLI).
+* **Live feedback while a run is in progress.** `gui.main_window` used to
+  show only a static "Running..." status-bar string with no other
+  indication anything was happening. Run Simulation and Run Monte Carlo
+  now show a busy indicator (indeterminate progress bar + elapsed-time
+  label) and disable every Run-menu action until the worker finishes --
+  Basilisk exposes no per-step/per-run progress callback to drive a real
+  percentage, so this is deliberately indeterminate rather than a
+  fabricated number.
+* **Mean anomaly as a classical-elements orbit input.** `OrbitIC` gained
+  `anomaly_type` (`"true"`/`"mean"`, default `"true"` for backward
+  compatibility) and `mean_anomaly_deg`; `engine.service` converts mean to
+  true anomaly via Kepler's equation (`orbitalMotion.M2E`/`E2f`) before
+  calling `elem2rv`, which only accepts true anomaly. The GUI orbit editor
+  exposes this as a combo box next to the angle field.
+* **Real power budget.** `schema.scenario.PowerConfig` (optional, per
+  spacecraft) wires Basilisk's actual `simpleSolarPanel`/
+  `simplePowerSink`/`simpleBattery`/`eclipse` modules into
+  `engine.service` -- the same pattern `../missionAnalysis/power_budget.py`
+  already uses -- so generated power depends on the real simulated
+  attitude (panel-normal-to-sun angle) and eclipse state, not a flat duty
+  cycle. `ResultSet` gains `{spacecraft}.battery_charge` [W\*hr] and
+  `{spacecraft}.battery_net_power` [W] per spacecraft that opts in; no
+  per-subsystem (instrument/downlink) load gating is modeled yet, only a
+  constant bus load, since missionStudio has no EO-payload data model to
+  gate against (unlike `../missionAnalysis`).
+* **Downlink RF link-margin estimate.** `schema.scenario.RFLinkConfig`
+  (optional, per spacecraft) plus two new `GroundStationConfig` fields
+  (`rx_antenna_gain_dbi`, `system_noise_temp_k`) feed the new
+  `engine.link_budget` module -- a simplified free-space-path-loss Eb/N0
+  budget ported directly from `../missionAnalysis`'s
+  `_rf_link_margin_db()`. It is evaluated against the REAL simulated slant
+  range from Phase 3's access analysis (not a worst-case estimate), giving
+  `{station}.access_to_{spacecraft}.link_margin_db` in `ResultSet` --
+  `NaN` outside access windows, since there's no link (and so no
+  meaningful margin) when there's no access. Like the missionAnalysis
+  original, this is a reported ESTIMATE only (no atmosphere/rain/
+  pointing-loss/coding-gain terms) and does not feed back into simulated
+  physics anywhere.
+
+Both `PowerConfig` and `RFLinkConfig` default to `None` (off) on every
+existing scenario -- turning either on is the only input needed; the GUI's
+new "Power / link budget" spacecraft-editor tab and the ground-station
+editor's two new fields are pre-filled with reasonable placeholder
+defaults, matching this phase's "user only supplies numbers, the tool does
+the rest" design goal. Orbit-maintenance/ΔV-fuel bookkeeping, constellation
+design, and richer Vizard live-data panels are scoped but not yet built --
+see "What's next" below.
+
 ## Repository layout
 
 ```
@@ -629,18 +693,32 @@ specifically:
 
 ## What's next
 
-This completes the three phases originally scoped for this project
-(Phase 0: backend foundations; Phase 1: GUI shell + CLI; Phase 2:
-attitude/sensors/actuators/Vizard; Phase 3: Monte Carlo + access analysis
-+ packaging). The "Known limitations" list above is the honest map of
-what's left: a handful of schema-valid-but-not-wired-up options (celestial
--body `locationPointing` targets, thrusters, magnetic torque rods,
-non-Earth spherical harmonics/magnetometer), navigation error modeling,
-richer Monte Carlo retention, and -- the one requiring something this
-development sandbox's network policy specifically blocks -- a full
-simulation run past SPICE kernel loading, to get the first true
-end-to-end confirmation (including `test_two_body_validation.py`'s
-analytical check) on top of everything up to that point already being
-verified against a real Basilisk install. None of it is blocked on a
-design decision; each item is scoped and documented at its own call site
-for whoever picks it up next.
+Phase 4 (see "What Phase 4 adds" above) responded to the first round of
+real GUI usage feedback. Still open from that same feedback, scoped but
+not yet built:
+
+* **Orbit-maintenance / station-keeping automation**, with ΔV and
+  propellant-mass bookkeeping reported per spacecraft -- `../missionAnalysis`
+  has working station-keeping/phasing controller logic
+  (`constellation_controllers.py`) that can be adapted rather than built
+  from scratch.
+* **A constellation design tool** ("user supplies the requirement, the
+  tool designs the constellation" -- Walker/streets-of-coverage-style
+  geometry generation), also with prior art in `../missionAnalysis`.
+* **Richer, more understandable Vizard live-data panels** beyond the
+  Phase 4 default-camera/orbit-line fix -- e.g. clearer on-screen
+  power/link-margin/access-window readouts while a live-streamed run is in
+  progress.
+
+Beyond that, the "Known limitations" list above is the rest of the honest
+map: a handful of schema-valid-but-not-wired-up options (celestial-body
+`locationPointing` targets, thrusters, magnetic torque rods, non-Earth
+spherical harmonics/magnetometer), navigation error modeling, richer Monte
+Carlo retention, and -- the one requiring something this development
+sandbox's network policy specifically blocks -- a full simulation run past
+SPICE kernel loading, to get the first true end-to-end confirmation
+(including `test_two_body_validation.py`'s analytical check, and the new
+Phase 4 power-budget/link-budget wiring) on top of everything up to that
+point already being verified against a real Basilisk install. None of it
+is blocked on a design decision; each item is scoped and documented at its
+own call site for whoever picks it up next.

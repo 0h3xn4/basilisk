@@ -158,7 +158,7 @@ from Basilisk.utilities import SimulationBaseClass, macros, orbitalMotion, simHe
 from Basilisk.utilities.supportDataTools.dataFetcher import DataFile, get_path
 
 from ..schema.scenario import OrbitIC, Scenario
-from . import fsw, kernels, time_system, vizard
+from . import fsw, kernels, link_budget, time_system, vizard
 from .results import ResultSet, TimeSeries
 from .vizard import VizardRequest
 
@@ -244,6 +244,7 @@ class _SpacecraftHandle:
     rw_speed_recorder: Optional[object] = None
     num_rw: int = 0
     sensor_recorders: Dict[str, object] = field(default_factory=dict)  # sensor.name -> (kind, recorder)
+    battery_recorder: Optional[object] = None  # Phase 4: only set if sc_config.power was configured
 
 
 class SimulationService:
@@ -263,6 +264,7 @@ class SimulationService:
         self._ground_locations: Dict[str, object] = {}
         self._mag_field_model = None
         self._access_recorders: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> recorder
+        self._eclipse_object = None  # Phase 4: only built if some spacecraft has power configured
 
     @property
     def spacecraft_handles(self) -> Dict[str, "_SpacecraftHandle"]:
@@ -374,8 +376,32 @@ class SimulationService:
                 self.scSim, dyn_task_name, central_body_state_out_msg, central_body.radEquator
             )
 
+        # Phase 4: power budget (schema.scenario.PowerConfig) needs the real
+        # eclipse shadow factor a solar panel's generated power depends on --
+        # built once, shared by every spacecraft that has power configured
+        # (see the per-spacecraft loop below), exactly like the ground
+        # locations/magnetic-field model above. Unlike the WMM magnetic-field
+        # model, eclipse geometry isn't Earth-specific, so this isn't gated
+        # on gravity.central_body == "earth".
+        needs_power = any(sc.power is not None for sc in scenario.spacecraft)
+        if needs_power:
+            if self._sun_state_out_msg is None:
+                raise SimulationServiceError(
+                    "a spacecraft has a power budget configured (power is not None), but 'sun' is not "
+                    "one of this scenario's SPICE-tracked bodies -- simpleSolarPanel needs a sun ephemeris "
+                    "to compute generated power. Add 'sun' to gravity.third_body_perturbers."
+                )
+            from Basilisk.simulation import eclipse
+
+            self._eclipse_object = eclipse.Eclipse()
+            self._eclipse_object.ModelTag = "eclipse"
+            self._eclipse_object.sunInMsg.subscribeTo(self._sun_state_out_msg)
+            self._eclipse_object.addPlanetToModel(central_body_state_out_msg)
+            self.scSim.AddModelToTask(dyn_task_name, self._eclipse_object, 370)
+
         sc_objects_in_order: List = []
         rw_effectors_in_order: List = []
+        eclipse_index = 0  # only incremented for spacecraft that actually have power configured
 
         for sc_config in scenario.spacecraft:
             sc_object = spacecraft.Spacecraft()
@@ -414,6 +440,51 @@ class SimulationService:
                 for sensor in sc_config.sensors:
                     handle.sensor_recorders[sensor.name] = (sensor.kind, sensor_out_msgs[sensor.name].recorder())
                     self.scSim.AddModelToTask(dyn_task_name, handle.sensor_recorders[sensor.name][1])
+
+            # -- Phase 4: power budget, independent of fsw_mode/sensors like
+            # the sensor block above -- a real simpleSolarPanel/battery, not
+            # an analytical estimate, so generated power tracks the actual
+            # simulated attitude (panel-normal-to-sun angle) and eclipse
+            # state (see schema.scenario.PowerConfig's docstring). Ported
+            # from ../missionAnalysis/power_budget.py's wiring pattern,
+            # trimmed to a constant bus load (no per-subsystem duty-cycle
+            # loads -- missionStudio has no EO-instrument/downlink data
+            # model to gate them against).
+            if sc_config.power is not None:
+                from Basilisk.simulation import simpleBattery, simplePowerSink, simpleSolarPanel
+
+                power_config = sc_config.power
+                self._eclipse_object.addSpacecraftToModel(sc_object.scStateOutMsg)
+
+                panel = simpleSolarPanel.SimpleSolarPanel()
+                panel.ModelTag = f"{sc_config.name}SolarPanel"
+                panel.setPanelParameters(power_config.panel_normal_b, power_config.panel_area_m2,
+                                          power_config.panel_efficiency)
+                panel.stateInMsg.subscribeTo(sc_object.scStateOutMsg)
+                panel.sunInMsg.subscribeTo(self._sun_state_out_msg)
+                panel.sunEclipseInMsg.subscribeTo(self._eclipse_object.eclipseOutMsgs[eclipse_index])
+                self.scSim.AddModelToTask(dyn_task_name, panel, 50)
+                eclipse_index += 1
+
+                bus_sink = simplePowerSink.SimplePowerSink()
+                bus_sink.ModelTag = f"{sc_config.name}BusPowerSink"
+                bus_sink.nodePowerOut = -power_config.bus_idle_power_w  # [W] static always-on load
+                self.scSim.AddModelToTask(dyn_task_name, bus_sink, 50)
+
+                battery = simpleBattery.SimpleBattery()
+                battery.ModelTag = f"{sc_config.name}Battery"
+                battery.storageCapacity = power_config.battery_capacity_wh * 3600.0  # [W*s]
+                battery.storedCharge_Init = (
+                    power_config.battery_initial_soc * power_config.battery_capacity_wh * 3600.0
+                )  # [W*s]
+                battery.addPowerNodeToModel(panel.nodePowerOutMsg)
+                battery.addPowerNodeToModel(bus_sink.nodePowerOutMsg)
+                # Lower priority than the panel/sink above (50) so it reads
+                # this tick's fresh generation/load values, not last tick's.
+                self.scSim.AddModelToTask(dyn_task_name, battery, 40)
+
+                handle.battery_recorder = battery.batPowerOutMsg.recorder()
+                self.scSim.AddModelToTask(dyn_task_name, handle.battery_recorder)
 
             if sc_config.actuators and sc_config.fsw_mode is None:
                 raise SimulationServiceError(
@@ -556,6 +627,13 @@ class SimulationService:
                 elif kind == "magnetometer":
                     result.add(TimeSeries(series_name, sensor_t_s, ("x", "y", "z"), recorder.tam_S, units="T"))
 
+            if handle.battery_recorder is not None:
+                battery_t_s = handle.battery_recorder.times() * macros.NANO2SEC
+                result.add(TimeSeries(f"{name}.battery_charge", battery_t_s, ("charge",),
+                                       np.asarray(handle.battery_recorder.storageLevel) / 3600.0, units="W*hr"))
+                result.add(TimeSeries(f"{name}.battery_net_power", battery_t_s, ("net_power",),
+                                       handle.battery_recorder.currentNetPower, units="W"))
+
         for (gs_name, sc_name), recorder in self._access_recorders.items():
             access_t_s = recorder.times() * macros.NANO2SEC
             series_name = f"{gs_name}.access_to_{sc_name}"
@@ -567,4 +645,17 @@ class SimulationService:
                                    recorder.elevation, units="rad"))
             result.add(TimeSeries(f"{series_name}.azimuth", access_t_s, ("azimuth",),
                                    recorder.azimuth, units="rad"))
+
+        # Phase 4: link-budget margin -- a reported estimate computed from
+        # the access-analysis series just added above (see
+        # engine.link_budget's module docstring for what this does and does
+        # NOT account for), only for spacecraft that opted in via
+        # schema.scenario.RFLinkConfig.
+        for sc_config in scenario.spacecraft:
+            if sc_config.rf_link is None:
+                continue
+            for gs_config in scenario.ground_stations:
+                result.add(link_budget.link_margin_series(
+                    result, gs_config.name, sc_config.name, sc_config.rf_link, gs_config
+                ))
         return result

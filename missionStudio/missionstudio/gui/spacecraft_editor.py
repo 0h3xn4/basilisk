@@ -63,6 +63,8 @@ from PySide6.QtWidgets import (
 from ..schema.scenario import (
     ActuatorConfig,
     OrbitIC,
+    PowerConfig,
+    RFLinkConfig,
     ScenarioValidationError,
     SensorConfig,
     SpacecraftConfig,
@@ -185,6 +187,70 @@ class SpacecraftEditorDialog(QDialog):
                 self.fsw_mode_combo.setCurrentIndex(index)
         tabs.addTab(fsw_tab, "Attitude control (FSW)")
 
+        # -- Power budget / RF link budget tab (Phase 4) ----------------------
+        # Both are OFF by default (unchecked group box) -- turning one on is
+        # the only input needed beyond the numbers themselves; engine.service
+        # (power) / engine.link_budget (RF) do the rest. See PowerConfig's
+        # and RFLinkConfig's docstrings for exactly what each does and
+        # doesn't affect.
+        power_tab = QWidget()
+        power_layout = QVBoxLayout(power_tab)
+
+        power0 = config.power if config else None
+        self.power_group = QGroupBox("Power budget (solar panel + battery)")
+        self.power_group.setCheckable(True)
+        self.power_group.setChecked(power0 is not None)
+        power_form = QFormLayout(self.power_group)
+        self.panel_area_m2 = _spin(0.001, 1.0e4, decimals=3, step=0.1,
+                                    value=power0.panel_area_m2 if power0 else 1.2)
+        self.panel_efficiency = _spin(0.001, 1.0, decimals=4, step=0.01,
+                                       value=power0.panel_efficiency if power0 else 0.29)
+        panel_normal0 = power0.panel_normal_b if power0 else [0.0, 0.0, 1.0]
+        self.panel_normal_x = _spin(-1.0, 1.0, decimals=4, step=0.1, value=panel_normal0[0])
+        self.panel_normal_y = _spin(-1.0, 1.0, decimals=4, step=0.1, value=panel_normal0[1])
+        self.panel_normal_z = _spin(-1.0, 1.0, decimals=4, step=0.1, value=panel_normal0[2])
+        self.bus_idle_power_w = _spin(0.0, 1.0e5, decimals=2, step=1.0,
+                                       value=power0.bus_idle_power_w if power0 else 25.0)
+        self.battery_capacity_wh = _spin(0.001, 1.0e6, decimals=2, step=10.0,
+                                          value=power0.battery_capacity_wh if power0 else 120.0)
+        self.battery_initial_soc = _spin(0.0, 1.0, decimals=4, step=0.05,
+                                          value=power0.battery_initial_soc if power0 else 0.9)
+        power_form.addRow("Panel area [m^2]", self.panel_area_m2)
+        power_form.addRow("Panel efficiency [-]", self.panel_efficiency)
+        power_form.addRow("Panel normal (body frame, 3 components)",
+                           _hbox(self.panel_normal_x, self.panel_normal_y, self.panel_normal_z))
+        power_form.addRow("Bus idle power [W]", self.bus_idle_power_w)
+        power_form.addRow("Battery capacity [W*hr]", self.battery_capacity_wh)
+        power_form.addRow("Battery initial state of charge [-]", self.battery_initial_soc)
+        power_layout.addWidget(self.power_group)
+
+        rf_link0 = config.rf_link if config else None
+        self.rf_link_group = QGroupBox("Downlink RF link budget (margin ESTIMATE only)")
+        self.rf_link_group.setCheckable(True)
+        self.rf_link_group.setChecked(rf_link0 is not None)
+        rf_form = QFormLayout(self.rf_link_group)
+        self.tx_power_w = _spin(0.001, 1.0e4, decimals=3, step=1.0, value=rf_link0.tx_power_w if rf_link0 else 15.0)
+        self.frequency_ghz = _spin(0.001, 1.0e3, decimals=6, step=0.1,
+                                    value=(rf_link0.frequency_hz / 1.0e9) if rf_link0 else 8.2)
+        self.data_rate_mbps = _spin(1.0e-6, 1.0e6, decimals=6, step=1.0,
+                                     value=(rf_link0.data_rate_bps / 1.0e6) if rf_link0 else 1.0)
+        self.tx_antenna_gain_dbi = _spin(-50.0, 100.0, decimals=2, step=1.0,
+                                          value=rf_link0.tx_antenna_gain_dbi if rf_link0 else 6.0)
+        self.rf_implementation_loss_db = _spin(0.0, 50.0, decimals=2, step=0.5,
+                                                 value=rf_link0.implementation_loss_db if rf_link0 else 2.0)
+        self.required_ebno_db = _spin(-50.0, 50.0, decimals=2, step=0.5,
+                                       value=rf_link0.required_ebno_db if rf_link0 else 6.0)
+        rf_form.addRow("TX power [W]", self.tx_power_w)
+        rf_form.addRow("Carrier frequency [GHz]", self.frequency_ghz)
+        rf_form.addRow("Data rate [Mbit/s]", self.data_rate_mbps)
+        rf_form.addRow("TX antenna gain [dBi]", self.tx_antenna_gain_dbi)
+        rf_form.addRow("Implementation/pointing loss [dB]", self.rf_implementation_loss_db)
+        rf_form.addRow("Required Eb/N0 [dB]", self.required_ebno_db)
+        power_layout.addWidget(self.rf_link_group)
+        power_layout.addStretch(1)
+
+        tabs.addTab(power_tab, "Power / link budget")
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
@@ -229,9 +295,35 @@ class SpacecraftEditorDialog(QDialog):
             fsw_mode=self.fsw_mode_combo.currentData(),
             fsw_params=self._parse_json_object(self.fsw_params_edit, "FSW params"),
             control_params=self._parse_json_object(self.control_params_edit, "Control gains"),
+            power=self._power_to_dataclass(),
+            rf_link=self._rf_link_to_dataclass(),
         )
         config.validate()  # raises ScenarioValidationError with a specific message on anything bad
         return config
+
+    def _power_to_dataclass(self) -> PowerConfig | None:
+        if not self.power_group.isChecked():
+            return None
+        return PowerConfig(
+            panel_area_m2=self.panel_area_m2.value(),
+            panel_efficiency=self.panel_efficiency.value(),
+            panel_normal_b=[self.panel_normal_x.value(), self.panel_normal_y.value(), self.panel_normal_z.value()],
+            bus_idle_power_w=self.bus_idle_power_w.value(),
+            battery_capacity_wh=self.battery_capacity_wh.value(),
+            battery_initial_soc=self.battery_initial_soc.value(),
+        )
+
+    def _rf_link_to_dataclass(self) -> RFLinkConfig | None:
+        if not self.rf_link_group.isChecked():
+            return None
+        return RFLinkConfig(
+            tx_power_w=self.tx_power_w.value(),
+            frequency_hz=self.frequency_ghz.value() * 1.0e9,
+            data_rate_bps=self.data_rate_mbps.value() * 1.0e6,
+            tx_antenna_gain_dbi=self.tx_antenna_gain_dbi.value(),
+            implementation_loss_db=self.rf_implementation_loss_db.value(),
+            required_ebno_db=self.required_ebno_db.value(),
+        )
 
 
 def _hbox(*widgets: QWidget) -> QWidget:

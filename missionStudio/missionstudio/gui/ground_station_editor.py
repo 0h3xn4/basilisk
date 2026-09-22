@@ -74,6 +74,15 @@ class GroundStationEditorDialog(QDialog):
         self.min_elev_deg = _spin(0.0, 89.9, decimals=2, step=1.0,
                                    value=config.min_elevation_deg if config else 10.0)
         form.addRow("Minimum elevation mask [deg]", self.min_elev_deg)
+        # Only meaningful for a spacecraft that also has an RF link budget
+        # configured (see spacecraft_editor.py's "Power / link budget" tab
+        # and schema.scenario.RFLinkConfig) -- harmless, unused otherwise.
+        self.rx_antenna_gain_dbi = _spin(-50.0, 100.0, decimals=2, step=1.0,
+                                          value=config.rx_antenna_gain_dbi if config else 45.0)
+        form.addRow("RX antenna gain [dBi] (for a link budget)", self.rx_antenna_gain_dbi)
+        self.system_noise_temp_k = _spin(0.1, 1.0e5, decimals=2, step=10.0,
+                                          value=config.system_noise_temp_k if config else 290.0)
+        form.addRow("System noise temperature [K] (for a link budget)", self.system_noise_temp_k)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -96,6 +105,8 @@ class GroundStationEditorDialog(QDialog):
             longitude_deg=self.lon_deg.value(),
             altitude_m=self.alt_m.value(),
             min_elevation_deg=self.min_elev_deg.value(),
+            rx_antenna_gain_dbi=self.rx_antenna_gain_dbi.value(),
+            system_noise_temp_k=self.system_noise_temp_k.value(),
         )
         config.validate()
         return config

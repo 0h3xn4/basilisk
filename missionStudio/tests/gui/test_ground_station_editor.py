@@ -13,6 +13,21 @@ def test_dialog_default(qtbot):
     gs = dialog.to_dataclass()
     assert gs.name == "gs-1"
     assert gs.min_elevation_deg == 10.0
+    assert gs.rx_antenna_gain_dbi == 45.0
+    assert gs.system_noise_temp_k == 290.0
+
+
+def test_dialog_round_trips_rf_link_fields(qtbot):
+    from missionstudio.gui.ground_station_editor import GroundStationEditorDialog
+    from missionstudio.schema.scenario import GroundStationConfig
+
+    existing = GroundStationConfig(name="gs-existing", latitude_deg=10.0, longitude_deg=20.0,
+                                    rx_antenna_gain_dbi=50.0, system_noise_temp_k=600.0)
+    dialog = GroundStationEditorDialog(config=existing)
+    qtbot.addWidget(dialog)
+    got = dialog.to_dataclass()
+    assert got.rx_antenna_gain_dbi == 50.0
+    assert got.system_noise_temp_k == 600.0
 
 
 def test_dialog_rejects_out_of_range_latitude(qtbot):

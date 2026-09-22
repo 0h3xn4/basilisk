@@ -76,6 +76,86 @@ def test_dialog_defaults_fsw_mode_to_none(qtbot):
     assert sc.actuators == []
 
 
+def test_dialog_power_and_rf_link_default_to_none(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    assert not dialog.power_group.isChecked()
+    assert not dialog.rf_link_group.isChecked()
+    sc = dialog.to_dataclass()
+    assert sc.power is None
+    assert sc.rf_link is None
+
+
+def test_dialog_builds_power_config_when_group_checked(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    dialog.power_group.setChecked(True)
+    dialog.panel_area_m2.setValue(2.5)
+    dialog.panel_efficiency.setValue(0.3)
+    dialog.bus_idle_power_w.setValue(30.0)
+    dialog.battery_capacity_wh.setValue(200.0)
+    dialog.battery_initial_soc.setValue(0.8)
+
+    sc = dialog.to_dataclass()
+    assert sc.power is not None
+    assert sc.power.panel_area_m2 == 2.5
+    assert sc.power.panel_efficiency == 0.3
+    assert sc.power.bus_idle_power_w == 30.0
+    assert sc.power.battery_capacity_wh == 200.0
+    assert sc.power.battery_initial_soc == 0.8
+    assert sc.rf_link is None  # unrelated group, still unchecked
+
+
+def test_dialog_builds_rf_link_config_when_group_checked(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    dialog.rf_link_group.setChecked(True)
+    dialog.tx_power_w.setValue(20.0)
+    dialog.frequency_ghz.setValue(2.2)
+    dialog.data_rate_mbps.setValue(0.5)
+    dialog.tx_antenna_gain_dbi.setValue(8.0)
+    dialog.rf_implementation_loss_db.setValue(3.0)
+    dialog.required_ebno_db.setValue(5.0)
+
+    sc = dialog.to_dataclass()
+    assert sc.rf_link is not None
+    assert sc.rf_link.tx_power_w == 20.0
+    assert sc.rf_link.frequency_hz == pytest.approx(2.2e9)
+    assert sc.rf_link.data_rate_bps == pytest.approx(0.5e6)
+    assert sc.rf_link.tx_antenna_gain_dbi == 8.0
+    assert sc.rf_link.implementation_loss_db == 3.0
+    assert sc.rf_link.required_ebno_db == 5.0
+    assert sc.power is None  # unrelated group, still unchecked
+
+
+def test_dialog_round_trips_power_and_rf_link(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import OrbitIC, PowerConfig, RFLinkConfig, SpacecraftConfig
+
+    existing = SpacecraftConfig(
+        name="sat-power",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        power=PowerConfig(panel_area_m2=1.5, panel_efficiency=0.28, panel_normal_b=[1.0, 0.0, 0.0],
+                           bus_idle_power_w=20.0, battery_capacity_wh=150.0, battery_initial_soc=0.95),
+        rf_link=RFLinkConfig(tx_power_w=12.0, frequency_hz=8.4e9, data_rate_bps=2.0e6),
+    )
+    dialog = SpacecraftEditorDialog(config=existing)
+    qtbot.addWidget(dialog)
+
+    assert dialog.power_group.isChecked()
+    assert dialog.rf_link_group.isChecked()
+
+    got = dialog.to_dataclass()
+    assert got.power == existing.power
+    assert got.rf_link == existing.rf_link
+
+
 def test_dialog_rejects_invalid_fsw_params_json(qtbot):
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
 

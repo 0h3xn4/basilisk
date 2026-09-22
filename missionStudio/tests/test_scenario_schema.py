@@ -11,6 +11,8 @@ from missionstudio.schema import (
     GroundStationConfig,
     MonteCarloConfig,
     OrbitIC,
+    PowerConfig,
+    RFLinkConfig,
     Scenario,
     ScenarioValidationError,
     SensorConfig,
@@ -430,3 +432,70 @@ def test_phase2_fields_round_trip_through_save_load(tmp_path):
     assert loaded.spacecraft[0].actuators[0].params["gsHat_B"] == [0, 1, 0]
     assert loaded.spacecraft[0].fsw_mode == "hillPoint"
     assert loaded.spacecraft[0].control_params == {"K": 4.0, "P": 25.0}
+
+
+def test_power_and_rf_link_default_to_none():
+    sc = _minimal_scenario()
+    assert sc.spacecraft[0].power is None
+    assert sc.spacecraft[0].rf_link is None
+    sc.validate()  # must not raise -- neither field is required
+
+
+def test_power_config_round_trips_through_save_load(tmp_path):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.2, panel_efficiency=0.29,
+                                          bus_idle_power_w=25.0, battery_capacity_wh=120.0,
+                                          battery_initial_soc=0.9)
+    sc.spacecraft[0].rf_link = RFLinkConfig(tx_power_w=15.0, frequency_hz=8.2e9, data_rate_bps=1.0e6)
+
+    path = tmp_path / "scenario.json"
+    sc.save(path)
+    loaded = load_scenario(path)
+
+    assert isinstance(loaded.spacecraft[0].power, PowerConfig)
+    assert loaded.spacecraft[0].power.panel_area_m2 == 1.2
+    assert loaded.spacecraft[0].power.battery_initial_soc == 0.9
+    assert isinstance(loaded.spacecraft[0].rf_link, RFLinkConfig)
+    assert loaded.spacecraft[0].rf_link.tx_power_w == 15.0
+    assert loaded.spacecraft[0].rf_link.frequency_hz == 8.2e9
+
+
+def test_power_config_rejects_invalid_panel_efficiency():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.0, panel_efficiency=1.5)
+    with pytest.raises(ScenarioValidationError, match="panel_efficiency"):
+        sc.validate()
+
+
+def test_power_config_rejects_invalid_initial_soc():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.0, panel_efficiency=0.3, battery_initial_soc=1.5)
+    with pytest.raises(ScenarioValidationError, match="battery_initial_soc"):
+        sc.validate()
+
+
+def test_rf_link_config_rejects_non_positive_data_rate():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].rf_link = RFLinkConfig(tx_power_w=10.0, frequency_hz=8.0e9, data_rate_bps=0.0)
+    with pytest.raises(ScenarioValidationError, match="data_rate_bps"):
+        sc.validate()
+
+
+def test_ground_station_rejects_non_positive_system_noise_temp():
+    gs = GroundStationConfig(name="gs1", latitude_deg=0.0, longitude_deg=0.0, system_noise_temp_k=0.0)
+    with pytest.raises(ScenarioValidationError, match="system_noise_temp_k"):
+        gs.validate()
+
+
+def test_old_scenario_file_without_power_or_rf_link_keys_still_loads(tmp_path):
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "name": "old scenario", "epoch_utc": "2030-01-01T00:00:00",
+        "spacecraft": [{
+            "name": "sat-1",
+            "orbit": {"type": "cartesian", "position_km": [7000, 0, 0], "velocity_km_s": [0, 7.5, 0]},
+        }],
+    }))
+    loaded = load_scenario(path)
+    assert loaded.spacecraft[0].power is None
+    assert loaded.spacecraft[0].rf_link is None
