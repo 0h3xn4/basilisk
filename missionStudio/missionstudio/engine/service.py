@@ -150,6 +150,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -863,10 +864,10 @@ class SimulationService:
         # engine.link_budget's module docstring for what this does and does
         # NOT account for), only for spacecraft that opted in via
         # schema.scenario.RFLinkConfig.
-        for sc_config in scenario.spacecraft:
+        for sc_config in self.scenario.spacecraft:
             if sc_config.rf_link is None:
                 continue
-            for gs_config in scenario.ground_stations:
+            for gs_config in self.scenario.ground_stations:
                 result.add(link_budget.link_margin_series(
                     result, gs_config.name, sc_config.name, sc_config.rf_link, gs_config
                 ))
