@@ -37,7 +37,10 @@ def test_add_via_dialog(qtbot, monkeypatch):
         self.name_edit.setText("rw-1")
         index = self.kind_combo.findText("reaction_wheel")
         self.kind_combo.setCurrentIndex(index)
-        self.params_edit.setPlainText('{"gsHat_B": [1, 0, 0]}')
+        x, y, z = self._vector_boxes["gsHat_B"]  # spin-box row, not the JSON params box -- see module docstring
+        x.setValue(1.0)
+        y.setValue(0.0)
+        z.setValue(0.0)
         return QDialog.DialogCode.Accepted
 
     monkeypatch.setattr(_ItemEditorDialog, "exec", fake_exec)
@@ -50,7 +53,7 @@ def test_add_via_dialog(qtbot, monkeypatch):
     added = widget.to_list()[0]
     assert added.name == "rw-1"
     assert added.kind == "reaction_wheel"
-    assert added.params == {"gsHat_B": [1, 0, 0]}
+    assert added.params["gsHat_B"] == [1.0, 0.0, 0.0]
     assert changed_count == [1]
 
 
@@ -146,10 +149,15 @@ def test_new_item_dialog_prefills_params_with_kind_template(qtbot):
 
 def test_switching_kind_does_not_clobber_params_until_reset_clicked(qtbot):
     """Switching Kind must not silently overwrite whatever the user has
-    already typed into params -- only the explicit 'Reset to template'
-    button does that (see this dialog's module docstring).
+    already typed into params (or set in the vector spin boxes) -- only
+    the explicit 'Reset to template' button does that (see this dialog's
+    module docstring).
     """
-    from missionstudio.gui.sensor_actuator_editor import _ItemEditorDialog, _template_params
+    from missionstudio.gui.sensor_actuator_editor import (
+        _ItemEditorDialog,
+        _non_vector_template_params,
+        _vector_specs,
+    )
     from missionstudio.schema.scenario import SUPPORTED_SENSOR_KINDS, SensorConfig
 
     dialog = _ItemEditorDialog(SensorConfig, SUPPORTED_SENSOR_KINDS)
@@ -161,28 +169,25 @@ def test_switching_kind_does_not_clobber_params_until_reset_clicked(qtbot):
     assert json.loads(dialog.params_edit.toPlainText()) == {"hand_typed": True}
 
     dialog._on_reset_template()
-    assert json.loads(dialog.params_edit.toPlainText()) == _template_params("coarse_sun_sensor")
+    assert json.loads(dialog.params_edit.toPlainText()) == _non_vector_template_params("coarse_sun_sensor")
+    for spec in _vector_specs("coarse_sun_sensor"):
+        x, y, z = dialog._vector_boxes[spec.key]
+        assert [x.value(), y.value(), z.value()] == spec.example
 
 
-def test_item_editor_dialog_catches_missing_required_key_immediately(qtbot):
-    """Regression test: a missing required params key (e.g.
-    coarse_sun_sensor's nHat_B) used to only be caught much later by the
-    OUTER spacecraft-editor dialog's SpacecraftConfig.validate() call,
-    decontextualized from the params box that actually needs fixing. This
-    dialog should catch it itself, immediately.
+def test_missing_required_vector_key_is_caught_defensively():
+    """The dialog's own spin-box rows make it structurally impossible to
+    submit a required vector key (e.g. coarse_sun_sensor's nHat_B) with no
+    value -- there's always a row, defaulting to the kind's template
+    example. _missing_required_keys() is exercised directly here as
+    defense in depth (e.g. against a future non-vector required key, or
+    programmatic construction that bypasses the dialog).
     """
-    from missionstudio.gui.sensor_actuator_editor import _ItemEditorDialog
-    from missionstudio.schema.scenario import SUPPORTED_SENSOR_KINDS, SensorConfig
+    from missionstudio.gui.sensor_actuator_editor import _missing_required_keys
 
-    dialog = _ItemEditorDialog(SensorConfig, SUPPORTED_SENSOR_KINDS)
-    qtbot.addWidget(dialog)
-    index = dialog.kind_combo.findText("coarse_sun_sensor")
-    dialog.kind_combo.setCurrentIndex(index)
-    dialog.name_edit.setText("css-1")
-    dialog.params_edit.setPlainText("{}")  # no nHat_B
-
-    with pytest.raises(ValueError, match="nHat_B"):
-        dialog.to_dataclass()
+    assert _missing_required_keys("coarse_sun_sensor", {}) == ["nHat_B"]
+    assert _missing_required_keys("coarse_sun_sensor", {"nHat_B": [1.0, 0.0, 0.0]}) == []
+    assert _missing_required_keys("reaction_wheel", {}) == ["gsHat_B"]
 
 
 def test_reset_to_template_button_overwrites_params(qtbot):

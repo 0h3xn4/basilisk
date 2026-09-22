@@ -40,11 +40,29 @@ box with a working example for the selected kind, and an immediate
 required-key check right in this dialog. Keep _KIND_PARAM_SPECS in sync
 with ``engine.fsw.attach_sensors()``/``build_reaction_wheels()``'s actual
 ``params.get()``/``params[...]`` usage when either changes.
+
+Further user feedback specifically on "placement" of sensors/actuators:
+every kind's body-frame direction (``nHat_B``, ``gsHat_B``, ``noise_std_
+tesla``'s per-axis triple) used to be a bare 3-element JSON array typed
+inside the params box, the one thing about "placement" that actually
+affects the simulated physics here (Basilisk's coarseSunSensor/
+reactionWheel models care about boresight/spin-axis DIRECTION -- there is
+no position/mounting-offset or self-shadowing physics in the specific
+Basilisk modules this app wires up, so a position field for these would be
+cosmetic, not physical; :class:`schema.scenario.PowerConfig`'s
+``panel_normal_b`` already got its own X/Y/Z spin boxes in
+``gui.spacecraft_editor`` since Phase 1 -- see that dialog -- sensors/
+actuators just hadn't caught up). Fixed: any 3-element-list-valued spec in
+_KIND_PARAM_SPECS now gets its own X/Y/Z spin-box row (with a Normalize
+button, since these are meant to be unit vectors and Basilisk does not
+renormalize them), separate from the JSON box, which now only holds the
+kind's non-vector keys.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from typing import NamedTuple
 
 from PySide6.QtCore import Signal
@@ -52,6 +70,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -71,6 +90,10 @@ class _ParamSpec(NamedTuple):
     required: bool
     example: object
     help_text: str  # includes units, where the quantity has physical meaning
+
+    @property
+    def is_vector(self) -> bool:
+        return isinstance(self.example, list) and len(self.example) == 3
 
 
 # One entry per SUPPORTED_SENSOR_KINDS/SUPPORTED_ACTUATOR_KINDS value that
@@ -114,8 +137,29 @@ _KIND_PARAM_SPECS: dict[str, list[_ParamSpec]] = {
 _UNIMPLEMENTED_ACTUATOR_KINDS = ("thruster", "magnetic_torque_rod")
 
 
+def _spin_component(value: float = 0.0) -> QDoubleSpinBox:
+    box = QDoubleSpinBox()
+    box.setRange(-1.0e6, 1.0e6)
+    box.setDecimals(6)
+    box.setSingleStep(0.1)
+    box.setValue(value)
+    return box
+
+
+def _vector_specs(kind: str) -> list[_ParamSpec]:
+    return [spec for spec in _KIND_PARAM_SPECS.get(kind, []) if spec.is_vector]
+
+
+def _non_vector_specs(kind: str) -> list[_ParamSpec]:
+    return [spec for spec in _KIND_PARAM_SPECS.get(kind, []) if not spec.is_vector]
+
+
 def _template_params(kind: str) -> dict:
     return {spec.key: spec.example for spec in _KIND_PARAM_SPECS.get(kind, [])}
+
+
+def _non_vector_template_params(kind: str) -> dict:
+    return {spec.key: spec.example for spec in _non_vector_specs(kind)}
 
 
 def _missing_required_keys(kind: str, params: dict) -> list[str]:
@@ -135,7 +179,8 @@ def _hint_text(kind: str) -> str:
     lines = []
     for spec in specs:
         tag = "required" if spec.required else "optional"
-        lines.append(f"• {spec.key} ({tag}): {spec.help_text}")
+        where = " -- see X/Y/Z fields below" if spec.is_vector else ""
+        lines.append(f"• {spec.key} ({tag}): {spec.help_text}{where}")
     return "\n".join(lines)
 
 
@@ -143,6 +188,8 @@ class _ItemEditorDialog(QDialog):
     def __init__(self, item_cls, kind_choices, item=None, parent: QWidget | None = None):
         super().__init__(parent)
         self._item_cls = item_cls
+        self._item_params = item.params if item is not None else {}
+        self._original_kind = item.kind if item is not None else None
         label = "sensor" if item_cls.__name__ == "SensorConfig" else "actuator"
         self.setWindowTitle(f"Edit {label}" if item is not None else f"New {label}")
 
@@ -154,7 +201,6 @@ class _ItemEditorDialog(QDialog):
             index = self.kind_combo.findText(item.kind)
             if index >= 0:
                 self.kind_combo.setCurrentIndex(index)
-        self.kind_combo.currentTextChanged.connect(self._on_kind_changed)
         form.addRow("Kind", self.kind_combo)
 
         self.name_edit = QLineEdit(item.name if item is not None else "")
@@ -166,20 +212,37 @@ class _ItemEditorDialog(QDialog):
         self.hint_label.setStyleSheet("color: palette(mid);")
         layout.addWidget(self.hint_label)
 
+        # Vector-shaped params (nHat_B, gsHat_B, ...) get their own X/Y/Z
+        # spin-box row instead of living inside the JSON params box -- see
+        # this module's docstring. Rebuilt whenever Kind changes, since
+        # different kinds have different vector keys.
+        self._vector_form_container = QWidget()
+        self._vector_form = QFormLayout(self._vector_form_container)
+        self._vector_form.setContentsMargins(0, 0, 0, 0)
+        self._vector_boxes: dict[str, tuple[QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox]] = {}
+        layout.addWidget(self._vector_form_container)
+        self._rebuild_vector_rows(self.kind_combo.currentText())
+
+        self.kind_combo.currentTextChanged.connect(self._on_kind_changed)
+
         params_row = QHBoxLayout()
-        params_row.addWidget(QLabel("Params (JSON object)"))
+        params_row.addWidget(QLabel("Other params (JSON object)"))
         params_row.addStretch(1)
         self.reset_template_button = QPushButton("Reset to template")
         self.reset_template_button.setToolTip(
-            "Fill the params box below with a working example for the selected Kind -- "
-            "overwrites whatever is currently typed there."
+            "Fill the fields above and the params box below with a working example for the "
+            "selected Kind -- overwrites whatever is currently typed/set there."
         )
         self.reset_template_button.clicked.connect(self._on_reset_template)
         params_row.addWidget(self.reset_template_button)
         layout.addLayout(params_row)
 
-        initial_params = item.params if item is not None else _template_params(self.kind_combo.currentText())
-        self.params_edit = QPlainTextEdit(json.dumps(initial_params, indent=2))
+        if item is not None:
+            initial_non_vector = {k: v for k, v in item.params.items()
+                                   if k not in {spec.key for spec in _vector_specs(item.kind)}}
+        else:
+            initial_non_vector = _non_vector_template_params(self.kind_combo.currentText())
+        self.params_edit = QPlainTextEdit(json.dumps(initial_non_vector, indent=2))
         self.params_edit.setTabChangesFocus(True)
         layout.addWidget(self.params_edit)
 
@@ -188,11 +251,48 @@ class _ItemEditorDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _rebuild_vector_rows(self, kind: str) -> None:
+        while self._vector_form.rowCount():
+            self._vector_form.removeRow(0)
+        self._vector_boxes.clear()
+        use_item_params = kind == self._original_kind
+        for spec in _vector_specs(kind):
+            value = self._item_params.get(spec.key, spec.example) if use_item_params else spec.example
+            x, y, z = (_spin_component(v) for v in value)
+            row = QHBoxLayout()
+            row.addWidget(x)
+            row.addWidget(y)
+            row.addWidget(z)
+            normalize_button = QPushButton("Normalize")
+            normalize_button.setToolTip("Rescale to a unit vector (preserves direction).")
+            normalize_button.clicked.connect(lambda _checked, k=spec.key: self._on_normalize(k))
+            row.addWidget(normalize_button)
+            row_widget = QWidget()
+            row_widget.setLayout(row)
+            required_tag = "" if spec.required else " (optional)"
+            self._vector_form.addRow(f"{spec.key}{required_tag}", row_widget)
+            self._vector_boxes[spec.key] = (x, y, z)
+
     def _on_kind_changed(self, kind: str) -> None:
         self.hint_label.setText(_hint_text(kind))
+        self._rebuild_vector_rows(kind)
+
+    def _on_normalize(self, key: str) -> None:
+        x, y, z = self._vector_boxes[key]
+        magnitude = math.sqrt(x.value() ** 2 + y.value() ** 2 + z.value() ** 2)
+        if magnitude > 0.0:
+            x.setValue(x.value() / magnitude)
+            y.setValue(y.value() / magnitude)
+            z.setValue(z.value() / magnitude)
 
     def _on_reset_template(self) -> None:
-        self.params_edit.setPlainText(json.dumps(_template_params(self.kind_combo.currentText()), indent=2))
+        kind = self.kind_combo.currentText()
+        for spec in _vector_specs(kind):
+            x, y, z = self._vector_boxes[spec.key]
+            x.setValue(spec.example[0])
+            y.setValue(spec.example[1])
+            z.setValue(spec.example[2])
+        self.params_edit.setPlainText(json.dumps(_non_vector_template_params(kind), indent=2))
 
     def _on_accept(self) -> None:
         try:
@@ -213,7 +313,11 @@ class _ItemEditorDialog(QDialog):
         except json.JSONDecodeError as exc:
             raise ValueError(f"params is not valid JSON: {exc}") from exc
         if not isinstance(params, dict):
-            raise ValueError("params must be a JSON object (e.g. {\"gsHat_B\": [1, 0, 0]})")
+            raise ValueError("params must be a JSON object (e.g. {\"noise_std\": 0.01})")
+        vector_keys = {spec.key for spec in _vector_specs(kind)}
+        params = {k: v for k, v in params.items() if k not in vector_keys}  # vector rows are authoritative
+        for key, (x, y, z) in self._vector_boxes.items():
+            params[key] = [x.value(), y.value(), z.value()]
         missing = _missing_required_keys(kind, params)
         if missing:
             raise ValueError(
