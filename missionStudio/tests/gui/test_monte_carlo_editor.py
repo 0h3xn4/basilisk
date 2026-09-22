@@ -89,6 +89,28 @@ def test_dispersion_dialog_kind_choices_follow_quantity(qtbot):
     assert set(kinds) == {"uniform", "normal"}
 
 
+def test_dispersion_dialog_stale_spacecraft_is_preserved_not_silently_swapped(qtbot):
+    """Regression test: item.spacecraft naming a spacecraft that no longer
+    exists in spacecraft_names (e.g. renamed/removed since this dispersion
+    was saved) used to be silently dropped -- findText() returned -1,
+    nothing set the combo's index, and it stayed on whatever was first,
+    re-targeting the dispersion at the WRONG spacecraft with no indication
+    anything had changed. It must instead be round-tripped as-is.
+    """
+    from missionstudio.gui.monte_carlo_editor import _DispersionEditorDialog
+    from missionstudio.schema.scenario import DispersionConfig
+
+    stale = DispersionConfig(spacecraft="renamed-sat", quantity="dry_mass_kg", kind="uniform", bounds=[90.0, 110.0])
+    # "renamed-sat" is NOT in spacecraft_names -- simulates the referenced
+    # spacecraft having been renamed/removed after this dispersion was saved.
+    dialog = _DispersionEditorDialog(["some-other-sat"], item=stale)
+    qtbot.addWidget(dialog)
+
+    assert dialog.spacecraft_combo.currentData() == "renamed-sat"
+    got = dialog.to_dataclass()
+    assert got.spacecraft == "renamed-sat"
+
+
 def test_dispersion_dialog_rejects_when_no_spacecraft(qtbot):
     from missionstudio.gui.monte_carlo_editor import _DispersionEditorDialog
 

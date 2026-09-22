@@ -50,15 +50,16 @@ validation scenario (``scenarios/two_body_validation.json``,
   it), but nothing controls or reads it yet.
 * A single dynamics task, propagated for ``sim_settings.duration_days``.
 
-Explicitly NOT wired up yet (validated by the schema and carried through
-save/load starting now, so the schema doesn't need to change shape later,
-but silently ignored by this service until the phase that implements it):
-drag, SRP, space weather (space weather HAS its own resolver in
-``engine/spaceweather.py`` -- it just isn't connected to a drag model
-here, since drag itself isn't wired up). The Phase 1 GUI (see ``gui/``)
-deliberately does not expose editors for these either, for the same
-reason: a control that looks like it configures simulated behavior but
-silently doesn't is worse than not offering it yet.
+Explicitly NOT wired up yet in Phase 0 (validated by the schema and
+carried through save/load starting now, so the schema doesn't need to
+change shape later, but silently ignored by this service until the phase
+that implements it): drag, SRP, space weather. The Phase 1 GUI (see
+``gui/``) deliberately does not expose editors for these either, for the
+same reason: a control that looks like it configures simulated behavior
+but silently doesn't is worse than not offering it yet. (Phase 4, below,
+is where this gap closes: ``SpacecraftConfig.enable_drag``/``enable_srp``
+are wired up there via ``engine/spaceweather.py``'s resolver -> MSIS
+atmosphere -> ``dragDynamicEffector``/``radiationPressure``.)
 
 Phase 2 scope
 -------------
@@ -390,21 +391,24 @@ class SimulationService:
                 self.scSim, dyn_task_name, central_body_state_out_msg, central_body.radEquator
             )
 
-        # Phase 4: power budget (schema.scenario.PowerConfig) and
+        # Phase 4: power budget (schema.scenario.PowerConfig),
         # station-keeping's eclipse-gated reboost burn
-        # (schema.scenario.StationKeepingConfig) both need the real eclipse
-        # shadow factor -- built once, shared by every spacecraft that has
-        # EITHER configured (see the per-spacecraft loop below), exactly
-        # like the ground locations/magnetic-field model above. Unlike the
-        # WMM magnetic-field model, eclipse geometry isn't Earth-specific,
-        # so this isn't gated on gravity.central_body == "earth".
-        needs_eclipse = any(sc.power is not None or sc.station_keeping is not None for sc in scenario.spacecraft)
+        # (schema.scenario.StationKeepingConfig), and SRP (enable_srp,
+        # below) all need the real eclipse shadow factor -- built once,
+        # shared by every spacecraft that has ANY of them configured (see
+        # the per-spacecraft loop below), exactly like the ground
+        # locations/magnetic-field model above. Unlike the WMM
+        # magnetic-field model, eclipse geometry isn't Earth-specific, so
+        # this isn't gated on gravity.central_body == "earth".
+        needs_eclipse = any(
+            sc.power is not None or sc.station_keeping is not None or sc.enable_srp for sc in scenario.spacecraft
+        )
         if needs_eclipse:
             if self._sun_state_out_msg is None:
                 raise SimulationServiceError(
-                    "a spacecraft has a power budget or station-keeping configured, but 'sun' is not one "
-                    "of this scenario's SPICE-tracked bodies -- simpleSolarPanel/the eclipse gate needs a "
-                    "sun ephemeris. Add 'sun' to gravity.third_body_perturbers."
+                    "a spacecraft has a power budget, station-keeping, or SRP (enable_srp) configured, but "
+                    "'sun' is not one of this scenario's SPICE-tracked bodies -- simpleSolarPanel/the eclipse "
+                    "gate/SRP needs a sun ephemeris. Add 'sun' to gravity.third_body_perturbers."
                 )
             from Basilisk.simulation import eclipse
 
@@ -414,9 +418,66 @@ class SimulationService:
             self._eclipse_object.addPlanetToModel(central_body_state_out_msg)
             self.scSim.AddModelToTask(dyn_task_name, self._eclipse_object, 370)
 
+        # Phase 4: atmospheric drag (schema.scenario.SpacecraftConfig.enable_drag)
+        # -- built once, shared by every spacecraft that enables it. Ported
+        # from ../missionAnalysis/run_constellation_mission.py's identical
+        # space-weather -> MSIS atmosphere -> drag-effector chain (NRLMSISE
+        # -00, Earth-only, hence the central_body == "earth" requirement
+        # below -- there is no non-Earth atmosphere model wired up here,
+        # matching the spherical-harmonics-gravity/magnetometer precedent
+        # above). Reuses engine.spaceweather's already-built resolver
+        # (previously computed but never actually connected to a drag
+        # model -- see this module's own "Phase 0 scope" docstring note,
+        # now out of date since this fixes exactly that gap) rather than
+        # loading a space-weather file ad hoc.
+        needs_drag = any(sc.enable_drag for sc in scenario.spacecraft)
+        atmo_module = None
+        wind_model = None
+        if needs_drag:
+            if gravity.central_body != "earth":
+                raise SimulationServiceError(
+                    "atmospheric drag (enable_drag) is only wired up for 'earth' (NRLMSISE-00 has no "
+                    f"non-Earth atmosphere model here); {gravity.central_body!r} needs enable_drag=False "
+                    "on every spacecraft."
+                )
+            from Basilisk.simulation import msisAtmosphere, spaceWeatherData, zeroWindModel
+
+            from . import spaceweather as sw
+
+            start_utc = datetime.fromisoformat(scenario.epoch_utc)
+            end_utc = start_utc + timedelta(days=sim_settings.duration_days)
+            try:
+                resolved_sw = sw.resolve(
+                    scenario.space_weather.source, start_utc, end_utc,
+                    local_file_path=scenario.space_weather.local_file_path,
+                    cache_dir=scenario.space_weather.cache_dir,
+                )
+            except sw.SpaceWeatherError as exc:
+                raise SimulationServiceError(f"could not resolve space weather for atmospheric drag: {exc}") from exc
+
+            sw_module = spaceWeatherData.SpaceWeatherData()
+            sw_module.ModelTag = "spaceWeatherData"
+            sw_module.loadSpaceWeatherFile(str(resolved_sw.path))
+            sw_module.epochInMsg.subscribeTo(grav_factory.epochMsg)
+            self.scSim.AddModelToTask(dyn_task_name, sw_module, 400)
+
+            atmo_module = msisAtmosphere.MsisAtmosphere()
+            atmo_module.ModelTag = "msisAtmosphere"
+            atmo_module.epochInMsg.subscribeTo(grav_factory.epochMsg)
+            atmo_module.planetPosInMsg.subscribeTo(central_body_state_out_msg)
+            for msg_index in range(23):  # fixed count of space-weather sub-messages msisAtmosphere reads
+                atmo_module.swDataInMsgs[msg_index].subscribeTo(sw_module.swDataOutMsgs[msg_index])
+            self.scSim.AddModelToTask(dyn_task_name, atmo_module, 390)
+
+            wind_model = zeroWindModel.ZeroWindModel()
+            wind_model.ModelTag = "zeroWind"
+            wind_model.planetPosInMsg.subscribeTo(central_body_state_out_msg)
+            self.scSim.AddModelToTask(dyn_task_name, wind_model, 380)
+
         sc_objects_in_order: List = []
         rw_effectors_in_order: List = []
-        eclipse_index = 0  # only incremented for spacecraft that actually have power or station_keeping configured
+        eclipse_index = 0  # only incremented for spacecraft that actually have power/station_keeping/enable_srp
+        drag_index = 0  # only incremented for spacecraft that actually have enable_drag
 
         for sc_config in scenario.spacecraft:
             sc_object = spacecraft.Spacecraft()
@@ -468,7 +529,7 @@ class SimulationService:
             # it twice would desync eclipseOutMsgs' indexing from
             # sc_objects_in_order for every spacecraft after it).
             sc_eclipse_out_msg = None
-            if sc_config.power is not None or sc_config.station_keeping is not None:
+            if sc_config.power is not None or sc_config.station_keeping is not None or sc_config.enable_srp:
                 self._eclipse_object.addSpacecraftToModel(sc_object.scStateOutMsg)
                 sc_eclipse_out_msg = self._eclipse_object.eclipseOutMsgs[eclipse_index]
                 eclipse_index += 1
@@ -526,6 +587,43 @@ class SimulationService:
                     self.scSim, dyn_task_name, sc_config.name, sc_object, mu, central_body.radEquator,
                     sc_config.dry_mass_kg, sc_config.station_keeping, eclipse_out_msg=sc_eclipse_out_msg,
                 )
+
+            # -- Phase 4: atmospheric drag (schema.scenario.SpacecraftConfig
+            # .enable_drag) -- see the needs_drag/atmo_module/wind_model
+            # setup above this loop. addSpacecraftToModel() must only be
+            # called for spacecraft that enable it, so drag_index stays in
+            # lockstep with atmo_module.envOutMsgs/wind_model.envOutMsgs.
+            if sc_config.enable_drag:
+                from Basilisk.simulation import dragDynamicEffector
+
+                drag_effector = dragDynamicEffector.DragDynamicEffector()
+                drag_effector.ModelTag = f"{sc_config.name}Drag"
+                drag_effector.coreParams.projectedArea = sc_config.drag_area_m2  # [m^2]
+                drag_effector.coreParams.dragCoeff = sc_config.drag_coeff  # [-]
+                sc_object.addDynamicEffector(drag_effector)
+                atmo_module.addSpacecraftToModel(sc_object.scStateOutMsg)
+                wind_model.addSpacecraftToModel(sc_object.scStateOutMsg)
+                drag_effector.atmoDensInMsg.subscribeTo(atmo_module.envOutMsgs[drag_index])
+                drag_effector.windVelInMsg.subscribeTo(wind_model.envOutMsgs[drag_index])
+                drag_index += 1
+                self.scSim.AddModelToTask(dyn_task_name, drag_effector, 100)
+
+            # -- Phase 4: solar radiation pressure (schema.scenario.
+            # SpacecraftConfig.enable_srp) -- shares the eclipse model/
+            # sc_eclipse_out_msg computed above (the eclipse-needs condition
+            # above this loop already includes enable_srp, so
+            # sc_eclipse_out_msg is non-None whenever this branch runs).
+            if sc_config.enable_srp:
+                from Basilisk.simulation import radiationPressure
+
+                srp_effector = radiationPressure.RadiationPressure()
+                srp_effector.ModelTag = f"{sc_config.name}Srp"
+                srp_effector.area = sc_config.srp_area_m2  # [m^2]
+                srp_effector.coefficientReflection = sc_config.srp_coeff  # [-]
+                sc_object.addDynamicEffector(srp_effector)
+                srp_effector.sunEphmInMsg.subscribeTo(self._sun_state_out_msg)
+                srp_effector.sunEclipseInMsg.subscribeTo(sc_eclipse_out_msg)
+                self.scSim.AddModelToTask(dyn_task_name, srp_effector, 100)
 
             if sc_config.actuators and sc_config.fsw_mode is None:
                 raise SimulationServiceError(

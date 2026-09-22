@@ -536,6 +536,44 @@ name one that doesn't exist) and the ground-station editor's two new
 fields are pre-filled with reasonable placeholder defaults, matching this
 phase's "user only supplies numbers, the tool does the rest" design goal.
 
+Four real bugs were found by a full codebase audit after this phase
+shipped, and fixed (all visible in `git log` for the files below, not
+swept under the rug):
+
+* **`SpacecraftConfig.enable_drag`/`enable_srp` were schema-valid and
+  documented above as functional (see the station-keeping bullet's
+  "enable `enable_drag`" instruction) but were never actually wired into
+  `engine.service` -- station-keeping's reboost burn could never fire on
+  any scenario, since nothing ever decayed the orbit.** Fixed: `enable_drag`
+  now wires `engine.spaceweather`'s resolver into `spaceWeatherData` ->
+  `msisAtmosphere` -> `zeroWindModel` -> a per-spacecraft
+  `dragDynamicEffector`, ported from
+  `../missionAnalysis/run_constellation_mission.py`'s verified chain;
+  `enable_srp` wires a per-spacecraft `radiationPressure` effector off the
+  same eclipse model `PowerConfig`/`StationKeepingConfig` already share.
+  Both are Earth-only (NRLMSISE-00 has no other-body atmosphere model
+  here), matching the spherical-harmonics-gravity precedent.
+* **`_AccessIndicatorBridge` (the Live Vizard access-window indicator
+  above) could be garbage-collected while still registered on the
+  Basilisk sim task** -- a SWIG-director use-after-free (the Python side
+  of a custom `SysModel` must outlive its C++ task registration, same
+  requirement `StationKeepingController`/`PhasingKeepingController`
+  already followed), surfacing as a `basic_string::_M_create` crash deep
+  in an unrelated libstdc++ call, well after the actual corruption.
+  Fixed: `engine.vizard`/`engine.service` now retain it the same way.
+* **Editing an existing spacecraft with `enable_drag`/`enable_srp` already
+  set silently reset them to the schema defaults** -- the spacecraft-editor
+  dialog has no UI for these fields (by design, per above) but also never
+  carried them through from the original config in `to_dataclass()`, unlike
+  every other not-yet-editable field. Fixed.
+* **The phasing-keeping chief-spacecraft combo, and the Monte Carlo
+  dispersion spacecraft combo, silently fell back to whichever spacecraft
+  happened to be first** whenever the stored name didn't match a current
+  spacecraft (e.g. renamed after the config was saved) -- re-targeting a
+  controller or dispersion at the wrong spacecraft with no visible
+  indication. Fixed: the stale name is now surfaced as its own selectable
+  entry and round-tripped as-is instead.
+
 ## Repository layout
 
 ```

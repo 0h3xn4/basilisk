@@ -74,11 +74,25 @@ class _DispersionEditorDialog(QDialog):
         form = QFormLayout()
 
         self.spacecraft_combo = QComboBox()
-        self.spacecraft_combo.addItems(spacecraft_names)
+        for name in spacecraft_names:
+            self.spacecraft_combo.addItem(name, userData=name)
         if item is not None:
-            index = self.spacecraft_combo.findText(item.spacecraft)
+            index = self.spacecraft_combo.findData(item.spacecraft)
             if index >= 0:
                 self.spacecraft_combo.setCurrentIndex(index)
+            else:
+                # item.spacecraft doesn't match any current spacecraft name
+                # (e.g. renamed or removed since this dispersion was saved).
+                # Silently falling back to index 0 would re-target this
+                # dispersion at whichever spacecraft happens to be first --
+                # wrong, and invisible to the user. Surface the stale name
+                # as its own selectable entry instead (userData carries the
+                # real name; the label just flags it), so to_dataclass()
+                # still round-trips it unless the user explicitly retargets
+                # this dispersion.
+                self.spacecraft_combo.addItem(f"{item.spacecraft} (not found in this scenario)",
+                                               userData=item.spacecraft)
+                self.spacecraft_combo.setCurrentIndex(self.spacecraft_combo.count() - 1)
         form.addRow("Spacecraft", self.spacecraft_combo)
 
         self.quantity_combo = QComboBox()
@@ -147,7 +161,7 @@ class _DispersionEditorDialog(QDialog):
             raise ValueError("this scenario has no spacecraft to disperse yet -- add one first")
         kind = self.kind_combo.currentText()
         config = DispersionConfig(
-            spacecraft=self.spacecraft_combo.currentText(),
+            spacecraft=self.spacecraft_combo.currentData(),
             quantity=self.quantity_combo.currentText(),
             kind=kind,
             bounds=[self.bounds_lo_spin.value(), self.bounds_hi_spin.value()]
