@@ -67,15 +67,25 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"INVALID: {exc}", file=sys.stderr)
         return 1
 
+    if args.vizard_save_file and args.vizard_live_stream:
+        print("ERROR: pass at most one of --vizard-save-file / --vizard-live-stream", file=sys.stderr)
+        return 1
+
     try:
         from .engine.service import SimulationService
     except ImportError as exc:
         print(f"ERROR: Basilisk is not installed/built ({exc}) -- see missionStudio/README.md", file=sys.stderr)
         return 2
 
+    vizard_request = None
+    if args.vizard_save_file or args.vizard_live_stream:
+        from .engine.vizard import VizardRequest
+
+        vizard_request = VizardRequest(save_file=args.vizard_save_file, live_stream=args.vizard_live_stream)
+
     print(f"Running {scenario.name!r} ({len(scenario.spacecraft)} spacecraft, "
           f"{scenario.sim_settings.duration_days} day(s), {scenario.sim_settings.integrator})...")
-    service = SimulationService(scenario)
+    service = SimulationService(scenario, vizard_request=vizard_request)
     try:
         result = service.run()
     except Exception as exc:  # noqa: BLE001 -- report ANY run failure with a specific message, not a bare traceback
@@ -151,6 +161,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = subparsers.add_parser("run", help="run a scenario headlessly and export results to CSV")
     p_run.add_argument("scenario", type=Path)
     p_run.add_argument("--out-dir", type=Path, default=Path("results"), help="directory to write CSV results to")
+    p_run.add_argument("--vizard-save-file", type=str, default=None,
+                        help="write a Vizard .bin playback file to this path (see engine/vizard.py)")
+    p_run.add_argument("--vizard-live-stream", action="store_true",
+                        help="live-stream to a Vizard instance already running on this machine")
     p_run.set_defaults(func=cmd_run)
 
     p_kernels = subparsers.add_parser("kernels-status", help="fetch/check SPICE kernel cache status")

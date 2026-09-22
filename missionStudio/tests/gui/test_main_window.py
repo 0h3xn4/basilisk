@@ -158,6 +158,55 @@ def test_close_with_unsaved_changes_discard_allows_close(window, monkeypatch):
     assert event.isAccepted()
 
 
+def test_configure_vizard_sets_request(window, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    assert window._vizard_request is None
+
+    def fake_exec(self):
+        self.live_stream_radio.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(VizardDialog, "exec", fake_exec)
+    window.on_configure_vizard()
+
+    assert window._vizard_request is not None
+    assert window._vizard_request.live_stream is True
+
+
+def test_configure_vizard_cancel_leaves_request_unchanged(window, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.vizard_dialog import VizardDialog
+
+    monkeypatch.setattr(VizardDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+    window.on_configure_vizard()
+    assert window._vizard_request is None
+
+
+def test_run_passes_vizard_request_to_worker(window, monkeypatch):
+    from missionstudio.gui.run_worker import RunWorker
+    from missionstudio.engine.vizard import VizardRequest
+
+    _add_valid_spacecraft(window)
+    window._vizard_request = VizardRequest(live_stream=True)
+
+    captured = {}
+    original_init = RunWorker.__init__
+
+    def spy_init(self, scenario, vizard_request=None, parent=None):
+        captured["vizard_request"] = vizard_request
+        original_init(self, scenario, vizard_request=vizard_request, parent=parent)
+
+    monkeypatch.setattr(RunWorker, "__init__", spy_init)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)  # don't actually spin up the thread
+
+    window.on_run()
+    assert captured["vizard_request"] is window._vizard_request
+
+
 def test_close_with_no_unsaved_changes_does_not_prompt(window, monkeypatch):
     from PySide6.QtGui import QCloseEvent
     from PySide6.QtWidgets import QMessageBox

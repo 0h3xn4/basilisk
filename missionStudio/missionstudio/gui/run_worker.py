@@ -28,6 +28,8 @@ error.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from PySide6.QtCore import QThread, Signal
 
 from ..schema.scenario import Scenario
@@ -37,9 +39,10 @@ class RunWorker(QThread):
     finished_ok = Signal(object)  # engine.results.ResultSet
     failed = Signal(str)
 
-    def __init__(self, scenario: Scenario, parent=None):
+    def __init__(self, scenario: Scenario, vizard_request: Optional[object] = None, parent=None):
         super().__init__(parent)
         self.scenario = scenario
+        self.vizard_request = vizard_request  # engine.vizard.VizardRequest, or None
 
     def run(self) -> None:
         try:
@@ -51,7 +54,7 @@ class RunWorker(QThread):
             )
             return
         try:
-            service = SimulationService(self.scenario)
+            service = SimulationService(self.scenario, vizard_request=self.vizard_request)
             result = service.run()
         except Exception as exc:  # noqa: BLE001 -- surface ANY failure to the GUI, never crash the worker silently
             self.failed.emit(str(exc))

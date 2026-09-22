@@ -74,6 +74,22 @@ SUPPORTED_CENTRAL_BODIES = (
 
 ORBIT_IC_TYPES = ("classical_elements", "cartesian", "tle")
 
+# Sensor/actuator/FSW-mode kinds engine.service.SimulationService actually
+# wires up as of Phase 2 -- see that module's docstring for the exact
+# Basilisk module each one maps to and for engine.fsw's guidance-chain
+# construction. "thruster" and "magnetic_torque_rod" are intentionally
+# accepted as ActuatorConfig.kind values (schema-valid, so a scenario file
+# referencing them still loads and round-trips) but NOT wired up here --
+# engine.service raises a specific SimulationServiceError if one is
+# actually present on a spacecraft being run, rather than silently
+# skipping it (see that module's ACTUATOR_BUILDERS for why: unlike Phase 0's
+# drag/SRP flags, which stayed inert booleans, an actuator kind that
+# silently did nothing would be a live foot-gun -- a spacecraft configured
+# to detumble on magnetic torque rods that simply never fire).
+SUPPORTED_SENSOR_KINDS = ("star_tracker", "imu", "coarse_sun_sensor", "magnetometer")
+SUPPORTED_ACTUATOR_KINDS = ("reaction_wheel", "thruster", "magnetic_torque_rod")
+SUPPORTED_FSW_MODES = ("inertial3D", "hillPoint", "velocityPoint", "sunSafePoint", "locationPointing")
+
 
 class ScenarioValidationError(ValueError):
     """Raised by :meth:`Scenario.validate` (and the dataclass ``__post_init__``
@@ -138,12 +154,20 @@ class OrbitIC:
 
 @dataclass
 class SensorConfig:
-    """One sensor instance. ``kind`` selects the Basilisk module (see the
-    capability matrix): ``"star_tracker"``, ``"imu"``, ``"coarse_sun_sensor"``,
-    ``"magnetometer"``, ``"simple_nav"``. ``params`` is an open dict of
-    module-specific settings (noise std devs, mounting DCM, ...) -- kept
-    generic here rather than one dataclass per sensor type so new sensor
-    kinds can be added (Phase 2+) without another schema migration.
+    """One sensor instance. ``kind`` is one of :data:`SUPPORTED_SENSOR_KINDS`
+    (see the capability matrix for which Basilisk module each one maps to:
+    ``starTracker``, ``imuSensor``, ``coarseSunSensor``, ``magnetometer``).
+    ``params`` is an open dict of module-specific settings (noise std devs,
+    mounting direction, ...) -- kept generic here rather than one dataclass
+    per sensor type so new sensor kinds can be added without another schema
+    migration; :meth:`SpacecraftConfig.validate` checks the kind-specific
+    params it can check early (e.g. ``coarse_sun_sensor`` needs ``nHat_B``).
+
+    ``simpleNav`` (the truth-to-navigation-message bridge every FSW mode
+    needs) is deliberately NOT a selectable sensor kind here: engine.service
+    creates exactly one automatically for any spacecraft with ``fsw_mode``
+    set, since every FSW guidance mode needs it and it is not itself a
+    piece of hardware the user configures.
     """
 
     kind: str
@@ -153,9 +177,12 @@ class SensorConfig:
 
 @dataclass
 class ActuatorConfig:
-    """One actuator instance. ``kind``: ``"reaction_wheel"``, ``"thruster"``,
-    ``"magnetic_torque_rod"``. See :class:`SensorConfig` for why ``params``
-    is an open dict.
+    """One actuator instance. ``kind`` is one of
+    :data:`SUPPORTED_ACTUATOR_KINDS`. See :class:`SensorConfig` for why
+    ``params`` is an open dict, and the module-level note above
+    :data:`SUPPORTED_ACTUATOR_KINDS` for why ``"thruster"``/
+    ``"magnetic_torque_rod"`` are accepted here but rejected by
+    engine.service at run time.
     """
 
     kind: str
@@ -184,8 +211,18 @@ class SpacecraftConfig:
 
     sensors: list = field(default_factory=list)  # list[SensorConfig]
     actuators: list = field(default_factory=list)  # list[ActuatorConfig]
-    fsw_mode: Optional[str] = None  # e.g. "hillPoint", "sunSafePoint", ... (Phase 2)
+    # One of SUPPORTED_FSW_MODES, or None for no attitude control (attitude
+    # still integrates -- see engine.service -- it just isn't commanded).
+    fsw_mode: Optional[str] = None
+    # Mode-specific settings engine.fsw needs to build the guidance chain,
+    # e.g. {"sigma_R0N": [...]} for "inertial3D" or
+    # {"target_ground_station": "dsn-goldstone", "pHat_B": [0, 0, 1]} for
+    # "locationPointing" -- see engine/fsw.py's per-mode builder docstrings
+    # for the full set each mode reads.
     fsw_params: dict = field(default_factory=dict)
+    # {"K": ..., "P": ...} MRP feedback control gains; see
+    # engine.fsw.DEFAULT_MRP_GAINS for the defaults used when a key is absent.
+    control_params: dict = field(default_factory=dict)
 
     def validate(self) -> None:
         _require(bool(self.name), "spacecraft.name must not be empty")
@@ -194,10 +231,43 @@ class SpacecraftConfig:
         _require(len(self.sigma_bn_init) == 3, f"{self.name}: sigma_bn_init must have 3 elements")
         _require(len(self.omega_bn_b_init_rad_s) == 3, f"{self.name}: omega_bn_b_init_rad_s must have 3 elements")
         self.orbit.validate()
+
+        _require(self.fsw_mode is None or self.fsw_mode in SUPPORTED_FSW_MODES,
+                  f"{self.name}: fsw_mode {self.fsw_mode!r} must be None or one of {SUPPORTED_FSW_MODES}")
+        if self.fsw_mode == "locationPointing":
+            has_gs = bool(self.fsw_params.get("target_ground_station"))
+            has_body = bool(self.fsw_params.get("target_body"))
+            _require(has_gs != has_body,  # xor: exactly one target
+                      f"{self.name}: fsw_mode 'locationPointing' needs exactly one of "
+                      "fsw_params['target_ground_station'] or fsw_params['target_body']")
+
+        sensor_names = [s.name for s in self.sensors]
+        _require(len(sensor_names) == len(set(sensor_names)),
+                  f"{self.name}: sensor names must be unique, got {sensor_names}")
         for sensor in self.sensors:
             _require(bool(sensor.kind) and bool(sensor.name), f"{self.name}: every sensor needs kind and name")
+            _require(sensor.kind in SUPPORTED_SENSOR_KINDS,
+                      f"{self.name}: sensor {sensor.name!r} kind {sensor.kind!r} must be one of "
+                      f"{SUPPORTED_SENSOR_KINDS}")
+            if sensor.kind == "coarse_sun_sensor":
+                nHat_B = sensor.params.get("nHat_B")
+                _require(nHat_B is not None and len(nHat_B) == 3,
+                          f"{self.name}: coarse_sun_sensor {sensor.name!r} needs params['nHat_B'] "
+                          "as a 3-element body-frame boresight unit vector")
+
+        actuator_names = [a.name for a in self.actuators]
+        _require(len(actuator_names) == len(set(actuator_names)),
+                  f"{self.name}: actuator names must be unique, got {actuator_names}")
         for actuator in self.actuators:
             _require(bool(actuator.kind) and bool(actuator.name), f"{self.name}: every actuator needs kind and name")
+            _require(actuator.kind in SUPPORTED_ACTUATOR_KINDS,
+                      f"{self.name}: actuator {actuator.name!r} kind {actuator.kind!r} must be one of "
+                      f"{SUPPORTED_ACTUATOR_KINDS}")
+            if actuator.kind == "reaction_wheel":
+                gsHat_B = actuator.params.get("gsHat_B")
+                _require(gsHat_B is not None and len(gsHat_B) == 3,
+                          f"{self.name}: reaction_wheel {actuator.name!r} needs params['gsHat_B'] "
+                          "as a 3-element body-frame spin-axis unit vector")
 
 
 @dataclass
@@ -314,6 +384,12 @@ class Scenario:
         _require(len(gs_names) == len(set(gs_names)), f"ground_station names must be unique, got {gs_names}")
         for gs in self.ground_stations:
             gs.validate()
+        for sc in self.spacecraft:
+            target_gs = sc.fsw_params.get("target_ground_station") if sc.fsw_mode == "locationPointing" else None
+            if target_gs is not None:
+                _require(target_gs in gs_names,
+                          f"{sc.name}: fsw_params['target_ground_station'] {target_gs!r} is not one of "
+                          f"this scenario's ground_stations {gs_names}")
         self.space_weather.validate()
         self.sim_settings.validate()
 

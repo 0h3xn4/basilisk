@@ -1,4 +1,4 @@
-# missionStudio (Phase 1)
+# missionStudio (Phase 2)
 
 A standalone, GUI-based mission-analysis application for Linux, using the
 Basilisk astrodynamics framework (AVS Lab, University of Colorado Boulder)
@@ -7,9 +7,10 @@ every capability maps to a specific Basilisk module (see the capability
 matrix delivered earlier in this project's history) or is explicitly
 flagged as custom/out-of-scope, never fabricated.
 
-This is **Phase 1** of the roadmap: core propagation + a PySide6 GUI shell
-+ save/load + a batch/headless CLI, on top of Phase 0's backend
-foundations. See "What Phase 1 adds" below for exactly what that means.
+This is **Phase 2** of the roadmap: attitude sensors/actuators/FSW pointing
+-control modes + Vizard integration, on top of Phase 0's backend
+foundations and Phase 1's PySide6 GUI/CLI. See "What Phase 2 adds" below
+for exactly what that means.
 
 ## Environment honesty note (read this first)
 
@@ -24,31 +25,34 @@ way.
 Consequently, in **this** environment:
 
 * Everything in `missionstudio/schema/`, `missionstudio/engine/spaceweather.py`,
-  `missionstudio/engine/results.py`, `missionstudio/cli.py`, and (this is
-  new in Phase 1) **the entire `missionstudio/gui/` package** has **no
-  Basilisk import** and has been fully exercised here -- `pytest tests/`
-  genuinely runs and passes 89 tests. That includes the PySide6 GUI: it
-  was built, run headless (`QT_QPA_PLATFORM=offscreen`, set automatically
-  by `tests/conftest.py`), and driven with `pytest-qt` for real -- every
-  form field, every Save/Open/Run menu action, dirty-state tracking, and
-  the unsaved-changes close-confirmation prompt is exercised by an actual
+  `missionstudio/engine/results.py`, `missionstudio/cli.py`, and **the
+  entire `missionstudio/gui/` package** (including Phase 2's new
+  sensor/actuator/FSW-mode/Vizard-request editors) has **no Basilisk
+  import** and has been fully exercised here -- `pytest tests/` genuinely
+  runs and passes 124 tests. That includes the PySide6 GUI: it was built,
+  run headless (`QT_QPA_PLATFORM=offscreen`, set automatically by
+  `tests/conftest.py`), and driven with `pytest-qt` for real -- every form
+  field, every Save/Open/Run menu action, dirty-state tracking, and the
+  unsaved-changes close-confirmation prompt is exercised by an actual
   running `QApplication`, not asserted about in the abstract. Getting
   PySide6 itself running headless in this sandbox needed three system
   packages beyond what was preinstalled (`libegl1 libopengl0
   libxcb-cursor0` on this Ubuntu-based image, via `apt-get`) -- worth
   knowing if a deployment target hits the same `ImportError: libEGL.so.1:
   cannot open shared object file` this session hit first.
-* `missionstudio/engine/time_system.py`, `kernels.py`, and `service.py`
-  import Basilisk and **could not be executed or tested here**. They are
-  written directly against this checkout's own verified source (module
-  names, function signatures, and call sequences confirmed by reading the
-  actual `.py`/`.cpp`/`.i` files in `../src/`, and in several cases by
-  copying an exact call sequence already proven to work in
-  `../missionAnalysis/run_constellation_mission.py`, which HAS been run
-  against a real Basilisk build earlier in this project) -- not from
-  memory, and not guessed. Each of these files' docstring says exactly
-  which parts are verified-by-example versus verified-by-reading-source
-  -only, so nothing here should be trusted as "tested" that isn't.
+* `missionstudio/engine/time_system.py`, `kernels.py`, `service.py`, and
+  (new in Phase 2) `fsw.py`/`vizard.py` import Basilisk and **could not be
+  executed or tested here**. They are written directly against this
+  checkout's own verified source (module names, function signatures, and
+  call sequences confirmed by reading the actual `.py`/`.cpp`/`.h`/`.i`
+  files in `../src/`, and in several cases by copying an exact call
+  sequence already proven to work in a real, already-run example script --
+  `../missionAnalysis/run_constellation_mission.py` for Phase 0/1,
+  `../examples/scenarioAttitudeFeedbackRW.py`/`scenarioAttitudeGuidance.py`/
+  `scenarioHohmann.py`/`scenarioAttLocPoint.py` for Phase 2's FSW chain) --
+  not from memory, and not guessed. Each of these files' docstring says
+  exactly which parts are verified-by-example versus verified-by-reading
+  -source-only, so nothing here should be trusted as "tested" that isn't.
 * Because the GUI and CLI both genuinely can't import Basilisk here, both
   were also proven to FAIL GRACEFULLY under that exact condition, for
   real: `gui.run_worker.RunWorker`, `gui.kernel_status_widget`, and
@@ -172,6 +176,55 @@ regression test.
   `kernels-status`, `spaceweather-resolve`, `gui`) -- see "Running the
   CLI" below.
 
+## What Phase 2 adds
+
+* **`missionstudio/engine/fsw.py`** -- builds the attitude navigation/
+  guidance/control/actuation module chain per spacecraft, kept separate
+  from `service.py` so that file stays orchestration-only. Every
+  `schema.scenario.SpacecraftConfig.fsw_mode` maps to a real Basilisk FSW
+  module: `inertial3D`/`hillPoint`/`velocityPoint` (routed through
+  `attTrackingError`) and `sunSafePoint`/`locationPointing` (which already
+  output an `AttGuidMsg`), all closing on `mrpFeedback` control. Actuation
+  is either idealized (`extForceTorque`, the default) or real reaction
+  -wheel hardware (`simIncludeRW`/`reactionWheelStateEffector`/
+  `rwMotorTorque`) when a spacecraft has `"reaction_wheel"` actuators.
+  Sensors (`star_tracker`/`imu`/`coarse_sun_sensor`/`magnetometer`) attach
+  independently of `fsw_mode` since they read truth state/SPICE/the
+  magnetic-field model directly. `"thruster"`/`"magnetic_torque_rod"`
+  actuators and `locationPointing`'s `target_body` option are schema-valid
+  but raise a specific, actionable error rather than being silently
+  ignored -- see `fsw.py`'s module docstring for the full scoping list and
+  exactly which example script each call sequence was copied from.
+* **`missionstudio/engine/vizard.py`** -- the "no embedded 3D viewer, but
+  good Vizard visualization with valuable live simulation data"
+  requirement: wraps `vizSupport.enableUnityVisualization()` (live-stream
+  or `.bin` playback file), passes reaction-wheel effectors through so
+  Vizard draws its native per-wheel speed bars, and draws every ground
+  station via `vizSupport.addLocation()` (lat/lon/alt + elevation-mask
+  cone) so `locationPointing`'s target geometry is actually visible.
+* **`ResultSet` now carries Phase 2 series** for any spacecraft that has
+  them configured: `{name}.attitude_sigma_BN`, `{name}.body_rate_omega_BN_B`,
+  `{name}.sun_heading_body`, `{name}.control_torque`, `{name}.rw_speeds`,
+  and one `{name}.sensor.{sensor_name}` series per attached sensor --
+  always in addition to, never instead of, the Phase 0 position/velocity
+  series.
+* **GUI**: `spacecraft_editor.py` gained a tabbed dialog (Orbit/mass,
+  Sensors/actuators, Attitude control) backed by the new
+  `gui/sensor_actuator_editor.py` (a generic Add/Edit/Remove list widget
+  shared by sensors and actuators, since their shape is identical --
+  `params` is edited as raw JSON text rather than a bespoke form per kind,
+  since the schema deliberately keeps `params` an open dict). A real bug
+  was fixed along the way: editing an existing spacecraft used to silently
+  DROP its `sensors`/`actuators`/`fsw_mode`/`fsw_params`/`control_params`
+  (the dialog built a brand new `SpacecraftConfig` without passing them
+  through) -- harmless while nothing set them, a real data-loss bug the
+  moment this phase's own editors did; fixed with a regression test. The
+  Run menu gained a **Vizard...** action (`gui/vizard_dialog.py`) to pick
+  disabled / save-a-playback-file / live-stream for the next run, plumbed
+  through `RunWorker` into `SimulationService`.
+* **CLI**: `missionstudio run` gained `--vizard-save-file`/
+  `--vizard-live-stream` (mutually exclusive).
+
 ## Repository layout
 
 ```
@@ -189,11 +242,15 @@ missionStudio/
       spaceweather.py                -- CelesTrak fetch/validate/fallback (no Basilisk needed)
       results.py                     -- TimeSeries/ResultSet, CSV export (no Basilisk needed)
       service.py                     -- SimulationService (needs Basilisk)
+      fsw.py                         -- Phase 2: attitude nav/guidance/control/actuation chain (needs Basilisk)
+      vizard.py                      -- Phase 2: Vizard integration (needs Basilisk, imported lazily)
     gui/
       app.py                         -- QApplication entry point
       main_window.py                 -- MainWindow: File/Run menus, ties everything together
       scenario_editor.py             -- the full scenario form + live validation
-      spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog
+      spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW)
+      sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
+      vizard_dialog.py               -- Phase 2: "enable Vizard for the next run" dialog
       ground_station_editor.py       -- ground station list + add/edit/remove dialog
       orbit_ic_widget.py             -- classical-elements/Cartesian/TLE orbit editor
       kernel_status_widget.py        -- SPICE kernel status panel
@@ -211,6 +268,8 @@ missionStudio/
     gui/
       test_orbit_ic_widget.py
       test_spacecraft_editor.py
+      test_sensor_actuator_editor.py
+      test_vizard_dialog.py
       test_ground_station_editor.py
       test_scenario_editor.py
       test_results_widget.py
@@ -227,12 +286,12 @@ python3 -m pip install -e ".[dev,gui]"
 python3 -m pytest tests/ -v
 ```
 
-Without a Basilisk build on `PYTHONPATH`, this runs 89 tests (schema,
+Without a Basilisk build on `PYTHONPATH`, this runs 124 tests (schema,
 space weather, results, CLI, and the full PySide6 GUI, run headless) and
 skips the 2 in `test_two_body_validation.py` with a clear reason, per
 `tests/conftest.py`. With Basilisk built (see `../docs/source/Build.rst`,
 and `../missionAnalysis/README.md`'s own notes on making sure you're on
-the right build), the same command runs all 91, including the analytical
+the right build), the same command runs all 126, including the analytical
 validation.
 
 If PySide6 fails to import with `ImportError: libEGL.so.1: cannot open
@@ -285,6 +344,17 @@ result = service.run()
 result.export_csv("out/")
 ```
 
+To also get attitude control and a Vizard playback file, set a
+spacecraft's `fsw_mode`/`sensors`/`actuators` (see `engine/fsw.py`) and
+pass a `VizardRequest`:
+
+```python
+from missionstudio.engine.vizard import VizardRequest
+
+service = SimulationService(scenario, vizard_request=VizardRequest(save_file="out/viz.bin"))
+result = service.run()
+```
+
 ## Running the CLI
 
 The `missionstudio` command (installed by `pip install -e .`; `python3 -m
@@ -299,6 +369,7 @@ missionstudio spaceweather-resolve missionstudio/scenarios/two_body_validation.j
 
 # needs a Basilisk build:
 missionstudio run missionstudio/scenarios/two_body_validation.json --out-dir results/
+missionstudio run scenario_with_fsw.json --out-dir results/ --vizard-save-file results/viz.bin
 missionstudio kernels-status
 
 # launches the PySide6 GUI (needs the 'gui' extra; does NOT need Basilisk
@@ -350,19 +421,38 @@ specifically:
   `../src/simulation/dynamics/Integrators/`). `schema.scenario.SimSettings`
   and `engine.service._INTEGRATORS` only offer those four; `"rkf78"` is
   the default.
-* **Spherical-harmonics gravity is Earth-only in Phase 0's `service.py`**
+* **Spherical-harmonics gravity is Earth-only in `service.py`**
   (GGM03S, the same file `../missionAnalysis` uses). Other central bodies
   are limited to point-mass gravity (`central_body_degree=0`) until a
   later phase adds their gravity-field files.
+* **Magnetometer sensors are Earth-only** (`magneticFieldWMM`, same
+  reasoning as spherical-harmonics gravity) -- `engine.fsw` raises a clear
+  error for a magnetometer on any other central body rather than silently
+  producing a sensor with no field to read.
+* **`locationPointing`'s `target_body` option (point at a celestial body
+  directly, not a ground station) is schema-valid but not wired up** --
+  it needs an `EphemerisMsg`, which this checkout only produces via
+  `ephemerisConverter` from a `SpicePlanetStateMsg`, not yet built here.
+* **`"thruster"`/`"magnetic_torque_rod"` actuator kinds are schema-valid
+  but not wired up** -- `engine.fsw`/`engine.service` raise a specific
+  error if either is actually configured, rather than silently doing
+  nothing.
+* **Ground-station ACCESS analysis (as opposed to using a station as a
+  `locationPointing` target) is Phase 3 scope**, matching this project's
+  original roadmap boundary ("Phase 3: Monte Carlo + access analysis +
+  packaging") -- `engine.fsw.build_ground_location()` is already capable
+  of it (it just needs a non-empty spacecraft list), `engine.service`
+  deliberately doesn't call it that way yet.
+* **The attitude control loop closes on truth spacecraft state.**
+  `simpleNav` is in the loop (not raw `scStateOutMsg`), but its
+  error-model matrices are left at Basilisk's own zero defaults -- there
+  is no GUI/schema field yet to configure realistic navigation error.
 
-## Next: Phase 2
+## Next: Phase 3
 
-Attitude/sensors/actuators + visualization, per the roadmap: wire up
-sensors (star tracker, IMU, CSS, magnetometer), actuators (reaction
-wheels, thrusters, magnetic torque rods), and FSW pointing/control modes
-in `engine.service.SimulationService`, then add editors for them in the
-GUI (`spacecraft_editor.py` currently has none, deliberately, per its own
-scope note above -- Phase 2 is exactly when that stops being true).
-Vizard integration (launch as an external companion process fed by
-`vizInterface`, per the capability matrix's finding that Vizard cannot be
-embedded in a Qt window) is also Phase 2 scope.
+Per the roadmap: Monte Carlo (`Basilisk.utilities.MonteCarlo`, a real,
+already-confirmed-usable batch-execution framework with dispersion
+generators), ground-station ACCESS analysis (`groundLocation.accessOutMsgs`
+-- the `GroundLocation` objects Phase 2's `locationPointing` targeting
+already builds are a running start), and packaging (the vendored-wheel
+decision flagged below).

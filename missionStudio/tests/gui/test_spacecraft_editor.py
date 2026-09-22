@@ -33,6 +33,59 @@ def test_dialog_edits_existing_config(qtbot):
     assert got.orbit.position_km == [1.0, 2.0, 3.0]
 
 
+def test_dialog_round_trips_sensors_actuators_and_fsw_mode(qtbot):
+    """Regression test: editing an existing spacecraft used to silently
+    DROP sensors/actuators/fsw_mode/fsw_params/control_params (the dialog
+    built a brand new SpacecraftConfig without passing them through). This
+    is exactly the round trip that bug broke.
+    """
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import ActuatorConfig, OrbitIC, SensorConfig, SpacecraftConfig
+
+    existing = SpacecraftConfig(
+        name="sat-with-fsw",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        sensors=[SensorConfig(kind="star_tracker", name="st-1", params={"noise_arcsec": 5.0})],
+        actuators=[ActuatorConfig(kind="reaction_wheel", name="rw-1", params={"gsHat_B": [1, 0, 0]})],
+        fsw_mode="hillPoint",
+        fsw_params={"foo": "bar"},
+        control_params={"K": 4.0, "P": 25.0},
+    )
+    dialog = SpacecraftEditorDialog(config=existing)
+    qtbot.addWidget(dialog)
+    got = dialog.to_dataclass()
+
+    assert len(got.sensors) == 1
+    assert got.sensors[0].kind == "star_tracker"
+    assert got.sensors[0].params == {"noise_arcsec": 5.0}
+    assert len(got.actuators) == 1
+    assert got.actuators[0].params == {"gsHat_B": [1, 0, 0]}
+    assert got.fsw_mode == "hillPoint"
+    assert got.fsw_params == {"foo": "bar"}
+    assert got.control_params == {"K": 4.0, "P": 25.0}
+
+
+def test_dialog_defaults_fsw_mode_to_none(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    sc = dialog.to_dataclass()
+    assert sc.fsw_mode is None
+    assert sc.sensors == []
+    assert sc.actuators == []
+
+
+def test_dialog_rejects_invalid_fsw_params_json(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    dialog.fsw_params_edit.setPlainText("{not valid json")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        dialog.to_dataclass()
+
+
 def test_dialog_rejects_empty_name(qtbot):
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
     from missionstudio.schema.scenario import ScenarioValidationError

@@ -84,6 +84,17 @@ def test_kernels_status_without_basilisk_reports_clear_error(capsys):
     assert "Basilisk is not installed" in capsys.readouterr().err
 
 
+def test_run_rejects_both_vizard_flags_at_once(tmp_path, capsys):
+    path = tmp_path / "scenario.json"
+    _write_scenario(path)
+    rc = cli.main([
+        "run", str(path), "--out-dir", str(tmp_path / "out"),
+        "--vizard-save-file", str(tmp_path / "viz.bin"), "--vizard-live-stream",
+    ])
+    assert rc == 1
+    assert "at most one of" in capsys.readouterr().err
+
+
 def test_no_subcommand_is_an_error():
     with pytest.raises(SystemExit):
         cli.main([])

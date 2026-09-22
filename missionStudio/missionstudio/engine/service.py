@@ -53,11 +53,34 @@ validation scenario (``scenarios/two_body_validation.json``,
 Explicitly NOT wired up yet (validated by the schema and carried through
 save/load starting now, so the schema doesn't need to change shape later,
 but silently ignored by this service until the phase that implements it):
-drag, SRP, sensors, actuators, FSW modes, ground stations, space weather,
-Monte Carlo. The Phase 1 GUI (see ``gui/``) deliberately does not expose
-editors for any of these either, for the same reason: a control that
-looks like it configures simulated behavior but silently doesn't is worse
-than not offering it yet.
+drag, SRP, space weather, Monte Carlo, and ground-station access analysis
+(the last is a deliberate Phase 2/3 boundary -- see below). The Phase 1 GUI
+(see ``gui/``) deliberately does not expose editors for these either, for
+the same reason: a control that looks like it configures simulated
+behavior but silently doesn't is worse than not offering it yet.
+
+Phase 2 scope
+-------------
+Adds attitude sensors, actuators, FSW pointing/control modes, and Vizard
+integration on top of Phase 0's propagation-only baseline. All the actual
+guidance/control/actuation chain construction lives in ``engine/fsw.py``
+(kept separate so this file stays orchestration-only) -- see that module's
+docstring for the exact Basilisk module each ``fsw_mode``/sensor kind/
+actuator kind maps to, and for every scoping decision made along the way
+(e.g. why ``locationPointing``'s ``target_body`` option and the
+``"thruster"``/``"magnetic_torque_rod"`` actuator kinds are schema-valid
+but not built here). ``engine/vizard.py`` covers the Vizard integration,
+triggered via :class:`SimulationService`'s own ``vizard_request`` constructor
+parameter (an ``engine.vizard.VizardRequest``).
+
+One more explicit Phase 2 scope line: :class:`schema.scenario.GroundStationConfig`
+entries are only ever turned into a ``groundLocation.GroundLocation`` object
+here when some spacecraft's ``fsw_mode == "locationPointing"`` actually
+targets them (as a pointing target) -- ``addSpacecraftToModel``/
+``accessOutMsgs`` (ground-station ACCESS analysis, as opposed to using a
+station as a pointing target) is Phase 3 scope, matching the roadmap
+boundary from this project's original phased plan ("Phase 3: Monte Carlo +
+access analysis + packaging").
 
 Verification status
 --------------------
@@ -81,8 +104,8 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -91,8 +114,9 @@ from Basilisk.utilities import SimulationBaseClass, macros, orbitalMotion, simHe
 from Basilisk.utilities.supportDataTools.dataFetcher import DataFile, get_path
 
 from ..schema.scenario import OrbitIC, Scenario
-from . import kernels, time_system
+from . import fsw, kernels, time_system, vizard
 from .results import ResultSet, TimeSeries
+from .vizard import VizardRequest
 
 # Maps schema.SimSettings.integrator -> the svIntegrator* class it selects.
 # Every entry here is a class this Basilisk checkout actually ships (see
@@ -162,6 +186,12 @@ class _SpacecraftHandle:
     name: str
     sc_object: object
     recorder: object
+    # Phase 2: all None/empty unless sc_config.fsw_mode/sensors were set.
+    nav_recorder: Optional[object] = None
+    control_torque_recorder: Optional[object] = None
+    rw_speed_recorder: Optional[object] = None
+    num_rw: int = 0
+    sensor_recorders: Dict[str, object] = field(default_factory=dict)  # sensor.name -> (kind, recorder)
 
 
 class SimulationService:
@@ -171,11 +201,15 @@ class SimulationService:
     ``SimBaseClass``, which is not designed to be reset and rebuilt).
     """
 
-    def __init__(self, scenario: Scenario):
+    def __init__(self, scenario: Scenario, vizard_request: Optional[VizardRequest] = None):
         self.scenario = scenario
+        self.vizard_request = vizard_request
         self.scSim: Optional[SimulationBaseClass.SimBaseClass] = None
         self.mu: Optional[float] = None
         self._handles: Dict[str, _SpacecraftHandle] = {}
+        self._sun_state_out_msg = None
+        self._ground_locations: Dict[str, object] = {}
+        self._mag_field_model = None
 
     def build(self) -> None:
         """Assemble the Basilisk simulation from ``self.scenario`` without
@@ -235,6 +269,44 @@ class SimulationService:
         self.spice_object = kernels.build_spice_interface(grav_factory, spice_time_string, epoch_in_msg=True)
         self.scSim.AddModelToTask(dyn_task_name, self.spice_object, 500)
 
+        # -- Phase 2 shared (scenario-level) infrastructure, built once before
+        # the per-spacecraft loop below: the "sun" SPICE ephemeris message
+        # (for simpleNav's vehSunPntBdy / coarse_sun_sensor -- only present
+        # if "sun" is actually SPICE-tracked, see engine.fsw's docstring for
+        # why this is a precondition rather than something added silently),
+        # locationPointing's ground-station targets, and a shared Earth
+        # magnetic-field model for any magnetometer sensors.
+        if "sun" in body_names:
+            self._sun_state_out_msg = self.spice_object.planetStateOutMsgs[body_names.index("sun")]
+
+        central_body_state_out_msg = self.spice_object.planetStateOutMsgs[body_names.index(gravity.central_body)]
+
+        needed_ground_stations = {
+            sc.fsw_params.get("target_ground_station")
+            for sc in scenario.spacecraft
+            if sc.fsw_mode == "locationPointing" and sc.fsw_params.get("target_ground_station")
+        }
+        if needed_ground_stations:
+            gs_by_name = {gs.name: gs for gs in scenario.ground_stations}
+            for gs_name in needed_ground_stations:
+                gs_config = gs_by_name[gs_name]  # unreachable KeyError if Scenario.validate() passed
+                ground_location = fsw.build_ground_location(
+                    self.scSim, dyn_task_name, gs_config, central_body.radEquator,
+                    central_body_state_out_msg, sc_state_out_msgs=[],
+                )
+                self._ground_locations[gs_name] = ground_location
+
+        needs_magnetometer = any(
+            sensor.kind == "magnetometer" for sc in scenario.spacecraft for sensor in sc.sensors
+        )
+        if needs_magnetometer and gravity.central_body == "earth":
+            self._mag_field_model = fsw.build_magnetic_field_wmm(
+                self.scSim, dyn_task_name, central_body_state_out_msg, central_body.radEquator
+            )
+
+        sc_objects_in_order: List = []
+        rw_effectors_in_order: List = []
+
         for sc_config in scenario.spacecraft:
             sc_object = spacecraft.Spacecraft()
             sc_object.ModelTag = sc_config.name
@@ -254,7 +326,93 @@ class SimulationService:
             recorder = sc_object.scStateOutMsg.recorder()
             self.scSim.AddModelToTask(dyn_task_name, recorder)
 
-            self._handles[sc_config.name] = _SpacecraftHandle(sc_config.name, sc_object, recorder)
+            handle = _SpacecraftHandle(sc_config.name, sc_object, recorder)
+            sc_objects_in_order.append(sc_object)
+
+            # -- Phase 2: sensors are independent of fsw_mode (they read
+            # truth spacecraft state / SPICE / the magnetic-field model
+            # directly, not simpleNav -- see engine.fsw.attach_sensors), so
+            # they're attached regardless of whether attitude control is on.
+            if sc_config.sensors:
+                try:
+                    sensor_out_msgs = fsw.attach_sensors(
+                        self.scSim, dyn_task_name, sc_config.name, sc_object, sc_config.sensors,
+                        sun_state_out_msg=self._sun_state_out_msg, mag_field_model=self._mag_field_model,
+                    )
+                except fsw.FswError as exc:
+                    raise SimulationServiceError(str(exc)) from exc
+                for sensor in sc_config.sensors:
+                    handle.sensor_recorders[sensor.name] = (sensor.kind, sensor_out_msgs[sensor.name].recorder())
+                    self.scSim.AddModelToTask(dyn_task_name, handle.sensor_recorders[sensor.name][1])
+
+            if sc_config.actuators and sc_config.fsw_mode is None:
+                raise SimulationServiceError(
+                    f"{sc_config.name}: actuators are configured but fsw_mode is None -- an actuator needs a "
+                    "guidance+control chain (fsw_mode) commanding it, or it will never receive a torque "
+                    "command. Set fsw_mode, or remove the actuator(s)."
+                )
+
+            rw_effector_for_viz = None
+            if sc_config.fsw_mode is not None:
+                unsupported_kinds = sorted({
+                    a.kind for a in sc_config.actuators if a.kind in ("thruster", "magnetic_torque_rod")
+                })
+                if unsupported_kinds:
+                    raise SimulationServiceError(
+                        f"{sc_config.name}: actuator kind(s) {unsupported_kinds} are schema-valid but not "
+                        "wired up by engine.service in Phase 2 (see engine.fsw's module docstring)"
+                    )
+
+                nav = fsw.build_simple_nav(
+                    self.scSim, dyn_task_name, sc_config.name, sc_object, sun_state_out_msg=self._sun_state_out_msg
+                )
+                veh_config_msg = fsw.build_vehicle_config_msg(sc_config.inertia_kg_m2)
+                try:
+                    guid_msg = fsw.build_guidance(
+                        self.scSim, dyn_task_name, sc_config.name, sc_config.fsw_mode, sc_config.fsw_params,
+                        nav, mu, self._ground_locations,
+                    )
+                except fsw.FswError as exc:
+                    raise SimulationServiceError(str(exc)) from exc
+
+                rw_actuators = [a for a in sc_config.actuators if a.kind == "reaction_wheel"]
+                if rw_actuators:
+                    _, rw_state_effector, rw_config_msg = fsw.build_reaction_wheels(
+                        self.scSim, dyn_task_name, sc_config.name, sc_object, rw_actuators
+                    )
+                    handle.num_rw = len(rw_actuators)
+                    mrp = fsw.build_mrp_feedback(
+                        self.scSim, dyn_task_name, sc_config.name, guid_msg, veh_config_msg, sc_config.control_params,
+                        rw_config_msg=rw_config_msg, rw_speed_out_msg=rw_state_effector.rwSpeedOutMsg,
+                    )
+                    fsw.build_rw_motor_torque(self.scSim, dyn_task_name, sc_config.name, mrp, rw_config_msg,
+                                               rw_state_effector)
+                    handle.rw_speed_recorder = rw_state_effector.rwSpeedOutMsg.recorder()
+                    self.scSim.AddModelToTask(dyn_task_name, handle.rw_speed_recorder)
+                    rw_effector_for_viz = rw_state_effector
+                else:
+                    mrp = fsw.build_mrp_feedback(
+                        self.scSim, dyn_task_name, sc_config.name, guid_msg, veh_config_msg, sc_config.control_params
+                    )
+                    fsw.build_idealized_actuation(self.scSim, dyn_task_name, sc_config.name, sc_object, mrp)
+
+                handle.nav_recorder = nav.attOutMsg.recorder()
+                handle.control_torque_recorder = mrp.cmdTorqueOutMsg.recorder()
+                self.scSim.AddModelToTask(dyn_task_name, handle.nav_recorder)
+                self.scSim.AddModelToTask(dyn_task_name, handle.control_torque_recorder)
+
+            rw_effectors_in_order.append(rw_effector_for_viz)
+            self._handles[sc_config.name] = handle
+
+        if self.vizard_request is not None:
+            try:
+                vizard.enable_vizard(
+                    self.scSim, dyn_task_name, sc_objects_in_order, self.vizard_request,
+                    rw_effectors_by_spacecraft=rw_effectors_in_order,
+                    ground_stations=self._ground_locations, central_body_name=gravity.central_body,
+                )
+            except vizard.VizardError as exc:
+                raise SimulationServiceError(str(exc)) from exc
 
         self.dyn_task_name = dyn_task_name
         self.scSim.InitializeSimulation()
@@ -263,8 +421,12 @@ class SimulationService:
 
     def run(self) -> ResultSet:
         """Build (if not already built) and execute the simulation, then
-        extract every spacecraft's position/velocity time history into a
-        :class:`~missionstudio.engine.results.ResultSet`.
+        extract every spacecraft's logged time histories into a
+        :class:`~missionstudio.engine.results.ResultSet`: always
+        position/velocity, plus (Phase 2, only for a spacecraft that
+        actually has them configured) attitude/body-rate/sun-heading,
+        commanded control torque, reaction wheel speeds, and one series per
+        attached sensor.
         """
         if self.scSim is None:
             self.build()
@@ -276,4 +438,38 @@ class SimulationService:
             t_s = handle.recorder.times() * macros.NANO2SEC
             result.add(TimeSeries(f"{name}.position_N", t_s, ("x", "y", "z"), handle.recorder.r_BN_N, units="m"))
             result.add(TimeSeries(f"{name}.velocity_N", t_s, ("x", "y", "z"), handle.recorder.v_BN_N, units="m/s"))
+
+            if handle.nav_recorder is not None:
+                nav_t_s = handle.nav_recorder.times() * macros.NANO2SEC
+                result.add(TimeSeries(f"{name}.attitude_sigma_BN", nav_t_s, ("s1", "s2", "s3"),
+                                       handle.nav_recorder.sigma_BN, units="-"))
+                result.add(TimeSeries(f"{name}.body_rate_omega_BN_B", nav_t_s, ("x", "y", "z"),
+                                       handle.nav_recorder.omega_BN_B, units="rad/s"))
+                result.add(TimeSeries(f"{name}.sun_heading_body", nav_t_s, ("x", "y", "z"),
+                                       handle.nav_recorder.vehSunPntBdy, units="-"))
+            if handle.control_torque_recorder is not None:
+                ctrl_t_s = handle.control_torque_recorder.times() * macros.NANO2SEC
+                result.add(TimeSeries(f"{name}.control_torque", ctrl_t_s, ("x", "y", "z"),
+                                       handle.control_torque_recorder.torqueRequestBody, units="N*m"))
+            if handle.rw_speed_recorder is not None:
+                rw_t_s = handle.rw_speed_recorder.times() * macros.NANO2SEC
+                wheel_speeds = np.asarray(handle.rw_speed_recorder.wheelSpeeds)[:, :handle.num_rw]
+                columns = tuple(f"wheel_{i}" for i in range(handle.num_rw))
+                result.add(TimeSeries(f"{name}.rw_speeds", rw_t_s, columns, wheel_speeds, units="rad/s"))
+
+            for sensor_name, (kind, recorder) in handle.sensor_recorders.items():
+                sensor_t_s = recorder.times() * macros.NANO2SEC
+                series_name = f"{name}.sensor.{sensor_name}"
+                if kind == "star_tracker":
+                    result.add(TimeSeries(series_name, sensor_t_s, ("q0", "q1", "q2", "q3"),
+                                           recorder.qInrtl2Case, units="-"))
+                elif kind == "imu":
+                    result.add(TimeSeries(f"{series_name}.accel", sensor_t_s, ("x", "y", "z"),
+                                           recorder.AccelPlatform, units="m/s^2"))
+                    result.add(TimeSeries(f"{series_name}.gyro", sensor_t_s, ("x", "y", "z"),
+                                           recorder.AngVelPlatform, units="rad/s"))
+                elif kind == "coarse_sun_sensor":
+                    result.add(TimeSeries(series_name, sensor_t_s, ("output",), recorder.OutputData, units="-"))
+                elif kind == "magnetometer":
+                    result.add(TimeSeries(series_name, sensor_t_s, ("x", "y", "z"), recorder.tam_S, units="T"))
         return result

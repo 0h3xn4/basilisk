@@ -35,13 +35,14 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
-from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QSplitter, QTabWidget
+from PySide6.QtWidgets import QDialog, QFileDialog, QMainWindow, QMessageBox, QSplitter, QTabWidget
 
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
 from .kernel_status_widget import KernelStatusWidget
 from .results_widget import ResultsWidget
 from .run_worker import RunWorker
 from .scenario_editor import ScenarioEditorWidget
+from .vizard_dialog import VizardDialog
 
 _FILE_FILTER = "missionStudio scenario (*.json)"
 
@@ -54,6 +55,7 @@ class MainWindow(QMainWindow):
         self._current_path: Path | None = None
         self._dirty = False
         self._run_worker: RunWorker | None = None
+        self._vizard_request = None  # engine.vizard.VizardRequest, or None -- set via the Run menu's "Vizard..." action
 
         self.scenario_editor = ScenarioEditorWidget()
         self.scenario_editor.reset_to_default()
@@ -122,6 +124,11 @@ class MainWindow(QMainWindow):
         check_kernels_action.triggered.connect(self.kernel_status_widget.refresh)
         run_menu.addAction(check_kernels_action)
         self.check_kernels_action = check_kernels_action
+
+        vizard_action = QAction("&Vizard...", self)
+        vizard_action.triggered.connect(self.on_configure_vizard)
+        run_menu.addAction(vizard_action)
+        self.vizard_action = vizard_action
 
     def _update_window_title(self) -> None:
         name = self._current_path.name if self._current_path else "untitled"
@@ -208,6 +215,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved {path}")
 
     # -- Run --------------------------------------------------------------
+    def on_configure_vizard(self) -> None:
+        current_save_file = getattr(self._vizard_request, "save_file", None)
+        current_live_stream = getattr(self._vizard_request, "live_stream", False)
+        dialog = VizardDialog(current_save_file=current_save_file, current_live_stream=current_live_stream, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._vizard_request = dialog.to_request()
+            if self._vizard_request is None:
+                self.statusBar().showMessage("Vizard disabled for the next run.")
+            else:
+                self.statusBar().showMessage("Vizard enabled for the next run.")
+
     def on_run(self) -> None:
         try:
             scenario = self.scenario_editor.to_scenario()
@@ -217,7 +235,7 @@ class MainWindow(QMainWindow):
 
         self.run_action.setEnabled(False)
         self.statusBar().showMessage(f"Running {scenario.name}...")
-        self._run_worker = RunWorker(scenario)
+        self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request)
         self._run_worker.finished_ok.connect(self._on_run_finished)
         self._run_worker.failed.connect(self._on_run_failed)
         self._run_worker.start()

@@ -18,37 +18,62 @@
 
 """Spacecraft list + per-spacecraft editor dialog.
 
-Scope note: only edits the :class:`schema.scenario.SpacecraftConfig`
-fields ``engine.service.SimulationService`` actually consumes (name,
-orbit, dry mass, inertia, initial attitude/rate) -- deliberately no
-editor for ``sensors``/``actuators``/``fsw_mode``/drag/SRP, which the
-service doesn't wire up yet (see ``service.py``'s module docstring). Those
-fields still round-trip through save/load (the schema keeps their
-defaults), so a scenario file with them set by a later tool/phase won't
-be clobbered by editing it here -- there is just no Phase 1 UI for them.
+Phase 1 scope note (superseded): editing used to only touch the fields
+``engine.service.SimulationService`` consumed at the time (name, orbit,
+dry mass, inertia, initial attitude/rate) and silently DROPPED
+``sensors``/``actuators``/``fsw_mode``/``fsw_params``/``control_params``
+on every edit -- ``to_dataclass()`` built a brand new ``SpacecraftConfig``
+without passing them through. That was fine as long as nothing set them
+(no Phase 1 editor did), but it was a latent bug the moment anything else
+did (a hand-edited scenario file, or this Phase 2 editor itself re-editing
+a spacecraft). Fixed now: ``to_dataclass()`` takes the ORIGINAL config (if
+editing one) and carries those fields through unless this dialog's own
+sensor/actuator/FSW editors changed them.
+
+drag/SRP are still not editable here -- ``engine.service`` still doesn't
+wire them up (see that module's docstring) -- so there is deliberately
+still no UI for them, same reasoning as before.
 """
 
 from __future__ import annotations
 
+import json
+
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from ..schema.scenario import OrbitIC, ScenarioValidationError, SpacecraftConfig
+from ..schema.scenario import (
+    ActuatorConfig,
+    OrbitIC,
+    ScenarioValidationError,
+    SensorConfig,
+    SpacecraftConfig,
+    SUPPORTED_ACTUATOR_KINDS,
+    SUPPORTED_FSW_MODES,
+    SUPPORTED_SENSOR_KINDS,
+)
 from .orbit_ic_widget import OrbitIcWidget
+from .sensor_actuator_editor import SensorActuatorListWidget
+
+_FSW_MODE_NONE_LABEL = "(none -- no attitude control)"
 
 
 def _spin(minimum: float, maximum: float, decimals: int = 4, step: float = 1.0, value: float = 0.0) -> QDoubleSpinBox:
@@ -69,7 +94,12 @@ class SpacecraftEditorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Spacecraft" if config is None else f"Spacecraft: {config.name}")
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        outer_layout.addWidget(tabs)
+
+        orbit_tab = QWidget()
+        layout = QVBoxLayout(orbit_tab)
 
         top_form = QFormLayout()
         self.name_edit = QLineEdit(config.name if config else "sat-1")
@@ -114,10 +144,51 @@ class SpacecraftEditorDialog(QDialog):
         if config is not None:
             self.orbit_widget.from_dataclass(config.orbit)
 
+        tabs.addTab(orbit_tab, "Orbit / mass")
+
+        # -- Sensors / actuators tab (Phase 2) --------------------------------
+        sensors_tab = QWidget()
+        sensors_layout = QVBoxLayout(sensors_tab)
+        sensors_layout.addWidget(QLabel("Sensors"))
+        self.sensor_list = SensorActuatorListWidget(SensorConfig, SUPPORTED_SENSOR_KINDS)
+        sensors_layout.addWidget(self.sensor_list)
+        sensors_layout.addWidget(QLabel("Actuators"))
+        self.actuator_list = SensorActuatorListWidget(ActuatorConfig, SUPPORTED_ACTUATOR_KINDS)
+        sensors_layout.addWidget(self.actuator_list)
+        if config is not None:
+            self.sensor_list.from_list(config.sensors)
+            self.actuator_list.from_list(config.actuators)
+        tabs.addTab(sensors_tab, "Sensors / actuators")
+
+        # -- Attitude control (FSW) tab (Phase 2) -----------------------------
+        fsw_tab = QWidget()
+        fsw_layout = QVBoxLayout(fsw_tab)
+        fsw_form = QFormLayout()
+        self.fsw_mode_combo = QComboBox()
+        self.fsw_mode_combo.addItem(_FSW_MODE_NONE_LABEL, userData=None)
+        for mode in SUPPORTED_FSW_MODES:
+            self.fsw_mode_combo.addItem(mode, userData=mode)
+        fsw_form.addRow("FSW mode", self.fsw_mode_combo)
+        fsw_layout.addLayout(fsw_form)
+        fsw_layout.addWidget(QLabel(
+            "FSW params (JSON object) -- e.g. {\"sigma_R0N\": [0,0,0]} for inertial3D, "
+            "{\"target_ground_station\": \"name\", \"pHat_B\": [0,0,1]} for locationPointing"
+        ))
+        self.fsw_params_edit = QPlainTextEdit(json.dumps(config.fsw_params if config else {}, indent=2))
+        fsw_layout.addWidget(self.fsw_params_edit)
+        fsw_layout.addWidget(QLabel("Control gains (JSON object) -- e.g. {\"K\": 3.5, \"P\": 30.0}"))
+        self.control_params_edit = QPlainTextEdit(json.dumps(config.control_params if config else {}, indent=2))
+        fsw_layout.addWidget(self.control_params_edit)
+        if config is not None and config.fsw_mode is not None:
+            index = self.fsw_mode_combo.findData(config.fsw_mode)
+            if index >= 0:
+                self.fsw_mode_combo.setCurrentIndex(index)
+        tabs.addTab(fsw_tab, "Attitude control (FSW)")
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        outer_layout.addWidget(buttons)
 
     def _on_accept(self) -> None:
         try:
@@ -125,7 +196,20 @@ class SpacecraftEditorDialog(QDialog):
         except ScenarioValidationError as exc:
             QMessageBox.critical(self, "Invalid spacecraft", str(exc))
             return
+        except ValueError as exc:
+            QMessageBox.critical(self, "Invalid JSON", str(exc))
+            return
         self.accept()
+
+    def _parse_json_object(self, edit: QPlainTextEdit, field_label: str) -> dict:
+        text = edit.toPlainText().strip() or "{}"
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{field_label} is not valid JSON: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"{field_label} must be a JSON object")
+        return value
 
     def to_dataclass(self) -> SpacecraftConfig:
         name = self.name_edit.text().strip()
@@ -140,6 +224,11 @@ class SpacecraftEditorDialog(QDialog):
             ],
             sigma_bn_init=[self.sigma1.value(), self.sigma2.value(), self.sigma3.value()],
             omega_bn_b_init_rad_s=[self.omega1.value(), self.omega2.value(), self.omega3.value()],
+            sensors=self.sensor_list.to_list(),
+            actuators=self.actuator_list.to_list(),
+            fsw_mode=self.fsw_mode_combo.currentData(),
+            fsw_params=self._parse_json_object(self.fsw_params_edit, "FSW params"),
+            control_params=self._parse_json_object(self.control_params_edit, "Control gains"),
         )
         config.validate()  # raises ScenarioValidationError with a specific message on anything bad
         return config

@@ -5,6 +5,7 @@ import json
 import pytest
 
 from missionstudio.schema import (
+    ActuatorConfig,
     GravityConfig,
     GroundStationConfig,
     OrbitIC,
@@ -161,3 +162,123 @@ def test_load_scenario_future_schema_version_gives_clear_error(tmp_path):
     path.write_text(json.dumps({"schema_version": 999, "name": "from the future", "epoch_utc": "2030-01-01T00:00:00"}))
     with pytest.raises(ScenarioValidationError, match="upgrade missionStudio"):
         load_scenario(path)
+
+
+# -- Phase 2: sensors/actuators/FSW mode validation ---------------------------
+
+def test_unsupported_sensor_kind_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].sensors = [SensorConfig(kind="lidar", name="l-1")]
+    with pytest.raises(ScenarioValidationError, match="must be one of"):
+        sc.validate()
+
+
+def test_unsupported_actuator_kind_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].actuators = [ActuatorConfig(kind="ion_engine", name="ie-1")]
+    with pytest.raises(ScenarioValidationError, match="must be one of"):
+        sc.validate()
+
+
+def test_duplicate_sensor_names_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].sensors = [SensorConfig(kind="imu", name="dup"), SensorConfig(kind="star_tracker", name="dup")]
+    with pytest.raises(ScenarioValidationError, match="sensor names must be unique"):
+        sc.validate()
+
+
+def test_duplicate_actuator_names_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].actuators = [
+        ActuatorConfig(kind="reaction_wheel", name="dup", params={"gsHat_B": [1, 0, 0]}),
+        ActuatorConfig(kind="thruster", name="dup"),
+    ]
+    with pytest.raises(ScenarioValidationError, match="actuator names must be unique"):
+        sc.validate()
+
+
+def test_coarse_sun_sensor_requires_nHat_B():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].sensors = [SensorConfig(kind="coarse_sun_sensor", name="css-1")]
+    with pytest.raises(ScenarioValidationError, match="nHat_B"):
+        sc.validate()
+
+
+def test_reaction_wheel_requires_gsHat_B():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].actuators = [ActuatorConfig(kind="reaction_wheel", name="rw-1")]
+    with pytest.raises(ScenarioValidationError, match="gsHat_B"):
+        sc.validate()
+
+
+def test_unsupported_fsw_mode_rejected():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].fsw_mode = "sunTrackingRasterScan"
+    with pytest.raises(ScenarioValidationError, match="fsw_mode"):
+        sc.validate()
+
+
+def test_none_fsw_mode_is_valid():
+    _minimal_scenario().validate()  # fsw_mode defaults to None -- must not raise
+
+
+@pytest.mark.parametrize("mode", ["inertial3D", "hillPoint", "velocityPoint", "sunSafePoint"])
+def test_every_supported_fsw_mode_validates(mode):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].fsw_mode = mode
+    sc.validate()  # must not raise
+
+
+def test_location_pointing_requires_exactly_one_target():
+    sc = _minimal_scenario()
+    sc.spacecraft[0].fsw_mode = "locationPointing"
+    sc.spacecraft[0].fsw_params = {}  # neither target given
+    with pytest.raises(ScenarioValidationError, match="exactly one of"):
+        sc.validate()
+
+    sc.spacecraft[0].fsw_params = {"target_ground_station": "gs-1", "target_body": "sun"}  # both given
+    with pytest.raises(ScenarioValidationError, match="exactly one of"):
+        sc.validate()
+
+
+def test_location_pointing_target_ground_station_must_exist():
+    sc = _minimal_scenario()
+    sc.ground_stations = [GroundStationConfig(name="gs-1", latitude_deg=40.0, longitude_deg=-105.0)]
+    sc.spacecraft[0].fsw_mode = "locationPointing"
+    sc.spacecraft[0].fsw_params = {"target_ground_station": "gs-does-not-exist"}
+    with pytest.raises(ScenarioValidationError, match="not one of this scenario's ground_stations"):
+        sc.validate()
+
+
+def test_location_pointing_with_existing_ground_station_validates():
+    sc = _minimal_scenario()
+    sc.ground_stations = [GroundStationConfig(name="gs-1", latitude_deg=40.0, longitude_deg=-105.0)]
+    sc.spacecraft[0].fsw_mode = "locationPointing"
+    sc.spacecraft[0].fsw_params = {"target_ground_station": "gs-1"}
+    sc.validate()  # must not raise
+
+
+def test_location_pointing_with_target_body_validates_structurally():
+    # Schema-valid (exactly one target given); engine.fsw is what rejects
+    # target_body as not-yet-wired-up at run time, not schema validation.
+    sc = _minimal_scenario()
+    sc.spacecraft[0].fsw_mode = "locationPointing"
+    sc.spacecraft[0].fsw_params = {"target_body": "sun"}
+    sc.validate()  # must not raise
+
+
+def test_phase2_fields_round_trip_through_save_load(tmp_path):
+    sc = _minimal_scenario()
+    sc.spacecraft[0].sensors = [SensorConfig(kind="coarse_sun_sensor", name="css-1", params={"nHat_B": [1, 0, 0]})]
+    sc.spacecraft[0].actuators = [ActuatorConfig(kind="reaction_wheel", name="rw-1", params={"gsHat_B": [0, 1, 0]})]
+    sc.spacecraft[0].fsw_mode = "hillPoint"
+    sc.spacecraft[0].control_params = {"K": 4.0, "P": 25.0}
+
+    path = tmp_path / "scenario.json"
+    sc.save(path)
+    loaded = load_scenario(path)
+
+    assert loaded.spacecraft[0].sensors[0].params["nHat_B"] == [1, 0, 0]
+    assert loaded.spacecraft[0].actuators[0].params["gsHat_B"] == [0, 1, 0]
+    assert loaded.spacecraft[0].fsw_mode == "hillPoint"
+    assert loaded.spacecraft[0].control_params == {"K": 4.0, "P": 25.0}
