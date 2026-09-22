@@ -12,78 +12,166 @@ analysis + packaging, on top of Phase 0's backend foundations, Phase 1's
 PySide6 GUI/CLI, and Phase 2's attitude/sensors/actuators/Vizard work. See
 "What Phase 3 adds" below for exactly what that means.
 
+## Getting started
+
+Everything below was actually run, not just written and assumed to work --
+including step 2, which for most of this project's history looked like it
+would need a from-source Basilisk build (fragile, and blocked in this
+project's own sandbox). It turned out Basilisk now publishes a prebuilt
+wheel to PyPI, and installing it that way genuinely works.
+
+**1. Prerequisites**
+
+* Linux, Python 3.9+.
+* `python3 -m venv` (or your preferred environment tool) -- everything
+  below assumes a virtualenv so it doesn't touch your system Python.
+
+**2. Install Basilisk**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install "bsk[all]"
+```
+
+This is Basilisk's own recommended install path (see `../docs/source/Install.rst`
+in this checkout) -- a prebuilt wheel from PyPI, no compiler or Conan
+required. It was genuinely run in this project's development sandbox: the
+wheel downloads and installs cleanly, and every Basilisk module/class this
+app's code imports (across all three phases) was confirmed present.
+Building from source is still possible and documented
+(`../docs/source/Build.rst`) if you need an unpublished feature or a
+locally-modified Basilisk, but it's no longer the first thing to reach for.
+
+**3. Install missionStudio**
+
+```bash
+cd missionStudio
+pip install -e ".[dev,gui]"
+```
+
+(Or skip steps 2-3 and run `packaging/install.sh --basilisk-wheel "bsk[all]"`
+instead, which does both in one shot into its own private venv and adds a
+desktop launcher -- see `packaging/README.md`. That flag genuinely works
+now, for the same reason step 2 does.)
+
+**4. Check it's working**
+
+```bash
+missionstudio kernels-status
+```
+
+The first time you run anything that touches SPICE (this command, `run`,
+or the GUI's Run menu), Basilisk downloads a handful of standard SPICE
+kernels (leap-seconds, planetary ephemeris, ~100 MB total) from NAIF and
+caches them locally -- this needs working internet access to
+`naif.jpl.nasa.gov` once. `kernels-status` reports exactly which kernels
+are missing/cached and why, rather than failing silently deep inside a
+run.
+
+**5. Run something**
+
+```bash
+missionstudio validate missionstudio/scenarios/two_body_validation.json
+missionstudio run missionstudio/scenarios/two_body_validation.json --out-dir results/
+```
+
+or launch the GUI:
+
+```bash
+missionstudio gui
+```
+
+File > Open the same scenario, or build one from scratch (spacecraft,
+sensors, actuators, FSW mode, ground stations, Monte Carlo dispersions --
+all editable live with validation feedback), then Run > Run Simulation.
+
+**If something doesn't work**, the "Environment honesty note" right below
+explains exactly what this project could and couldn't verify in its own
+sandbox (a network policy there blocks the NAIF kernel host specifically,
+so the one thing NOT independently confirmed end-to-end is a full run
+past kernel loading) -- read it before assuming a failure is a bug rather
+than a network/environment issue on your end.
+
 ## Environment honesty note (read this first)
 
-This checkout does not have a built Basilisk Python package available. A
-from-source build was attempted in this development sandbox and failed:
-`conanfile.py` reached the dependency-resolution step and then failed to
-fetch `eigen/3.4.0` from Conan Center, because this sandbox's outbound
--network policy blocks `center2.conan.io` (a 403 policy denial, not a
-flaky network -- confirmed directly). `celestrak.org` is blocked the same
-way.
+Earlier in this project, this checkout had no Basilisk Python package
+available: a from-source build was attempted and failed (`conanfile.py`
+couldn't reach Conan Center through this sandbox's outbound-network
+policy). That's no longer the full picture -- `pip install "bsk[all]"`
+(Basilisk's own published PyPI wheel) turned out to work in the same
+sandbox, and was used to genuinely re-verify most of the Basilisk
+-dependent code below for the first time. `celestrak.org` and the NAIF
+kernel host (`naif.jpl.nasa.gov`, plus its `hanspeterschaub.info` backup
+mirror) remain blocked, which is the one gap left -- see the per-item
+notes below for exactly what that does and doesn't affect.
 
-Consequently, in **this** environment:
+Status, as of this Basilisk-build re-verification pass:
 
 * Everything in `missionstudio/schema/`, `missionstudio/engine/spaceweather.py`,
   `missionstudio/engine/results.py`, `missionstudio/cli.py`, and **the
   entire `missionstudio/gui/` package** (including Phase 2's sensor/
   actuator/FSW-mode/Vizard-request editors and Phase 3's Monte Carlo
-  editor) has **no Basilisk import** and has been fully exercised here --
-  `pytest tests/` genuinely runs and passes 150 tests. That includes the
-  PySide6 GUI: it was built, run headless (`QT_QPA_PLATFORM=offscreen`,
-  set automatically by `tests/conftest.py`), and driven with `pytest-qt`
-  for real -- every form field, every Save/Open/Run menu action,
-  dirty-state tracking, and the unsaved-changes close-confirmation prompt
-  is exercised by an actual running `QApplication`, not asserted about in
-  the abstract. Getting PySide6 itself running headless in this sandbox
-  needed three system packages beyond what was preinstalled (`libegl1
-  libopengl0 libxcb-cursor0` on this Ubuntu-based image, via `apt-get`) --
-  worth knowing if a deployment target hits the same `ImportError:
-  libEGL.so.1: cannot open shared object file` this session hit first.
+  editor) has **no Basilisk import** and has been fully exercised, with or
+  without Basilisk present -- `pytest tests/` genuinely runs and passes
+  150 tests either way (see "Running the tests" below for the
+  with-Basilisk count). That includes the PySide6 GUI: it was built, run
+  headless (`QT_QPA_PLATFORM=offscreen`, set automatically by
+  `tests/conftest.py`), and driven with `pytest-qt` for real -- every form
+  field, every Save/Open/Run menu action, dirty-state tracking, and the
+  unsaved-changes close-confirmation prompt is exercised by an actual
+  running `QApplication`, not asserted about in the abstract. Getting
+  PySide6 itself running headless needed three system packages beyond
+  what was preinstalled (`libegl1 libopengl0 libxcb-cursor0` on the
+  Ubuntu-based image this was developed on, via `apt-get`) -- worth
+  knowing if a deployment target hits the same `ImportError:
+  libEGL.so.1: cannot open shared object file`.
 * `missionstudio/engine/time_system.py`, `kernels.py`, `service.py`,
   `fsw.py`/`vizard.py` (Phase 2), and `monte_carlo.py` (Phase 3) import
-  Basilisk and **could not be executed or tested here**. They are written
-  directly against this checkout's own verified source (module names,
-  function signatures, and call sequences confirmed by reading the actual
-  `.py`/`.cpp`/`.h`/`.i` files in `../src/`, and in several cases by
-  copying an exact call sequence already proven to work in a real,
-  already-run example script -- `../missionAnalysis/run_constellation_mission.py`
-  for Phase 0/1, `../examples/scenarioAttitudeFeedbackRW.py`/
-  `scenarioAttitudeGuidance.py`/`scenarioHohmann.py`/`scenarioAttLocPoint.py`
-  for Phase 2's FSW chain, and `src/utilities/MonteCarlo/README.md` (plus
-  `Controller.py`'s own path-parsing source) for Phase 3's Monte Carlo
-  bridge -- not from memory, and not guessed. Each of these files'
-  docstring says exactly which parts are verified-by-example versus
-  verified-by-reading-source-only, so nothing here should be trusted as
-  "tested" that isn't.
-* **Phase 3's packaging scripts (`packaging/build_wheel.sh`,
-  `packaging/install.sh`) WERE genuinely run here**, unlike the
-  Basilisk-dependent engine code above -- building `missionstudio`'s wheel
-  needs no Basilisk. Both scripts were run for real, including twice in a
-  row to catch a real bug (see `packaging/README.md`); the one path that
-  couldn't be exercised is `install.sh --basilisk-wheel`, because this
-  sandbox has no built Basilisk wheel to vendor.
-* Because the GUI and CLI both genuinely can't import Basilisk here, both
-  were also proven to FAIL GRACEFULLY under that exact condition, for
-  real: `gui.run_worker.RunWorker`, `gui.kernel_status_widget`, and
-  `cli.py`'s `run`/`kernels-status` commands all correctly report "Basilisk
-  is not installed/built" (with no crash, no hang, no silent no-op) when
-  actually run in this environment -- this is not a mocked-ImportError
-  test, it is what genuinely happens.
+  Basilisk. Against a real `bsk[all]` install: every Basilisk module/class
+  any of these files import was confirmed to exist under the expected
+  name; `time_system.py`'s SPICE call sequence was run for real
+  (round-tripping an epoch through ET and back, computing TAI/TT) and a
+  real bug was found and fixed doing so (a bare `import pyswice` that
+  doesn't match the published package's layout -- see that module's own
+  docstring); `service.py`'s `build()` was confirmed to run correctly
+  through gravity/spacecraft/attitude/sensor/actuator/ground-station
+  construction, failing only at the SPICE kernel DOWNLOAD step (blocked
+  network to NAIF, not a code issue -- see `kernels.py`'s own note). A
+  FULL run past kernel loading -- and so `fsw.py`/`vizard.py`/
+  `monte_carlo.py`'s own module-construction logic, and
+  `tests/test_two_body_validation.py`'s analytical check -- was NOT
+  achieved, purely because that needs the blocked kernel download to
+  succeed first. Each file's own docstring says precisely what was and
+  wasn't confirmed, updated after this pass -- nothing here should be
+  trusted as "tested" beyond what its docstring claims.
+* **Packaging (`packaging/build_wheel.sh`, `packaging/install.sh`) was
+  fully verified, including the Basilisk-vendoring path**: with a real
+  `bsk[all]` available, `install.sh --basilisk-wheel "bsk[all]"` was run
+  end-to-end and the resulting installed venv's `missionstudio.engine.service`
+  imported correctly. See `packaging/README.md`.
+* The GUI/CLI's no-Basilisk error handling (`gui.run_worker.RunWorker`,
+  `gui.kernel_status_widget`, `cli.py`'s `run`/`kernels-status`) was
+  separately confirmed for real in an environment WITHOUT Basilisk
+  installed: each correctly reports "Basilisk is not installed/built"
+  (no crash, no hang, no silent no-op) rather than a bare traceback.
 * `tests/test_two_body_validation.py` -- the end-to-end analytical
   validation scenario this project's own requirements call for -- is
-  written and ready, but is marked `@pytest.mark.requires_basilisk` and
-  auto-skips here (see `tests/conftest.py`). **Run it on a machine with
-  Basilisk built** to get the first real confirmation that
-  `engine.service.SimulationService` actually works.
+  written and ready, correctly auto-skips without Basilisk (see
+  `tests/conftest.py`), and correctly ATTEMPTS a real run with Basilisk
+  present, but could not complete because of the blocked kernel download
+  above. **Run it on a machine with ordinary internet access** to get the
+  first full confirmation that `engine.service.SimulationService`
+  actually produces correct physics.
 
 None of this is a reason to distrust the design -- it's the same
 "write carefully against verified source, disclose what's untested"
-discipline `../missionAnalysis` used throughout this project, applied to
-a new codebase. Phase 1's big change is that far less of the new code
-falls into the "untested" bucket than Phase 0's did, because the GUI
-layer -- unlike the Basilisk engine layer -- has no hard dependency this
-sandbox can't provide.
+discipline `../missionAnalysis` used throughout this project, now backed
+by an actual Basilisk install for most of it. The one thing a user should
+take away: get this running on a machine with normal internet access
+(specifically, access to `naif.jpl.nasa.gov`) and the whole pipeline
+should work end-to-end -- that's the one link in the chain this project's
+own sandbox could never close.
 
 ## What Phase 0 delivers
 
@@ -335,13 +423,20 @@ python3 -m pip install -e ".[dev,gui]"
 python3 -m pytest tests/ -v
 ```
 
-Without a Basilisk build on `PYTHONPATH`, this runs 150 tests (schema,
-space weather, results, CLI, and the full PySide6 GUI, run headless) and
-skips the 2 in `test_two_body_validation.py` with a clear reason, per
-`tests/conftest.py`. With Basilisk built (see `../docs/source/Build.rst`,
-and `../missionAnalysis/README.md`'s own notes on making sure you're on
-the right build), the same command runs all 152, including the analytical
-validation.
+Without Basilisk on `PYTHONPATH`, this runs 150 tests (schema, space
+weather, results, CLI, and the full PySide6 GUI, run headless) and skips
+7 whose premise is specifically "Basilisk is unavailable", per
+`tests/conftest.py`.
+
+With Basilisk installed (`pip install "bsk[all]"` -- see "Getting
+started" above), genuinely run in this project's own sandbox: 143 tests
+pass (the 7 above now run for real instead of skipping) and 2 fail --
+both in `test_two_body_validation.py`, both failing at the SPICE kernel
+-download step because that sandbox's network blocks the NAIF kernel host
+specifically, not because of a code defect (see the honesty note above).
+On a machine with ordinary internet access, expect all 152 to pass; if
+`test_two_body_validation.py` fails there for a different reason, that's
+a real bug worth reporting.
 
 `packaging/build_wheel.sh`/`install.sh` are NOT run by `pytest` (they're
 shell scripts that build/install a real wheel, not something worth
@@ -461,15 +556,23 @@ clear error (not a crash) if Basilisk isn't installed/built.
 
 Building from source in an automated/CI/sandboxed context is fragile --
 this project hit exactly that failure mode moments before Phase 0 started
-(see the honesty note above). The plan flagged since Phase 0, and now
-implemented on the receiving end in `packaging/install.sh`, is to **vendor
-a prebuilt wheel pinned to a specific Basilisk release/commit** as the
-default install path for end users (`install.sh --basilisk-wheel
-PATH_OR_URL`), keeping "build from source" a documented, opt-in developer
-path only. Producing that wheel in the first place is a separate,
-one-time release-engineering task this project's own development sandbox
-cannot do (no Basilisk build here) -- see `packaging/README.md` for the
-full picture of what was and wasn't verified.
+(see the honesty note above). The plan flagged since Phase 0 was to
+**vendor a prebuilt wheel pinned to a specific Basilisk release/commit**
+as the default install path for end users, keeping "build from source" a
+documented, opt-in developer path only.
+
+That plan turned out to be simpler to satisfy than expected: Basilisk
+itself now publishes prebuilt wheels to PyPI (`pip install "bsk[all]"`),
+so there is usually no separate wheel to hunt down or vendor at all --
+"Getting started" above IS the vendoring story for most users.
+`packaging/install.sh --basilisk-wheel` still exists and still works (it
+was run end-to-end against `"bsk[all]"` for real -- see
+`packaging/README.md`) for the cases that DO need something other than
+the published PyPI package: a specific pinned/older release for
+reproducibility, a locally-built wheel with custom modules, or an offline
+install from a wheel file already on disk. `--basilisk-wheel` accepts any
+string `pip install` would (a path, a URL, or a plain requirement
+specifier like `"bsk[all]==2.12.0"`), not literally only a `.whl` file.
 
 ## Known limitations carried over from the capability audit
 
@@ -514,11 +617,15 @@ specifically:
 * **Monte Carlo retains a fixed set of data per run** (each spacecraft's
   position/velocity) -- there is no per-run custom retention-policy
   selection in the schema yet.
-* **No Basilisk wheel is vendored in `packaging/`** -- `install.sh
-  --basilisk-wheel` is written and its non-Basilisk-specific mechanics
-  (create a venv, `pip install` a wheel into it) are sound, but this
-  project's development sandbox has never had a Basilisk build to produce
-  or test a wheel from. See `packaging/README.md`.
+* **A full end-to-end simulation run (past SPICE kernel loading) has never
+  completed in this project's own development sandbox** -- its network
+  policy blocks the NAIF kernel host, so `engine.kernels`'s download step
+  always fails there (correctly, with a clear error -- see the honesty
+  note above). Everything up to that point (gravity/spacecraft/attitude
+  /sensor/actuator/ground-station construction) was confirmed to run
+  correctly against a real Basilisk build; the numerical propagation
+  itself, and `tests/test_two_body_validation.py`'s analytical check,
+  still need to be run once on a machine with ordinary internet access.
 
 ## What's next
 
@@ -529,8 +636,11 @@ attitude/sensors/actuators/Vizard; Phase 3: Monte Carlo + access analysis
 what's left: a handful of schema-valid-but-not-wired-up options (celestial
 -body `locationPointing` targets, thrusters, magnetic torque rods,
 non-Earth spherical harmonics/magnetometer), navigation error modeling,
-richer Monte Carlo retention, and -- the one requiring resources this
-development sandbox doesn't have -- an actual vendored Basilisk wheel to
-make `packaging/install.sh` produce a fully self-contained installer.
-None of it is blocked on a design decision; each item is scoped and
-documented at its own call site for whoever picks it up next.
+richer Monte Carlo retention, and -- the one requiring something this
+development sandbox's network policy specifically blocks -- a full
+simulation run past SPICE kernel loading, to get the first true
+end-to-end confirmation (including `test_two_body_validation.py`'s
+analytical check) on top of everything up to that point already being
+verified against a real Basilisk install. None of it is blocked on a
+design decision; each item is scoped and documented at its own call site
+for whoever picks it up next.

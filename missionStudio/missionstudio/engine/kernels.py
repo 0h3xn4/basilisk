@@ -25,11 +25,24 @@ a status report so the app is never silently trusting a kernel the user
 can't see or verify. Satisfies the "auto-download/cache with version
 pinning, not silent hardcoding" requirement.
 
-Requires a Basilisk build (imports ``Basilisk.utilities...``) -- cannot be
-executed in this development sandbox (no Basilisk build here; see
-``missionStudio/README.md``). Written directly against the verified
-``dataFetcher``/``spiceKernels``/``simIncludeGravBody`` source in this
-checkout (not from memory) -- exercise on first real run.
+Requires a Basilisk build (imports ``Basilisk.utilities...``). Written
+directly against the verified ``dataFetcher``/``spiceKernels``/
+``simIncludeGravBody`` source in this checkout (not from memory).
+
+Verification status: this module's CODE PATHS (the ``ensure_kernels``/
+``require_kernels``/``build_spice_interface`` call sequence, and the clear
+``KernelError`` it raises on failure) were exercised for real against a
+genuine Basilisk build (``pip install "bsk[all]"`` -- see
+``missionStudio/README.md``'s "Getting started" section), and behaved
+exactly as designed. The actual KERNEL DOWNLOAD could not be completed in
+that same environment: its network egress to ``naif.jpl.nasa.gov`` (and
+the ``hanspeterschaub.info`` backup mirror ``dataFetcher`` itself falls
+back to) was blocked, so every kernel fetch failed there -- correctly
+surfaced as a specific ``KernelError`` naming each kernel and the
+underlying network error, never a silent hang or a bare traceback. On a
+machine with ordinary internet access this same code should fetch and
+cache the kernels normally; that path specifically (the download
+succeeding) remains unverified.
 """
 
 from __future__ import annotations
