@@ -208,6 +208,117 @@ def test_dialog_round_trips_station_keeping(qtbot):
     assert got.station_keeping == existing.station_keeping
 
 
+def test_dialog_phasing_keeping_defaults_to_none(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    assert not dialog.phasing_keeping_group.isChecked()
+    sc = dialog.to_dataclass()
+    assert sc.phasing_keeping is None
+
+
+def test_dialog_phasing_keeping_chief_combo_lists_other_spacecraft(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog(other_spacecraft_names=["chief", "follower-2"])
+    qtbot.addWidget(dialog)
+    dialog.phasing_keeping_group.setChecked(True)  # a checkable QGroupBox disables its children while unchecked
+    assert dialog.pk_chief_combo.isEnabled()
+    names = {dialog.pk_chief_combo.itemData(i) for i in range(dialog.pk_chief_combo.count())}
+    assert names == {"chief", "follower-2"}
+
+
+def test_dialog_phasing_keeping_disabled_combo_with_no_other_spacecraft(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog()
+    qtbot.addWidget(dialog)
+    dialog.phasing_keeping_group.setChecked(True)  # isolate this widget's OWN disabled state from the group's
+    assert not dialog.pk_chief_combo.isEnabled()
+    assert dialog.pk_chief_combo.currentData() is None
+
+
+def test_dialog_phasing_keeping_requires_a_selectable_chief(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import ScenarioValidationError
+
+    dialog = SpacecraftEditorDialog()  # no other_spacecraft_names -- combo disabled
+    qtbot.addWidget(dialog)
+    dialog.station_keeping_group.setChecked(True)
+    dialog.phasing_keeping_group.setChecked(True)
+    with pytest.raises(ScenarioValidationError, match="no chief spacecraft is selectable"):
+        dialog.to_dataclass()
+
+
+def test_dialog_builds_phasing_keeping_config_when_group_checked(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+
+    dialog = SpacecraftEditorDialog(other_spacecraft_names=["chief"])
+    qtbot.addWidget(dialog)
+    dialog.station_keeping_group.setChecked(True)  # phasing_keeping requires this
+    dialog.phasing_keeping_group.setChecked(True)
+    dialog.pk_target_separation_edit.setText("1000, 500, 100")
+    dialog.pk_reconfiguration_interval_days.setValue(60.0)
+    dialog.pk_tolerance_fraction.setValue(0.2)
+    dialog.pk_restore_tolerance_fraction.setValue(0.05)
+    dialog.pk_correction_window_days.setValue(14.0)
+    dialog.pk_max_drift_days.setValue(45.0)
+    dialog.pk_max_delta_sma_km.setValue(2.0)
+
+    sc = dialog.to_dataclass()
+    assert sc.phasing_keeping is not None
+    assert sc.phasing_keeping.chief_spacecraft == "chief"
+    assert sc.phasing_keeping.target_separation_km == [1000.0, 500.0, 100.0]
+    assert sc.phasing_keeping.reconfiguration_interval_days == 60.0
+    assert sc.phasing_keeping.tolerance_fraction == 0.2
+    assert sc.phasing_keeping.restore_tolerance_fraction == 0.05
+    assert sc.phasing_keeping.correction_window_days == 14.0
+    assert sc.phasing_keeping.max_drift_days == 45.0
+    assert sc.phasing_keeping.max_delta_semi_major_axis_km == 2.0
+
+
+def test_dialog_phasing_keeping_rejects_malformed_separation_list(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import ScenarioValidationError
+
+    dialog = SpacecraftEditorDialog(other_spacecraft_names=["chief"])
+    qtbot.addWidget(dialog)
+    dialog.station_keeping_group.setChecked(True)
+    dialog.phasing_keeping_group.setChecked(True)
+    dialog.pk_target_separation_edit.setText("not, a, number")
+    with pytest.raises(ScenarioValidationError, match="comma-separated numbers"):
+        dialog.to_dataclass()
+
+
+def test_dialog_round_trips_phasing_keeping(qtbot):
+    from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
+    from missionstudio.schema.scenario import (
+        OrbitIC,
+        PhasingKeepingConfig,
+        SpacecraftConfig,
+        StationKeepingConfig,
+    )
+
+    existing = SpacecraftConfig(
+        name="sat-follower",
+        orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0], velocity_km_s=[0, 7.5, 0]),
+        station_keeping=StationKeepingConfig(target_altitude_km=550.0, deadband_km=1.5, thrust_n=0.015,
+                                              isp_s=1550.0, propellant_kg=2.5),
+        phasing_keeping=PhasingKeepingConfig(chief_spacecraft="chief", target_separation_km=[250.0, 100.0],
+                                              reconfiguration_interval_days=45.0),
+    )
+    dialog = SpacecraftEditorDialog(config=existing, other_spacecraft_names=["chief"])
+    qtbot.addWidget(dialog)
+
+    assert dialog.phasing_keeping_group.isChecked()
+    assert dialog.pk_chief_combo.currentData() == "chief"
+    assert dialog.pk_target_separation_edit.text() == "250, 100"
+
+    got = dialog.to_dataclass()
+    assert got.phasing_keeping == existing.phasing_keeping
+
+
 def test_dialog_rejects_invalid_fsw_params_json(qtbot):
     from missionstudio.gui.spacecraft_editor import SpacecraftEditorDialog
 

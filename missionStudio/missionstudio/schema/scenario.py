@@ -331,6 +331,73 @@ class StationKeepingConfig:
 
 
 @dataclass
+class PhasingKeepingConfig:
+    """Constellation-wide phasing maintenance: holds this (follower)
+    spacecraft's along-track separation from a ``chief_spacecraft`` at a
+    target value via a drift-orbit maneuver (a temporary semi-major-axis
+    offset, natural drift, then a restoring burn) --
+    ``engine.orbit_maintenance.PhasingKeepingController``, ported from
+    ``../missionAnalysis``'s controller of the same name. Built for
+    exactly the constellations ``engine.constellation`` generates (a set
+    of co-planar, same-altitude satellites), but works for any two
+    spacecraft sharing an orbital plane and altitude.
+
+    Requires ``station_keeping`` to ALSO be set on this same spacecraft:
+    phasing and altitude-keeping share ONE physical thruster and
+    propellant tank (this config deliberately has no
+    ``thrust_n``/``isp_s``/``propellant_kg`` fields of its own --
+    ``engine.service`` reads those from ``station_keeping`` instead, so
+    there is no way for the two to accidentally disagree about the same
+    hardware), with altitude-keeping taking priority whenever both want to
+    fire on the same tick -- see the controller's own docstring for why.
+
+    ``target_separation_km`` is one or more along-track distances [km]
+    ahead of the chief; with more than one entry, the target steps through
+    them every ``reconfiguration_interval_days`` (holding at the last one
+    once the list is exhausted) -- e.g. ``[1000, 500, 100]`` with
+    ``reconfiguration_interval_days=90`` tightens the formation baseline
+    roughly every 3 months. A single entry holds that separation for the
+    whole mission. The remaining fields are maneuver-tuning knobs with
+    reasonable ported defaults (``../missionAnalysis/mission_config.py``)
+    -- widen ``tolerance_fraction``/``restore_tolerance_fraction`` for
+    fewer, larger corrections, or narrow them for tighter formation
+    -keeping at the cost of more frequent burns; there is no single
+    "correct" answer, it depends on the mission's own ops concept.
+    """
+
+    chief_spacecraft: str
+    target_separation_km: list  # [km] one or more along-track distances ahead of the chief
+    reconfiguration_interval_days: float = 90.0  # [day] only matters if target_separation_km has >1 entry
+    tolerance_fraction: float = 0.10  # [-] trigger threshold, as a fraction of the current target separation
+    restore_tolerance_fraction: float = 0.02  # [-] "close enough, stop drifting" threshold, same units
+    correction_window_days: float = 21.0  # [day] target time to null a fresh phasing error
+    max_drift_days: float = 90.0  # [day] safety cap on the drift coast phase
+    max_delta_semi_major_axis_km: float = 3.0  # [km] safety clamp on the drift-orbit SMA offset
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(bool(self.chief_spacecraft),
+                  f"{spacecraft_name}: phasing_keeping.chief_spacecraft must not be empty")
+        _require(self.chief_spacecraft != spacecraft_name,
+                  f"{spacecraft_name}: phasing_keeping.chief_spacecraft cannot be the spacecraft itself")
+        _require(len(self.target_separation_km) >= 1,
+                  f"{spacecraft_name}: phasing_keeping.target_separation_km needs at least one entry")
+        _require(all(d > 0 for d in self.target_separation_km),
+                  f"{spacecraft_name}: phasing_keeping.target_separation_km entries must all be > 0")
+        _require(self.reconfiguration_interval_days >= 0,
+                  f"{spacecraft_name}: phasing_keeping.reconfiguration_interval_days must be >= 0")
+        _require(0.0 < self.tolerance_fraction,
+                  f"{spacecraft_name}: phasing_keeping.tolerance_fraction must be > 0")
+        _require(0.0 < self.restore_tolerance_fraction,
+                  f"{spacecraft_name}: phasing_keeping.restore_tolerance_fraction must be > 0")
+        _require(self.correction_window_days > 0,
+                  f"{spacecraft_name}: phasing_keeping.correction_window_days must be > 0")
+        _require(self.max_drift_days > 0,
+                  f"{spacecraft_name}: phasing_keeping.max_drift_days must be > 0")
+        _require(self.max_delta_semi_major_axis_km > 0,
+                  f"{spacecraft_name}: phasing_keeping.max_delta_semi_major_axis_km must be > 0")
+
+
+@dataclass
 class SpacecraftConfig:
     name: str
     orbit: OrbitIC
@@ -374,6 +441,7 @@ class SpacecraftConfig:
     power: Optional[PowerConfig] = None
     rf_link: Optional[RFLinkConfig] = None
     station_keeping: Optional[StationKeepingConfig] = None
+    phasing_keeping: Optional[PhasingKeepingConfig] = None
 
     def validate(self) -> None:
         _require(bool(self.name), "spacecraft.name must not be empty")
@@ -426,6 +494,11 @@ class SpacecraftConfig:
             self.rf_link.validate(self.name)
         if self.station_keeping is not None:
             self.station_keeping.validate(self.name)
+        if self.phasing_keeping is not None:
+            _require(self.station_keeping is not None,
+                      f"{self.name}: phasing_keeping requires station_keeping to also be set on this spacecraft "
+                      "-- they share one physical thruster/propellant tank (see PhasingKeepingConfig's docstring)")
+            self.phasing_keeping.validate(self.name)
 
 
 @dataclass
@@ -610,6 +683,11 @@ class Scenario:
                 _require(target_gs in gs_names,
                           f"{sc.name}: fsw_params['target_ground_station'] {target_gs!r} is not one of "
                           f"this scenario's ground_stations {gs_names}")
+        for sc in self.spacecraft:
+            if sc.phasing_keeping is not None:
+                _require(sc.phasing_keeping.chief_spacecraft in names,
+                          f"{sc.name}: phasing_keeping.chief_spacecraft {sc.phasing_keeping.chief_spacecraft!r} "
+                          f"is not one of this scenario's spacecraft {names}")
         self.space_weather.validate()
         self.sim_settings.validate()
         self.monte_carlo.validate()
@@ -646,8 +724,11 @@ class Scenario:
             rf_link = RFLinkConfig(**rf_link_data) if rf_link_data is not None else None
             station_keeping_data = sc.pop("station_keeping", None)
             station_keeping = StationKeepingConfig(**station_keeping_data) if station_keeping_data is not None else None
+            phasing_keeping_data = sc.pop("phasing_keeping", None)
+            phasing_keeping = PhasingKeepingConfig(**phasing_keeping_data) if phasing_keeping_data is not None else None
             spacecraft.append(SpacecraftConfig(orbit=orbit, sensors=sensors, actuators=actuators,
-                                                power=power, rf_link=rf_link, station_keeping=station_keeping, **sc))
+                                                power=power, rf_link=rf_link, station_keeping=station_keeping,
+                                                phasing_keeping=phasing_keeping, **sc))
 
         return Scenario(
             gravity=gravity, sim_settings=sim_settings, space_weather=space_weather,

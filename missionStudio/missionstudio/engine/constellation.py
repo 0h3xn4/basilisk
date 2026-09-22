@@ -62,6 +62,14 @@ to convert altitude to semi-major axis) are hardcoded from Basilisk's own
 than re-derived, so the semi-major axis this module computes matches
 exactly what ``engine.service`` will actually simulate for the same
 ``gravity.central_body``.
+
+Also holds :class:`SeparationSchedule` -- the pure-math schedule
+:class:`~missionstudio.schema.scenario.PhasingKeepingConfig` /
+``engine.orbit_maintenance.PhasingKeepingController`` use for a
+constellation's along-track phasing maintenance over time, kept here
+(rather than in ``engine.orbit_maintenance``, which needs Basilisk) so it
+stays unit-testable alongside the generator that produces the
+constellations it maintains.
 """
 
 from __future__ import annotations
@@ -173,3 +181,39 @@ def generate_walker_constellation(request: WalkerConstellationRequest,
             )
             spacecraft.append(sc)
     return spacecraft
+
+
+class SeparationSchedule:
+    """A time-varying along-track target separation between a
+    ``PhasingKeepingConfig`` follower and its chief, stepping through a
+    list of distances [km] every ``interval_days``, holding at the last
+    entry after the list is exhausted (no looping) -- e.g.
+    ``distances_km=[1000, 500, 100]`` with ``interval_days=90`` tightens
+    the formation baseline every ~3 months, then holds at 100 km for the
+    rest of the mission. A single-entry list holds that one separation for
+    the whole mission regardless of ``interval_days``.
+
+    Distance is converted to a mean-anomaly-equivalent angle via the
+    small-angle arc-length approximation ``theta = distance / a`` (exact
+    for a circular orbit; ``engine.orbit_maintenance.PhasingKeepingController``
+    re-evaluates ``value_at`` every tick rather than reading it once, so
+    this is what "reconfigures the formation every few months" means
+    concretely. Ported unchanged from
+    ``../missionAnalysis/constellation_controllers.py``'s class of the
+    same name (pure math, no Basilisk dependency either there or here).
+    """
+
+    def __init__(self, distances_km, interval_days: float, semi_major_axis_m: float, loop: bool = False):
+        if not distances_km:
+            raise ValueError("SeparationSchedule needs at least one distance")
+        self.targetsRad = [d * 1000.0 / semi_major_axis_m for d in distances_km]  # [rad] arc length s = a*theta
+        self.intervalS = interval_days * 86400.0  # [s]
+        self.loop = loop
+
+    def value_at(self, t_s: float) -> float:
+        """Current target separation [rad] at mission-elapsed time t_s [s]."""
+        if self.intervalS <= 0.0 or len(self.targetsRad) == 1:
+            return self.targetsRad[0]
+        idx = int(t_s // self.intervalS)
+        idx = (idx % len(self.targetsRad)) if self.loop else min(idx, len(self.targetsRad) - 1)
+        return self.targetsRad[idx]

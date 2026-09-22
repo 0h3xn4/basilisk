@@ -11,6 +11,7 @@ from missionstudio.schema import (
     GroundStationConfig,
     MonteCarloConfig,
     OrbitIC,
+    PhasingKeepingConfig,
     PowerConfig,
     RFLinkConfig,
     Scenario,
@@ -569,3 +570,95 @@ def test_station_keeping_rejects_out_of_range_eclipse_threshold():
     )
     with pytest.raises(ScenarioValidationError, match="eclipse_sunlit_threshold"):
         sc.validate()
+
+
+def _chief_and_follower_scenario(**follower_overrides):
+    chief = SpacecraftConfig(
+        name="chief",
+        orbit=OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.0,
+                      inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=0.0),
+    )
+    follower_kwargs = dict(
+        name="follower",
+        orbit=OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.0,
+                      inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=10.0),
+        station_keeping=StationKeepingConfig(target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01,
+                                              isp_s=1500.0, propellant_kg=2.0),
+        phasing_keeping=PhasingKeepingConfig(chief_spacecraft="chief", target_separation_km=[100.0]),
+    )
+    follower_kwargs.update(follower_overrides)
+    follower = SpacecraftConfig(**follower_kwargs)
+    return Scenario(name="phasing test", epoch_utc="2030-01-01T00:00:00", spacecraft=[chief, follower])
+
+
+def test_phasing_keeping_defaults_to_none():
+    sc = _minimal_scenario()
+    assert sc.spacecraft[0].phasing_keeping is None
+    sc.validate()  # must not raise
+
+
+def test_phasing_keeping_round_trips_through_save_load(tmp_path):
+    scenario = _chief_and_follower_scenario()
+    path = tmp_path / "phasing.json"
+    scenario.save(path)
+    loaded = load_scenario(path)
+
+    follower = next(sc for sc in loaded.spacecraft if sc.name == "follower")
+    assert isinstance(follower.phasing_keeping, PhasingKeepingConfig)
+    assert follower.phasing_keeping.chief_spacecraft == "chief"
+    assert follower.phasing_keeping.target_separation_km == [100.0]
+    assert follower.phasing_keeping.tolerance_fraction == 0.10  # default preserved
+
+
+def test_phasing_keeping_requires_station_keeping_on_same_spacecraft():
+    scenario = _chief_and_follower_scenario(station_keeping=None)
+    with pytest.raises(ScenarioValidationError, match="requires station_keeping"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_chief_being_itself():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.chief_spacecraft = "follower"
+    with pytest.raises(ScenarioValidationError, match="cannot be the spacecraft itself"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_unknown_chief_spacecraft():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.chief_spacecraft = "no-such-satellite"
+    with pytest.raises(ScenarioValidationError, match="chief_spacecraft"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_empty_target_separation():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.target_separation_km = []
+    with pytest.raises(ScenarioValidationError, match="target_separation_km"):
+        scenario.validate()
+
+
+def test_phasing_keeping_rejects_non_positive_target_separation():
+    scenario = _chief_and_follower_scenario()
+    scenario.spacecraft[1].phasing_keeping.target_separation_km = [100.0, 0.0]
+    with pytest.raises(ScenarioValidationError, match="target_separation_km"):
+        scenario.validate()
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("reconfiguration_interval_days", -1.0, "reconfiguration_interval_days"),
+    ("tolerance_fraction", 0.0, "tolerance_fraction"),
+    ("restore_tolerance_fraction", 0.0, "restore_tolerance_fraction"),
+    ("correction_window_days", 0.0, "correction_window_days"),
+    ("max_drift_days", 0.0, "max_drift_days"),
+    ("max_delta_semi_major_axis_km", 0.0, "max_delta_semi_major_axis_km"),
+])
+def test_phasing_keeping_rejects_bad_tuning_knobs(field, value, match):
+    scenario = _chief_and_follower_scenario()
+    setattr(scenario.spacecraft[1].phasing_keeping, field, value)
+    with pytest.raises(ScenarioValidationError, match=match):
+        scenario.validate()
+
+
+def test_phasing_keeping_full_scenario_validates():
+    scenario = _chief_and_follower_scenario()
+    scenario.validate()  # must not raise

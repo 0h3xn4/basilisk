@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (
 from ..schema.scenario import (
     ActuatorConfig,
     OrbitIC,
+    PhasingKeepingConfig,
     PowerConfig,
     RFLinkConfig,
     ScenarioValidationError,
@@ -93,9 +94,11 @@ class SpacecraftEditorDialog(QDialog):
     existing config to edit it, or ``None`` for a fresh default.
     """
 
-    def __init__(self, config: SpacecraftConfig | None = None, parent: QWidget | None = None):
+    def __init__(self, config: SpacecraftConfig | None = None, parent: QWidget | None = None,
+                 other_spacecraft_names: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Spacecraft" if config is None else f"Spacecraft: {config.name}")
+        self._other_spacecraft_names = other_spacecraft_names or []
 
         outer_layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -246,6 +249,54 @@ class SpacecraftEditorDialog(QDialog):
         sk_form.addRow("Eclipse sunlit threshold [-]", self.sk_eclipse_sunlit_threshold)
         power_layout.addWidget(self.station_keeping_group)
 
+        # Requires station keeping above -- shares one physical thruster/tank
+        # (see schema.scenario.PhasingKeepingConfig's docstring), so this has
+        # no thrust/Isp/propellant fields of its own.
+        pk0 = config.phasing_keeping if config else None
+        self.phasing_keeping_group = QGroupBox("Phasing keeping (constellation-wide, vs. a chief spacecraft)")
+        self.phasing_keeping_group.setCheckable(True)
+        self.phasing_keeping_group.setChecked(pk0 is not None)
+        pk_form = QFormLayout(self.phasing_keeping_group)
+
+        self.pk_chief_combo = QComboBox()
+        if self._other_spacecraft_names:
+            for other_name in self._other_spacecraft_names:
+                self.pk_chief_combo.addItem(other_name, userData=other_name)
+        else:
+            self.pk_chief_combo.addItem("(add another spacecraft to this scenario first)", userData=None)
+            self.pk_chief_combo.setEnabled(False)
+        pk_form.addRow("Chief spacecraft", self.pk_chief_combo)
+
+        self.pk_target_separation_edit = QLineEdit(
+            ", ".join(f"{d:g}" for d in pk0.target_separation_km) if pk0 else "100"
+        )
+        self.pk_target_separation_edit.setPlaceholderText("e.g. 1000, 500, 100 (comma-separated, km)")
+        pk_form.addRow("Target separation(s) [km]", self.pk_target_separation_edit)
+        self.pk_reconfiguration_interval_days = _spin(
+            0.0, 1.0e5, decimals=2, step=1.0, value=pk0.reconfiguration_interval_days if pk0 else 90.0)
+        pk_form.addRow("Reconfiguration interval [days] (only if >1 separation above)",
+                        self.pk_reconfiguration_interval_days)
+        self.pk_tolerance_fraction = _spin(0.001, 1.0, decimals=4, step=0.01,
+                                            value=pk0.tolerance_fraction if pk0 else 0.10)
+        pk_form.addRow("Trigger tolerance [-] (fraction of target)", self.pk_tolerance_fraction)
+        self.pk_restore_tolerance_fraction = _spin(0.001, 1.0, decimals=4, step=0.01,
+                                                     value=pk0.restore_tolerance_fraction if pk0 else 0.02)
+        pk_form.addRow("Restore tolerance [-] (fraction of target)", self.pk_restore_tolerance_fraction)
+        self.pk_correction_window_days = _spin(0.1, 1.0e4, decimals=2, step=1.0,
+                                                value=pk0.correction_window_days if pk0 else 21.0)
+        pk_form.addRow("Correction window [days]", self.pk_correction_window_days)
+        self.pk_max_drift_days = _spin(0.1, 1.0e4, decimals=2, step=1.0,
+                                        value=pk0.max_drift_days if pk0 else 90.0)
+        pk_form.addRow("Max drift coast [days]", self.pk_max_drift_days)
+        self.pk_max_delta_sma_km = _spin(0.001, 1.0e4, decimals=4, step=0.1,
+                                          value=pk0.max_delta_semi_major_axis_km if pk0 else 3.0)
+        pk_form.addRow("Max drift-orbit SMA offset [km]", self.pk_max_delta_sma_km)
+        if pk0 is not None:
+            chief_index = self.pk_chief_combo.findData(pk0.chief_spacecraft)
+            if chief_index >= 0:
+                self.pk_chief_combo.setCurrentIndex(chief_index)
+        power_layout.addWidget(self.phasing_keeping_group)
+
         rf_link0 = config.rf_link if config else None
         self.rf_link_group = QGroupBox("Downlink RF link budget (margin ESTIMATE only)")
         self.rf_link_group.setCheckable(True)
@@ -320,6 +371,7 @@ class SpacecraftEditorDialog(QDialog):
             power=self._power_to_dataclass(),
             rf_link=self._rf_link_to_dataclass(),
             station_keeping=self._station_keeping_to_dataclass(),
+            phasing_keeping=self._phasing_keeping_to_dataclass(),
         )
         config.validate()  # raises ScenarioValidationError with a specific message on anything bad
         return config
@@ -334,6 +386,35 @@ class SpacecraftEditorDialog(QDialog):
             isp_s=self.sk_isp_s.value(),
             propellant_kg=self.sk_propellant_kg.value(),
             eclipse_sunlit_threshold=self.sk_eclipse_sunlit_threshold.value(),
+        )
+
+    def _phasing_keeping_to_dataclass(self) -> PhasingKeepingConfig | None:
+        if not self.phasing_keeping_group.isChecked():
+            return None
+        chief = self.pk_chief_combo.currentData()
+        if chief is None:
+            raise ScenarioValidationError(
+                "phasing_keeping is enabled but no chief spacecraft is selectable -- add another "
+                "spacecraft to this scenario first, or uncheck 'Phasing keeping'"
+            )
+        raw = self.pk_target_separation_edit.text().strip()
+        try:
+            target_separation_km = [float(part.strip()) for part in raw.split(",") if part.strip()]
+        except ValueError as exc:
+            raise ScenarioValidationError(
+                f"Target separation(s) must be comma-separated numbers (e.g. '1000, 500, 100'): {exc}"
+            ) from exc
+        if not target_separation_km:
+            raise ScenarioValidationError("Target separation(s) needs at least one number")
+        return PhasingKeepingConfig(
+            chief_spacecraft=chief,
+            target_separation_km=target_separation_km,
+            reconfiguration_interval_days=self.pk_reconfiguration_interval_days.value(),
+            tolerance_fraction=self.pk_tolerance_fraction.value(),
+            restore_tolerance_fraction=self.pk_restore_tolerance_fraction.value(),
+            correction_window_days=self.pk_correction_window_days.value(),
+            max_drift_days=self.pk_max_drift_days.value(),
+            max_delta_semi_major_axis_km=self.pk_max_delta_sma_km.value(),
         )
 
     def _power_to_dataclass(self) -> PowerConfig | None:
@@ -425,7 +506,7 @@ class SpacecraftListWidget(QWidget):
 
     def _on_add(self) -> None:
         existing_names = {c.name for c in self._configs}
-        dialog = SpacecraftEditorDialog(parent=self)
+        dialog = SpacecraftEditorDialog(parent=self, other_spacecraft_names=sorted(existing_names))
         # default name must be unique so QListWidget entries stay distinguishable
         base_name = dialog.name_edit.text()
         candidate, n = base_name, 1
@@ -447,7 +528,8 @@ class SpacecraftListWidget(QWidget):
         row = self.list_widget.currentRow()
         if row < 0:
             return
-        dialog = SpacecraftEditorDialog(config=self._configs[row], parent=self)
+        other_names = sorted(c.name for i, c in enumerate(self._configs) if i != row)
+        dialog = SpacecraftEditorDialog(config=self._configs[row], parent=self, other_spacecraft_names=other_names)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_config = dialog.to_dataclass()
             other_names = {c.name for i, c in enumerate(self._configs) if i != row}

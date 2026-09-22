@@ -7,6 +7,7 @@ import pytest
 
 from missionstudio.engine.constellation import (
     CENTRAL_BODY_EQUATORIAL_RADIUS_KM,
+    SeparationSchedule,
     WalkerConstellationRequest,
     generate_walker_constellation,
 )
@@ -126,3 +127,54 @@ def test_generated_scenario_validates(tmp_path):
 def test_request_validation_rejects_bad_input(overrides, match):
     with pytest.raises(ScenarioValidationError, match=match):
         _request(**overrides).validate()
+
+
+# -- SeparationSchedule -----------------------------------------------------
+
+def test_separation_schedule_rejects_empty_distances():
+    with pytest.raises(ValueError, match="at least one distance"):
+        SeparationSchedule(distances_km=[], interval_days=90.0, semi_major_axis_m=7.0e6)
+
+
+def test_separation_schedule_single_entry_holds_for_whole_mission():
+    schedule = SeparationSchedule(distances_km=[100.0], interval_days=90.0, semi_major_axis_m=7.0e6)
+    expected = 100.0 * 1000.0 / 7.0e6
+    assert schedule.value_at(0.0) == pytest.approx(expected)
+    assert schedule.value_at(1.0e9) == pytest.approx(expected)  # far beyond any interval -- still holds
+
+
+def test_separation_schedule_steps_through_distances_on_schedule():
+    a_m = 7.0e6
+    schedule = SeparationSchedule(distances_km=[1000.0, 500.0, 100.0], interval_days=90.0, semi_major_axis_m=a_m)
+    day_s = 86400.0
+
+    assert schedule.value_at(0.0) == pytest.approx(1000.0 * 1000.0 / a_m)
+    assert schedule.value_at(89.0 * day_s) == pytest.approx(1000.0 * 1000.0 / a_m)
+    assert schedule.value_at(90.0 * day_s) == pytest.approx(500.0 * 1000.0 / a_m)
+    assert schedule.value_at(179.0 * day_s) == pytest.approx(500.0 * 1000.0 / a_m)
+    assert schedule.value_at(180.0 * day_s) == pytest.approx(100.0 * 1000.0 / a_m)
+
+
+def test_separation_schedule_holds_at_last_entry_when_not_looping():
+    a_m = 7.0e6
+    schedule = SeparationSchedule(distances_km=[1000.0, 500.0, 100.0], interval_days=90.0, semi_major_axis_m=a_m,
+                                   loop=False)
+    day_s = 86400.0
+    far_future = 1000.0 * day_s
+    assert schedule.value_at(far_future) == pytest.approx(100.0 * 1000.0 / a_m)
+
+
+def test_separation_schedule_loops_when_requested():
+    a_m = 7.0e6
+    schedule = SeparationSchedule(distances_km=[1000.0, 500.0, 100.0], interval_days=90.0, semi_major_axis_m=a_m,
+                                   loop=True)
+    day_s = 86400.0
+    # index 3 (0-based) wraps back to index 0
+    assert schedule.value_at(3 * 90.0 * day_s) == pytest.approx(1000.0 * 1000.0 / a_m)
+    assert schedule.value_at(4 * 90.0 * day_s) == pytest.approx(500.0 * 1000.0 / a_m)
+
+
+def test_separation_schedule_zero_interval_holds_first_entry():
+    schedule = SeparationSchedule(distances_km=[1000.0, 500.0], interval_days=0.0, semi_major_axis_m=7.0e6)
+    assert schedule.value_at(0.0) == pytest.approx(1000.0 * 1000.0 / 7.0e6)
+    assert schedule.value_at(1.0e9) == pytest.approx(1000.0 * 1000.0 / 7.0e6)

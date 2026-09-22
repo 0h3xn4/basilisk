@@ -118,6 +118,13 @@ def _print_station_keeping_summary(scenario, result) -> None:
     series (see ``engine.service.SimulationService.run()``); silently
     skips a spacecraft whose series aren't present (station_keeping was
     configured but, e.g., the run failed before the series could be built).
+
+    A spacecraft with ``phasing_keeping`` ALSO configured shares one
+    propellant tank between the two controllers (see
+    ``schema.scenario.PhasingKeepingConfig``'s docstring), so
+    ``propellant_used_kg`` here already covers both; delta-V is tracked
+    separately per controller, so the total reported is their sum, with a
+    breakdown line underneath.
     """
     for sc in scenario.spacecraft:
         if sc.station_keeping is None:
@@ -126,11 +133,22 @@ def _print_station_keeping_summary(scenario, result) -> None:
         propellant_series = result.series.get(f"{sc.name}.station_keeping.propellant_remaining")
         if delta_v_series is None or propellant_series is None or len(delta_v_series.data) == 0:
             continue
-        total_delta_v_m_s = float(delta_v_series.data[-1, 0])
+        station_keeping_delta_v_m_s = float(delta_v_series.data[-1, 0])
         propellant_remaining_kg = float(propellant_series.data[-1, 0])
         propellant_used_kg = sc.station_keeping.propellant_kg - propellant_remaining_kg
+
+        phasing_delta_v_m_s = 0.0
+        if sc.phasing_keeping is not None:
+            phasing_delta_v_series = result.series.get(f"{sc.name}.phasing_keeping.delta_v")
+            if phasing_delta_v_series is not None and len(phasing_delta_v_series.data) > 0:
+                phasing_delta_v_m_s = float(phasing_delta_v_series.data[-1, 0])
+
+        total_delta_v_m_s = station_keeping_delta_v_m_s + phasing_delta_v_m_s
         print(f"  {sc.name}: {total_delta_v_m_s:.3f} m/s delta-V, "
               f"{propellant_used_kg:.3f} kg propellant used ({propellant_remaining_kg:.3f} kg remaining)")
+        if sc.phasing_keeping is not None:
+            print(f"    (altitude-keeping: {station_keeping_delta_v_m_s:.3f} m/s, "
+                  f"phasing vs. {sc.phasing_keeping.chief_spacecraft!r}: {phasing_delta_v_m_s:.3f} m/s)")
 
 
 def cmd_monte_carlo(args: argparse.Namespace) -> int:

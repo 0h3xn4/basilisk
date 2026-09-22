@@ -247,6 +247,8 @@ class _SpacecraftHandle:
     battery_recorder: Optional[object] = None  # Phase 4: only set if sc_config.power was configured
     battery_module: Optional[object] = None  # Phase 4: the simpleBattery.SimpleBattery itself, for engine.vizard
     station_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.station_keeping was configured
+    eclipse_out_msg: Optional[object] = None  # Phase 4: only set if power or station_keeping was configured
+    phasing_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.phasing_keeping was configured
 
 
 class SimulationService:
@@ -461,6 +463,7 @@ class SimulationService:
                 self._eclipse_object.addSpacecraftToModel(sc_object.scStateOutMsg)
                 sc_eclipse_out_msg = self._eclipse_object.eclipseOutMsgs[eclipse_index]
                 eclipse_index += 1
+                handle.eclipse_out_msg = sc_eclipse_out_msg
 
             # -- Phase 4: power budget, independent of fsw_mode/sensors like
             # the sensor block above -- a real simpleSolarPanel/battery, not
@@ -573,6 +576,36 @@ class SimulationService:
 
             rw_effectors_in_order.append(rw_effector_for_viz)
             self._handles[sc_config.name] = handle
+
+        # Phase 4: constellation phasing-keeping (schema.scenario.PhasingKeepingConfig)
+        # -- needs every spacecraft's sc_object/StationKeepingController to
+        # already exist (a follower's chief may be defined later in
+        # scenario.spacecraft than the follower itself), so this is its
+        # own pass after the main per-spacecraft loop above, mirroring
+        # access analysis/Vizard setup below. Scenario.validate() already
+        # guarantees phasing_keeping implies station_keeping on the same
+        # spacecraft and that chief_spacecraft names a real spacecraft.
+        spacecraft_by_name = {sc_config.name: sc_config for sc_config in scenario.spacecraft}
+        for sc_config in scenario.spacecraft:
+            if sc_config.phasing_keeping is None:
+                continue
+            chief_config = spacecraft_by_name[sc_config.phasing_keeping.chief_spacecraft]
+            if chief_config.orbit.type != "classical_elements":
+                raise SimulationServiceError(
+                    f"{sc_config.name}: phasing_keeping.chief_spacecraft "
+                    f"{chief_config.name!r}'s orbit must be type 'classical_elements' (phasing needs its "
+                    f"semi-major axis) -- got {chief_config.orbit.type!r}"
+                )
+            follower_handle = self._handles[sc_config.name]
+            chief_handle = self._handles[chief_config.name]
+            follower_handle.phasing_keeping_controller = orbit_maintenance.build_phasing_keeping(
+                self.scSim, dyn_task_name, sc_config.name, mu,
+                chief_sc_object=chief_handle.sc_object, follower_sc_object=follower_handle.sc_object,
+                follower_station_keeping_controller=follower_handle.station_keeping_controller,
+                follower_eclipse_out_msg=follower_handle.eclipse_out_msg,
+                chief_semi_major_axis_km=chief_config.orbit.semi_major_axis_km,
+                config=sc_config.phasing_keeping,
+            )
 
         # Phase 3: access analysis -- every ground station sees every
         # spacecraft, now that all spacecraft exist (see fsw.add_access_analysis).
@@ -687,6 +720,24 @@ class SimulationService:
                                        ("propellant_remaining",), np.asarray(controller.propellantLog), units="kg"))
                 result.add(TimeSeries(f"{name}.station_keeping.delta_v", sk_t_s, ("cumulative_delta_v",),
                                        np.asarray(controller.deltaVLog), units="m/s"))
+
+            if handle.phasing_keeping_controller is not None:
+                phase_controller = handle.phasing_keeping_controller
+                pk_t_s = np.asarray(phase_controller.tLog)
+                result.add(TimeSeries(f"{name}.phasing_keeping.separation_error", pk_t_s, ("error_deg",),
+                                       np.asarray(phase_controller.errorDegLog), units="deg"))
+                result.add(TimeSeries(f"{name}.phasing_keeping.state", pk_t_s, ("state",),
+                                       np.asarray(phase_controller.stateLog, dtype=float), units="-"))
+                # This controller's OWN delta-V only -- see
+                # engine.orbit_maintenance.PhasingKeepingController's
+                # docstring: propellant/tank is shared with (and already
+                # fully reflected in) {name}.station_keeping.propellant_remaining
+                # above, but each controller tracks its own delta-V
+                # separately, so total delta-V for this spacecraft is the
+                # sum of this series' final value and
+                # {name}.station_keeping.delta_v's.
+                result.add(TimeSeries(f"{name}.phasing_keeping.delta_v", pk_t_s, ("cumulative_delta_v",),
+                                       np.asarray(phase_controller.deltaVLog), units="m/s"))
 
         for (gs_name, sc_name), recorder in self._access_recorders.items():
             access_t_s = recorder.times() * macros.NANO2SEC

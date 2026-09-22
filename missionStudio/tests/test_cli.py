@@ -259,6 +259,54 @@ def test_station_keeping_summary_reports_delta_v_and_propellant_used(capsys):
     assert "1.750 kg remaining" in out
 
 
+def test_station_keeping_summary_includes_phasing_delta_v_breakdown(capsys):
+    import numpy as np
+
+    from missionstudio.engine.results import ResultSet, TimeSeries
+    from missionstudio.schema import (
+        GravityConfig,
+        OrbitIC,
+        PhasingKeepingConfig,
+        Scenario,
+        SpacecraftConfig,
+        StationKeepingConfig,
+    )
+
+    scenario = Scenario(
+        name="phasing test", epoch_utc="2030-01-01T00:00:00", gravity=GravityConfig(),
+        spacecraft=[
+            SpacecraftConfig(
+                name="chief",
+                orbit=OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.0,
+                              inclination_deg=0.0, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=0.0),
+            ),
+            SpacecraftConfig(
+                name="follower",
+                orbit=OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.0,
+                              inclination_deg=0.0, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=10.0),
+                station_keeping=StationKeepingConfig(target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01,
+                                                      isp_s=1500.0, propellant_kg=2.0),
+                phasing_keeping=PhasingKeepingConfig(chief_spacecraft="chief", target_separation_km=[100.0]),
+            ),
+        ],
+    )
+    result = ResultSet(scenario_name="phasing test")
+    t = np.array([0.0, 100.0])
+    result.add(TimeSeries("follower.station_keeping.delta_v", t, ("cumulative_delta_v",),
+                           np.array([[0.0], [1.0]]), units="m/s"))
+    result.add(TimeSeries("follower.station_keeping.propellant_remaining", t, ("propellant_remaining",),
+                           np.array([[2.0], [1.8]]), units="kg"))
+    result.add(TimeSeries("follower.phasing_keeping.delta_v", t, ("cumulative_delta_v",),
+                           np.array([[0.0], [0.5]]), units="m/s"))
+
+    cli._print_station_keeping_summary(scenario, result)
+    out = capsys.readouterr().out
+    assert "follower: 1.500 m/s delta-V" in out  # 1.0 (altitude) + 0.5 (phasing)
+    assert "altitude-keeping: 1.000 m/s" in out
+    assert "phasing vs. 'chief': 0.500 m/s" in out
+    assert out.count("m/s delta-V") == 1  # chief itself has no station_keeping -- not summarized
+
+
 def test_station_keeping_summary_skips_spacecraft_without_the_config(capsys):
     from missionstudio.engine.results import ResultSet
     from missionstudio.schema import GravityConfig, OrbitIC, Scenario, SpacecraftConfig
