@@ -130,3 +130,54 @@ def test_two_body_propagation_conserves_energy_and_angular_momentum():
         f"angular momentum magnitude varied by a relative {h_rel_spread:.2e} over the run "
         f"(tolerance {ANGULAR_MOMENTUM_REL_TOL:.0e})"
     )
+
+
+def test_two_body_orbit_elements_match_input_classical_elements():
+    """Regression test for ResultSet's ``{spacecraft}.orbit_elements.*``
+    series (osculating Keplerian elements, added alongside position/
+    velocity). At the very first recorded sample (t ~= 0) these should
+    reconstruct the exact classical elements the scenario's OrbitIC
+    specified -- ``rv2elem``/``elem2rv`` are exact inverses of each other
+    and no propagation error has accumulated yet, so this is a tight check.
+
+    Semi-major axis/inclination/RAAN are also checked for staying constant
+    over the whole run, as they must for an unperturbed two-body orbit.
+    Argument of periapsis/true anomaly are deliberately NOT checked for
+    constancy (true anomaly obviously shouldn't be constant anyway) or
+    tight accuracy past t=0: this scenario's eccentricity (0.001) is
+    numerically ill-conditioned for isolating periapsis direction -- see
+    ``engine.service._osculating_elements``'s docstring.
+    """
+    from missionstudio.engine.service import SimulationService
+
+    scenario = load_scenario(SCENARIO_PATH)
+    service = SimulationService(scenario)
+    result = service.run()
+
+    sc_name = scenario.spacecraft[0].name
+    orbit = scenario.spacecraft[0].orbit
+
+    a = result.series[f"{sc_name}.orbit_elements.semi_major_axis"]
+    e = result.series[f"{sc_name}.orbit_elements.eccentricity"]
+    i = result.series[f"{sc_name}.orbit_elements.inclination"]
+    raan = result.series[f"{sc_name}.orbit_elements.raan"]
+    argp = result.series[f"{sc_name}.orbit_elements.arg_periapsis"]
+    true_anomaly = result.series[f"{sc_name}.orbit_elements.true_anomaly"]
+
+    assert a.units == "m"
+    assert e.units == "-"
+    assert i.units == "rad"
+    assert raan.units == "rad"
+    assert argp.units == "rad"
+    assert true_anomaly.units == "rad"
+
+    assert a.data[0, 0] == pytest.approx(orbit.semi_major_axis_km * 1000.0, rel=1e-6)
+    assert e.data[0, 0] == pytest.approx(orbit.eccentricity, abs=1e-6)
+    assert i.data[0, 0] == pytest.approx(np.radians(orbit.inclination_deg), abs=1e-8)
+    assert raan.data[0, 0] == pytest.approx(np.radians(orbit.raan_deg), abs=1e-8)
+    assert argp.data[0, 0] == pytest.approx(np.radians(orbit.arg_periapsis_deg), abs=1e-6)
+    assert true_anomaly.data[0, 0] == pytest.approx(np.radians(orbit.true_anomaly_deg), abs=1e-6)
+
+    assert np.ptp(a.data[:, 0]) / a.data[0, 0] < 1e-4, "semi-major axis should stay ~constant (unperturbed two-body)"
+    assert np.ptp(i.data[:, 0]) < 1e-6, "inclination should stay ~constant (unperturbed two-body)"
+    assert np.ptp(raan.data[:, 0]) < 1e-6, "RAAN should stay ~constant (unperturbed two-body)"

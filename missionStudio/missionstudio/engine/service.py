@@ -235,6 +235,41 @@ def _orbit_ic_to_rv(mu: float, orbit: OrbitIC):
     raise SimulationServiceError(f"unknown orbit IC type {orbit.type!r}")  # unreachable if orbit.validate() passed
 
 
+def _osculating_elements(mu: float, r_bn_n: np.ndarray, v_bn_n: np.ndarray) -> Dict[str, np.ndarray]:
+    """Osculating classical orbital elements (a [m], e [-], i/raan/argp/
+    true_anomaly [rad]) at every recorded (r, v) sample, via
+    ``orbitalMotion.rv2elem`` -- the exact inverse of ``_orbit_ic_to_rv``'s
+    classical-elements branch above, run independently at each sample (not
+    a smoothed/mean-element fit), so a result plot can show how the ACTUAL
+    simulated orbit's shape/orientation evolves, not just position/velocity.
+
+    Near-circular (e -> 0) and/or near-equatorial (i -> 0) samples are a
+    known singularity of the classical elements themselves, not a bug here:
+    ``rv2elem`` zeroes ``raan``/``argp`` in those cases and folds their
+    angle into ``true_anomaly`` instead (e.g. argument of latitude for a
+    circular inclined orbit) -- expect those columns to look degenerate
+    (flat at 0, or a discontinuity) for a near-circular/near-equatorial
+    scenario. This is inherent to osculating classical elements, not
+    something a per-sample computation could avoid.
+    """
+    n = r_bn_n.shape[0]
+    a = np.empty(n)
+    e = np.empty(n)
+    i = np.empty(n)
+    raan = np.empty(n)
+    argp = np.empty(n)
+    true_anomaly = np.empty(n)
+    for k in range(n):
+        oe = orbitalMotion.rv2elem(mu, r_bn_n[k], v_bn_n[k])
+        a[k] = oe.a
+        e[k] = oe.e
+        i[k] = oe.i
+        raan[k] = oe.Omega
+        argp[k] = oe.omega
+        true_anomaly[k] = oe.f
+    return {"a": a, "e": e, "i": i, "raan": raan, "argp": argp, "true_anomaly": true_anomaly}
+
+
 @dataclass
 class _SpacecraftHandle:
     name: str
@@ -760,10 +795,12 @@ class SimulationService:
         """Build (if not already built) and execute the simulation, then
         extract every spacecraft's logged time histories into a
         :class:`~missionstudio.engine.results.ResultSet`: always
-        position/velocity, plus (Phase 2, only for a spacecraft that
-        actually has them configured) attitude/body-rate/sun-heading,
-        commanded control torque, reaction wheel speeds, and one series per
-        attached sensor.
+        position/velocity plus osculating Keplerian elements (semi-major
+        axis, eccentricity, inclination, RAAN, argument of periapsis, true
+        anomaly -- see :func:`_osculating_elements`), plus (Phase 2, only
+        for a spacecraft that actually has them configured) attitude/
+        body-rate/sun-heading, commanded control torque, reaction wheel
+        speeds, and one series per attached sensor.
         """
         if self.scSim is None:
             self.build()
@@ -775,6 +812,20 @@ class SimulationService:
             t_s = handle.recorder.times() * macros.NANO2SEC
             result.add(TimeSeries(f"{name}.position_N", t_s, ("x", "y", "z"), handle.recorder.r_BN_N, units="m"))
             result.add(TimeSeries(f"{name}.velocity_N", t_s, ("x", "y", "z"), handle.recorder.v_BN_N, units="m/s"))
+
+            # Osculating Keplerian elements -- see _osculating_elements()'s
+            # docstring for the near-circular/near-equatorial caveat. One
+            # TimeSeries per element (not one combined series), matching
+            # this method's own convention for mixed-unit quantities below
+            # (e.g. station_keeping's separate .burn_on/.delta_v series).
+            oe = _osculating_elements(self.mu, handle.recorder.r_BN_N, handle.recorder.v_BN_N)
+            result.add(TimeSeries(f"{name}.orbit_elements.semi_major_axis", t_s, ("a",), oe["a"], units="m"))
+            result.add(TimeSeries(f"{name}.orbit_elements.eccentricity", t_s, ("e",), oe["e"], units="-"))
+            result.add(TimeSeries(f"{name}.orbit_elements.inclination", t_s, ("i",), oe["i"], units="rad"))
+            result.add(TimeSeries(f"{name}.orbit_elements.raan", t_s, ("raan",), oe["raan"], units="rad"))
+            result.add(TimeSeries(f"{name}.orbit_elements.arg_periapsis", t_s, ("argp",), oe["argp"], units="rad"))
+            result.add(TimeSeries(f"{name}.orbit_elements.true_anomaly", t_s, ("true_anomaly",),
+                                   oe["true_anomaly"], units="rad"))
 
             if handle.nav_recorder is not None:
                 nav_t_s = handle.nav_recorder.times() * macros.NANO2SEC

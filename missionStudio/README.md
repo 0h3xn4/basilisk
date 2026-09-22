@@ -574,6 +574,28 @@ swept under the rug):
   indication. Fixed: the stale name is now surfaced as its own selectable
   entry and round-tripped as-is instead.
 
+## What Phase 5 adds
+
+Driven directly by feedback from actually using the Phase 4 GUI + engine
+(this phase is in progress; bullets are added as pieces land):
+
+* **Result plots/CSV export now include osculating Keplerian elements**,
+  not just inertial position/velocity. `engine.service` computes semi-major
+  axis, eccentricity, inclination, RAAN, argument of periapsis, and true
+  anomaly at every recorded sample (`orbitalMotion.rv2elem`, the exact
+  inverse of the classical-elements orbit-IC conversion already used
+  elsewhere in this file) and adds them to `ResultSet` as
+  `{spacecraft}.orbit_elements.{semi_major_axis,eccentricity,inclination,
+  raan,arg_periapsis,true_anomaly}` -- one series per element (mixed units:
+  m/-/rad), matching the existing convention for e.g.
+  `station_keeping.burn_on`/`.delta_v`. `gui.results_widget`/the CLI's CSV
+  export need no changes for these to show up -- both are already driven
+  generically by whatever `ResultSet.series` contains. Near-circular
+  and/or near-equatorial orbits have an inherent singularity in RAAN/
+  argument of periapsis/true anomaly (see
+  `engine.service._osculating_elements`'s docstring) -- not a bug, just
+  how classical elements behave at those limits.
+
 ## Repository layout
 
 ```
