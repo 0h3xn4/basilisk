@@ -196,7 +196,15 @@ def _orbit_ic_to_rv(mu: float, orbit: OrbitIC):
         oe.i = np.radians(orbit.inclination_deg)
         oe.Omega = np.radians(orbit.raan_deg)
         oe.omega = np.radians(orbit.arg_periapsis_deg)
-        oe.f = np.radians(orbit.true_anomaly_deg)
+        if orbit.anomaly_type == "mean":
+            # elem2rv only accepts true anomaly -- solve Kepler's equation
+            # (mean -> eccentric, via orbitalMotion's own Newton iteration)
+            # then map eccentric -> true, both directly from orbitalMotion
+            # rather than reimplementing either conversion here.
+            eccentric_anomaly = orbitalMotion.M2E(np.radians(orbit.mean_anomaly_deg), orbit.eccentricity)
+            oe.f = orbitalMotion.E2f(eccentric_anomaly, orbit.eccentricity)
+        else:
+            oe.f = np.radians(orbit.true_anomaly_deg)
         return orbitalMotion.elem2rv(mu, oe)
 
     if orbit.type == "cartesian":

@@ -74,6 +74,11 @@ SUPPORTED_CENTRAL_BODIES = (
 
 ORBIT_IC_TYPES = ("classical_elements", "cartesian", "tle")
 
+# classical_elements only: which anomaly field the user supplied (they're
+# not interchangeable inputs -- mean anomaly needs Kepler's equation solved
+# to get true anomaly, see engine.service._orbit_ic_to_rv).
+ANOMALY_TYPES = ("true", "mean")
+
 # Sensor/actuator/FSW-mode kinds engine.service.SimulationService actually
 # wires up as of Phase 2 -- see that module's docstring for the exact
 # Basilisk module each one maps to and for engine.fsw's guidance-chain
@@ -131,13 +136,20 @@ class OrbitIC:
     type: str  # one of ORBIT_IC_TYPES
 
     # type == "classical_elements" (angles in degrees, matching the rest of
-    # this codebase's convention -- see mission_config.py in ../missionAnalysis)
+    # this codebase's convention -- see mission_config.py in ../missionAnalysis).
+    # Exactly one of true_anomaly_deg/mean_anomaly_deg is used, chosen by
+    # anomaly_type -- mean anomaly is the natural input for a mission
+    # design spec (e.g. "M0 at epoch"), true anomaly for a specific
+    # geometric snapshot; engine.service converts mean -> true via Kepler's
+    # equation before calling elem2rv (which only accepts true anomaly).
     semi_major_axis_km: Optional[float] = None
     eccentricity: Optional[float] = None
     inclination_deg: Optional[float] = None
     raan_deg: Optional[float] = None
     arg_periapsis_deg: Optional[float] = None
+    anomaly_type: str = "true"  # one of ANOMALY_TYPES
     true_anomaly_deg: Optional[float] = None
+    mean_anomaly_deg: Optional[float] = None
 
     # type == "cartesian" (inertial frame of the scenario's central body)
     position_km: Optional[list] = None  # [x, y, z]
@@ -155,8 +167,13 @@ class OrbitIC:
                       "classical_elements orbit needs semi_major_axis_km > 0")
             _require(self.eccentricity is not None and 0.0 <= self.eccentricity < 1.0,
                       "classical_elements orbit needs 0 <= eccentricity < 1 (elliptical only)")
-            for name in ("inclination_deg", "raan_deg", "arg_periapsis_deg", "true_anomaly_deg"):
+            for name in ("inclination_deg", "raan_deg", "arg_periapsis_deg"):
                 _require(getattr(self, name) is not None, f"classical_elements orbit needs {name}")
+            _require(self.anomaly_type in ANOMALY_TYPES,
+                      f"orbit.anomaly_type {self.anomaly_type!r} must be one of {ANOMALY_TYPES}")
+            anomaly_field = "true_anomaly_deg" if self.anomaly_type == "true" else "mean_anomaly_deg"
+            _require(getattr(self, anomaly_field) is not None,
+                      f"classical_elements orbit with anomaly_type={self.anomaly_type!r} needs {anomaly_field}")
         elif self.type == "cartesian":
             for name in ("position_km", "velocity_km_s"):
                 value = getattr(self, name)

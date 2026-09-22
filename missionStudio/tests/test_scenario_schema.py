@@ -132,6 +132,36 @@ def test_tle_orbit_requires_both_lines():
         orbit.validate()
 
 
+def test_classical_elements_orbit_defaults_to_true_anomaly():
+    orbit = OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.001,
+                     inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=30.0)
+    assert orbit.anomaly_type == "true"
+    orbit.validate()  # must not raise
+
+
+def test_classical_elements_orbit_accepts_mean_anomaly():
+    orbit = OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.001,
+                     inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0,
+                     anomaly_type="mean", mean_anomaly_deg=30.0)
+    orbit.validate()  # must not raise
+
+
+def test_classical_elements_orbit_requires_the_anomaly_matching_anomaly_type():
+    orbit = OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.001,
+                     inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0,
+                     anomaly_type="mean", true_anomaly_deg=30.0)  # wrong field for anomaly_type="mean"
+    with pytest.raises(ScenarioValidationError, match="needs mean_anomaly_deg"):
+        orbit.validate()
+
+
+def test_classical_elements_orbit_rejects_unknown_anomaly_type():
+    orbit = OrbitIC(type="classical_elements", semi_major_axis_km=7000.0, eccentricity=0.001,
+                     inclination_deg=51.6, raan_deg=0.0, arg_periapsis_deg=0.0,
+                     anomaly_type="eccentric", true_anomaly_deg=30.0)
+    with pytest.raises(ScenarioValidationError, match="anomaly_type"):
+        orbit.validate()
+
+
 def test_space_weather_local_file_requires_path():
     sc = _minimal_scenario()
     sc.space_weather.source = "local_file"
