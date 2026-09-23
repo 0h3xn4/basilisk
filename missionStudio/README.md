@@ -1072,21 +1072,65 @@ stage adds no Basilisk-dependent code).
   command's path (e.g. `"mission_sequence[2].children[0] (maneuver): ..."`)
   and kind, never a bare exception from inside Basilisk/`eval`/`exec`.
 
-**Verification:** 23 new tests (`tests/test_mission_engine.py`,
+**Verification:** 23 tests (`tests/test_mission_engine.py`,
 `requires_basilisk`-marked like every other `engine.*` test -- this layer
-imports `engine.service`, which itself needs Basilisk at import time).
-Covers: multi-segment `propagate` accumulating rather than restarting
-(matches a single equivalent-duration `run()` bit-for-bit), `epoch`/`event`
-stop conditions, both maneuver frames (checked against the LIVE state
-object directly, not the recorder, since a maneuver alone doesn't trigger
-a new `scStateOutMsg` write), `assignment` mutating a live controller,
-`report` snapshotting the value AT that mission time (not the final one),
-`if`/`while` (including nested, including the iteration-cap safety net),
-`script_block` (including exception wrapping), and clear-error cases for
-every "names something that doesn't exist" case. Not runnable in this
-project's own development sandbox (no Basilisk build here); written
-directly against the verified call sequences cited above, same
-verification-status caveat as `engine/service.py`/`engine/fsw.py`.
+imports `engine.service`, which itself needs Basilisk at import time), and
+this is the first Phase 6 stage actually RUN against a real Basilisk
+build (by the user, who has a working install this project's own sandbox
+doesn't) rather than only written against verified-but-unexecuted call
+sequences. All 23 pass now, but only after three real bugs the first
+real run surfaced and this project's own "no guessing" discipline caught
+by actually checking rather than assuming:
+
+* `TimeSeries` crashed on a genuinely zero-sample recorder: a
+  `mission_sequence` with no `propagate` command never calls
+  `ExecuteSimulation()`, and Basilisk's own recorder accessor returns a
+  bare 1-D array (losing the column count) rather than an `(0, ncols)`
+  array when nothing was ever logged. Fixed in `engine/results.py`.
+* Chaining each `propagate` command's absolute `ConfigureStopTime()`
+  target off `scSim.TotalSim.CurrentNanos` read back after the previous
+  command compounds rounding loss across segments whenever a requested
+  duration isn't an exact multiple of `dynamics_task_rate_s` -- confirmed
+  directly against `sim_model.cpp`: `CurrentNanos` is set to
+  `NextTaskTime`, i.e. it snaps DOWN to the last task-grid point at or
+  before the actual stop time. Three real chained `propagate` commands
+  ended up 20 s short of one equivalent single `propagate`. Fixed by
+  tracking the cumulative REQUESTED mission time in a separate counter,
+  decoupled from the sim's own grid-snapped clock (`propagate`'s `event`
+  stop condition is the one exception: it re-syncs to the actual,
+  inherently grid-snapped firing time instead, since there's no
+  requested target to track there).
+* `propagate`'s `event` stop condition checked `scSim.terminate` after
+  `ExecuteSimulation()` to tell whether the event fired, always reading
+  `False` and raising a bogus "did not occur" error -- confirmed directly
+  against `SimulationBaseClass.py` (and with a live diagnostic against a
+  real Basilisk build) that `ExecuteSimulation()` unconditionally resets
+  `self.terminate = False` as its own last statement before returning,
+  whether the loop broke early on a terminal event or ran to completion,
+  so that flag can never answer "did a terminal event fire" after the
+  fact. The event mechanism itself was correct the whole time (confirmed
+  by the same diagnostic: the sim genuinely stopped at the exact
+  periapsis crossing, `CurrentNanos` matching the analytically-predicted
+  orbital period to the second). Fixed by checking the fired event's own
+  `occurCounter` via `scSim.eventMap[event_name]` instead.
+
+A fourth finding was a wrong test assumption, not an engine bug:
+`InitializeSimulation()` alone produces ZERO recorder samples (a
+recorder only gets one once `ExecuteSimulation()` has actually ticked),
+not one as originally assumed -- `_run_report` now raises a specific
+`MissionEngineError` naming which series have no samples yet (a
+`report` before any `propagate` has run) instead of a bare `IndexError`.
+
+Test coverage itself: multi-segment `propagate` accumulating rather than
+restarting (matches a single equivalent-duration `run()` bit-for-bit),
+`epoch`/`event` stop conditions, both maneuver frames (checked against
+the LIVE state object directly, not the recorder, since a maneuver alone
+doesn't trigger a new `scStateOutMsg` write), `assignment` mutating a
+live controller, `report` snapshotting the value AT that mission time
+(not the final one), `if`/`while` (including nested, including the
+iteration-cap safety net), `script_block` (including exception
+wrapping), and clear-error cases for every "names something that doesn't
+exist" case.
 
 **Not yet landed (this phase's remaining stages):** file-format/GUI-sync
 work, then the GUI itself (Resources/Mission/Output dock panels, script
