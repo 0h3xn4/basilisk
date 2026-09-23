@@ -175,6 +175,7 @@ _INTEGRATORS = {
     "rkf78": svIntegrators.svIntegratorRKF78,
 }
 
+
 # SimulationService.run_live()'s default chunk count when live_step_s isn't
 # given -- about this many on_progress callbacks over the whole run,
 # regardless of duration_days. A round number, not tuned to any specific
@@ -378,6 +379,26 @@ class SimulationService:
                 f"(known: {sorted(_INTEGRATORS)})"
             )
 
+        # sim_settings.dynamics_task_rate_s is not just a logging/output
+        # cadence -- it also bounds how often the SPICE-derived central-body
+        # state (position AND rotation, used directly in the gravity force
+        # computation) gets refreshed, since self.spice_object below runs on
+        # this SAME task. Basilisk only linearly (Euler-step) extrapolates
+        # that state BETWEEN refreshes (see GravBodyData::computeGravityInertial()
+        # and getEulerSteppedGravBodyPosition() in gravityEffector.cpp), so a
+        # coarse rate here introduces a real force-accuracy error even though
+        # the integrator itself (see _INTEGRATORS below) may be far more
+        # accurate than that. Confirmed empirically, not guessed: holding
+        # everything else fixed and only varying this rate on
+        # scenarios/two_body_validation.json made its analytical-comparison
+        # position error scale roughly with the SQUARE of this value (~202 m
+        # at 30 s, ~22 m at 10 s, ~2 m at 3 s, ~0.22 m at 1 s) -- exactly the
+        # signature of a first-order truncation error, and completely
+        # insensitive to the RKF78 integrator's own relative tolerance
+        # (tested directly at both 1e-4 and 1e-14 with no change whatsoever).
+        # That two-body validation scenario uses 1.0 s for exactly this
+        # reason; scenarios that need tighter absolute accuracy than a 30 s
+        # rate provides should do the same.
         self.scSim = SimulationBaseClass.SimBaseClass()
         dyn_process = self.scSim.CreateNewProcess("dynProcess", priority=100)
         dyn_task_name = "dynTask"
@@ -411,6 +432,29 @@ class SimulationService:
 
         spice_time_string = time_system.utc_iso_to_spice_string(scenario.epoch_utc)
         self.spice_object = kernels.build_spice_interface(grav_factory, spice_time_string, epoch_in_msg=True)
+        # Re-zero every SPICE ephemeris output on the central body (SPICE's
+        # own observer/"zeroBase" concept -- see spiceInterface.cpp's
+        # spkezr_c call, which queries each body's state relative to
+        # `zeroBase`, defaulting to the solar system barycenter "SSB").
+        # Without this, GravityEffector::updateInertialPosAndVel() (see
+        # gravityEffector.cpp) computes r_BN_N/v_BN_N as the CENTRAL BODY'S
+        # OWN (SSB-relative, heliocentric-scale) position/velocity PLUS the
+        # true central-body-relative integrated state, because it adds
+        # r_CN_N (the central body's own SPICE position) on top of the
+        # propagated r_BF_N whenever a central body is set -- every
+        # consumer of r_BN_N/v_BN_N in this codebase (osculating-element
+        # computation below, engine/orbit_maintenance.py's controllers,
+        # engine/fsw.py's hillPoint/velocityPoint) assumes r_BN_N is
+        # purely central-body-relative, which is only true when the
+        # central body's own SPICE position is zero. Setting zeroBase to
+        # the central body makes exactly that true (the central body's own
+        # planetStateOutMsg reports (0, 0, 0) relative to itself), the
+        # same fix Basilisk's own official example applies for the same
+        # reason -- see examples/scenarioHohmann.py's
+        # `gravFactory.spiceObject.zeroBase = 'Earth'` (SPICE body-name
+        # lookup is case-insensitive, so the lowercase
+        # gravity.central_body value used here resolves the same way).
+        self.spice_object.zeroBase = gravity.central_body
         self.scSim.AddModelToTask(dyn_task_name, self.spice_object, 500)
 
         # -- Phase 2 shared (scenario-level) infrastructure, built once before

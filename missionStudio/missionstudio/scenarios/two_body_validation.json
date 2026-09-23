@@ -64,9 +64,9 @@
   },
   "sim_settings": {
     "duration_days": 0.2,
-    "dynamics_task_rate_s": 30.0,
+    "dynamics_task_rate_s": 1.0,
     "integrator": "rkf78"
   },
-  "description": "Single spacecraft, Earth point-mass gravity only (gravity.central_body_degree=0), near-circular LEO-ish orbit, propagated for several orbital periods. Used by tests/test_two_body_validation.py to check the propagated state against an independent analytical Kepler-equation solution and against conservation of specific orbital energy and angular momentum -- this is the end-to-end validation scenario with known analytical results required before this tool is trusted for anything else.",
+  "description": "Single spacecraft, Earth point-mass gravity only (gravity.central_body_degree=0), near-circular LEO-ish orbit, propagated for several orbital periods. Used by tests/test_two_body_validation.py to check the propagated state against an independent analytical Kepler-equation solution and against conservation of specific orbital energy and angular momentum -- this is the end-to-end validation scenario with known analytical results required before this tool is trusted for anything else. dynamics_task_rate_s is deliberately 1.0 s, not this project's usual 30 s default: Basilisk only refreshes the SPICE-derived central-body state (including its rotation, used in the gravity force computation) once per dynamics task tick, and linearly (Euler-step) extrapolates it between refreshes -- confirmed empirically (see engine/service.py's SPICE-interface comment) to make this test's position error scale roughly with the SQUARE of dynamics_task_rate_s (~202 m at 30 s, ~0.22 m at 1 s). A coarser rate reintroduces that error and fails this test's tight analytical tolerances.",
   "schema_version": 1
 }
