@@ -928,7 +928,7 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
     through instead of raising the same clear error every other malformed
     `schema_version` value gets.
 
-## What Phase 6 (Mission Sequence architecture) adds -- in progress
+## What Phase 6 (Mission Sequence architecture) adds -- landed
 
 A GMAT/FreeFlyer-inspired **Resources / Mission Sequence / Output**
 organization, requested directly: separate "what exists" (spacecraft,
@@ -1174,9 +1174,87 @@ itself is not independently unit-tested (same as its pre-existing
 parsing and Basilisk-free helper functions, see `tests/test_cli.py`'s own
 scope).
 
-**Not yet landed (this phase's final stage):** the GUI itself
-(Resources/Mission/Output dock panels, script editor, debug console) --
-see this file's own design-discussion notes for the detailed staged plan.
+**GUI (`gui/mission_sequence_editor.py`, `gui/mission_output_widget.py`,
+`gui/run_worker.py`, `gui/main_window.py`, `gui/scenario_editor.py`) --
+landed:**
+
+The final Phase 6 stage: a `mission_sequence` is now editable and runnable
+end-to-end from the GUI, not just from a scenario JSON file or a script
+calling `MissionEngine` directly.
+
+* `gui.mission_sequence_editor.MissionSequenceEditorWidget` -- a new
+  "Mission sequence" group box in `ScenarioEditorWidget`, right below
+  Ground stations. This is the first `QTreeWidget` used anywhere in
+  `gui/` (every other list -- spacecraft, sensors/actuators, ground
+  stations -- is flat); `Command` is the first schema type that nests
+  (`if`/`while` carry `children`), so a tree is the first of its shape
+  this app has needed. Add/Edit/Remove mirror
+  `gui.sensor_actuator_editor.SensorActuatorListWidget`'s existing
+  shape; Add Child (enabled only when the current selection is an
+  `if`/`while`) and Move Up/Move Down are new, for nesting and ordering
+  a flat list doesn't need. A tree node's `children` are always taken
+  from the tree's own nesting, never from a stored `Command`'s own
+  `children` field (which is deliberately cleared on every node --
+  see the module's docstring) -- editing a child can never leave a
+  parent's copy stale.
+* `_CommandEditorDialog` -- modeled directly on
+  `gui.sensor_actuator_editor._ItemEditorDialog`'s Kind-combo-plus
+  -conditional-fields shape, with one page per `Command` kind (`if`/
+  `while` share a page -- both are just a `condition` string). Unlike
+  that dialog, this one doesn't hand-check each field: it builds a real
+  `schema.command.Command` and calls its own `validate()`, so the
+  dialog can never drift out of sync with what `Command.validate()`
+  actually requires. `script_block.code` gets a `QPlainTextEdit` in a
+  monospace font -- this is "the script editor" from the original
+  Resources/Mission/Output request. Spacecraft-name fields
+  (`propagate`'s event target, `maneuver`'s target, `assignment`'s
+  target) are `QComboBox`es fed from a snapshot list taken when the
+  dialog opens, via `MissionSequenceEditorWidget.
+  set_spacecraft_names_provider()` -- mirrors
+  `gui.spacecraft_editor.SpacecraftListWidget.
+  set_central_body_provider()`'s existing zero-argument-callable
+  convention. `assignment`'s controller/parameter fields are
+  `QComboBox`es built from a small whitelist duplicated from (not
+  imported from) `engine.mission_engine._ASSIGNMENT_CONTROLLERS`/
+  `_ASSIGNMENT_ATTRIBUTES` -- duplicated because
+  `engine.mission_engine` imports `engine.service` -> Basilisk at
+  module level, and this dialog has to work with no Basilisk installed;
+  kept in sync by hand, same as `_KIND_PARAM_SPECS` already documents
+  doing for `engine.fsw`.
+* `gui.mission_output_widget.MissionOutputWidget` -- the "debug
+  console" from the original request: a new read-only "Mission Output"
+  tab in `MainWindow.right_tabs` (between Results and Kernel Status)
+  that lists every `report` command's `ReportEntry` in execution order
+  once a `mission_sequence` run finishes, plus the total
+  `commands_executed` count from its `CommandSummary`.
+* `gui.run_worker.RunWorker` now dispatches on
+  `scenario.mission_sequence` exactly like `cli.py`'s `cmd_run()`
+  already did: a non-empty sequence runs through `MissionEngine`
+  instead of `SimulationService.run()`/`run_live()` directly, and
+  `finished_ok` now always carries `(ResultSet, Optional[
+  CommandSummary])` instead of just a `ResultSet` -- `None` for every
+  existing (`mission_sequence`-free) scenario, so nothing about the
+  non-mission-sequence path changed. `MissionEngine.run()` has no
+  `run_live()` equivalent (no per-command progress callback to drive
+  one), so `MainWindow.on_run()` ignores the Live Plot toggle whenever
+  `mission_sequence` is non-empty rather than silently hanging a
+  progress bar at 0%.
+* `MainWindow._on_run_finished()` switches `right_tabs` to Mission
+  Output instead of Results when a run produced a `CommandSummary`,
+  and clears the Mission Output tab on New/Open/Run, matching how
+  Results already behaves.
+
+**Verification:** every new/changed GUI file above has direct
+`pytest-qt` coverage in `tests/gui/` (`test_mission_sequence_editor.py`,
+`test_mission_output_widget.py`, plus additions to
+`test_scenario_editor.py`/`test_main_window.py`) -- the full suite
+(461 passed, 45 skipped in this Basilisk-free sandbox) only grows,
+matching every earlier Phase 6 stage's own discipline. This stage has
+NOT yet been exercised against a real Basilisk build by actually
+drawing a `mission_sequence` in the GUI and clicking Run -- every prior
+Phase 6 stage (the execution engine especially) turned up real bugs
+that only reproduced against an actual Basilisk install, so treat this
+GUI wiring the same way until it's been run for real.
 
 ## Repository layout
 
@@ -1213,6 +1291,8 @@ missionStudio/
       icons.py                       -- Phase 5: procedurally-drawn app icon
       main_window.py                 -- MainWindow: File/Run menus + toolbar, ties everything together
       scenario_editor.py             -- the full scenario form + live validation
+      mission_sequence_editor.py     -- Phase 6: mission_sequence tree editor (Command Add/Edit/Remove/nesting)
+      mission_output_widget.py       -- Phase 6: "Mission Output" debug-console tab (CommandSummary/ReportEntry display)
       propagation_setup_dialog.py    -- Phase 5: gravity/perturbations + integrator + space weather, one dedicated window
       spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW, power/propulsion/link budget)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
@@ -1255,6 +1335,8 @@ missionStudio/
       test_kernel_status_widget.py
       test_run_worker.py
       test_main_window.py
+      test_mission_sequence_editor.py -- Phase 6
+      test_mission_output_widget.py  -- Phase 6
 ```
 
 ## Running the tests
