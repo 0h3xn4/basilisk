@@ -1025,13 +1025,71 @@ passed/22 skipped before -- the 22 skips are unrelated, pre-existing
 `requires_basilisk` tests; zero regressions, zero new skips, since this
 stage adds no Basilisk-dependent code).
 
-**Not yet landed (this phase's remaining stages):** the execution engine
-(`engine.mission_engine`, walking `mission_sequence` against a real
-`SimulationService`, verified against `examples/scenarioOrbitManeuver.py`
--- an official Basilisk example doing exactly this -- and this checkout's
-own `hubEffector`/`spacecraft` C++ source before any of it was written,
-per this project's "no guessing about a Basilisk API" discipline); Command
-Summary capture; the GUI (Resources/Mission/Output dock panels, script
+**Execution engine (`engine/mission_engine.py`) -- landed:**
+
+* `MissionEngine(scenario, service=None).run() -> (ResultSet, CommandSummary)`
+  walks `scenario.mission_sequence` against a real `SimulationService`,
+  dispatching each `Command` by `kind`. Every Basilisk call sequence is
+  copied from an actually-running official example or this checkout's own
+  source, not written from memory (see the module's own docstring for the
+  full citation list) -- most notably:
+  * `propagate` (duration/epoch): repeated `ConfigureStopTime()`/
+    `ExecuteSimulation()` pairs, `ConfigureStopTime()` taking an ABSOLUTE
+    cumulative time (not a delta) -- `examples/scenarioOrbitManeuver.py`'s
+    own comment on this, and already exercised by this project's own
+    `SimulationService.run_live()`/`tests/test_service_run_live.py`.
+  * `propagate` (event -- periapsis/apoapsis): Basilisk's native
+    `SimBaseClass.createNewEvent(name, eventRate, eventActive,
+    conditionFunction=..., terminal=True)`, copied from
+    `examples/scenarioDragDeorbit.py`'s own terminal-event block. Detected
+    as a sign change in radial velocity (`dot(r, v) / |r|`) rather than
+    reconstructing true anomaly every check, capped by a generous
+    duration-based safety multiplier so a trajectory that never reaches
+    the event raises a clear `MissionEngineError` instead of hanging.
+  * `maneuver` (impulsive delta-V, inertial/VNB/RTN): `scObject.dynManager.
+    getStateObject(scObject.hub.nameOfHubPosition/nameOfHubVelocity)`
+    fetched once, `simHelpers.EigenVector3d2np(velRef.getState())` to read
+    the current velocity, plain numpy arithmetic (VNB/RTN via
+    `engine.orbit_maintenance`'s already-tested `_vnb_basis`/`_rtn_basis`),
+    `velRef.setState(...)` to apply it -- the exact pattern
+    `examples/scenarioOrbitManeuver.py` itself uses for its two maneuvers.
+* `assignment`/`report`/`if`/`while`/`script_block` have no Basilisk-API
+  precedent -- this project's own design, deliberately narrow: `assignment`
+  only varies a small, hand-listed whitelist of live controller parameters
+  (`thrust_n`/`isp_s` on `station_keeping`/`phasing_keeping`/
+  `constant_thrust`), not generic attribute access; `report` snapshots the
+  CURRENT value of requested series (GMAT `Report`-command semantics, not
+  the whole time history the `ResultSet` already carries) into
+  `CommandSummary.reports`; `if`/`while` conditions and `script_block` code
+  run against a small, explicit namespace (`t_s`, `spacecraft[name].
+  {r_BN_N, v_BN_N, altitude_m, mass_kg}`) -- `script_block` runs full,
+  unrestricted Python (a deliberate trust boundary matching GMAT/FreeFlyer's
+  own script commands and this checkout's own `examples/` scripts: only run
+  a mission file you trust). `while` has a 10,000-iteration safety cap so a
+  condition that never becomes false fails fast with a clear error rather
+  than hanging.
+* Every command failure raises `MissionEngineError` naming the specific
+  command's path (e.g. `"mission_sequence[2].children[0] (maneuver): ..."`)
+  and kind, never a bare exception from inside Basilisk/`eval`/`exec`.
+
+**Verification:** 23 new tests (`tests/test_mission_engine.py`,
+`requires_basilisk`-marked like every other `engine.*` test -- this layer
+imports `engine.service`, which itself needs Basilisk at import time).
+Covers: multi-segment `propagate` accumulating rather than restarting
+(matches a single equivalent-duration `run()` bit-for-bit), `epoch`/`event`
+stop conditions, both maneuver frames (checked against the LIVE state
+object directly, not the recorder, since a maneuver alone doesn't trigger
+a new `scStateOutMsg` write), `assignment` mutating a live controller,
+`report` snapshotting the value AT that mission time (not the final one),
+`if`/`while` (including nested, including the iteration-cap safety net),
+`script_block` (including exception wrapping), and clear-error cases for
+every "names something that doesn't exist" case. Not runnable in this
+project's own development sandbox (no Basilisk build here); written
+directly against the verified call sequences cited above, same
+verification-status caveat as `engine/service.py`/`engine/fsw.py`.
+
+**Not yet landed (this phase's remaining stages):** file-format/GUI-sync
+work, then the GUI itself (Resources/Mission/Output dock panels, script
 editor, debug console) -- see this file's own design-discussion notes for
 the detailed staged plan.
 
@@ -1063,6 +1121,7 @@ missionStudio/
       propellant_bookkeeping.py      -- Phase 5: shared per-tick mass/propellant delta math (no Basilisk needed)
       constellation.py               -- Phase 4: Walker-pattern constellation generator + SeparationSchedule (no Basilisk needed)
       spacecraft_templates.py        -- Phase 5: reusable spacecraft "bus" templates (no Basilisk needed)
+      mission_engine.py              -- Phase 6: MissionEngine -- walks mission_sequence against a SimulationService (needs Basilisk)
     gui/
       app.py                         -- QApplication entry point
       theme.py                       -- Phase 5: app-wide QSS stylesheet + palette
@@ -1096,6 +1155,7 @@ missionStudio/
     test_constellation.py            -- Phase 4
     test_cli.py
     test_two_body_validation.py      -- requires_basilisk
+    test_mission_engine.py           -- Phase 6, requires_basilisk
     gui/
       test_orbit_ic_widget.py
       test_spacecraft_editor.py
