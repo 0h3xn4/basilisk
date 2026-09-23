@@ -118,6 +118,35 @@ def test_unsupported_central_body_rejected():
         sc.validate()
 
 
+def test_spherical_harmonics_on_non_earth_body_rejected():
+    """Regression test for an audit finding: engine.service.
+    SimulationService.build() only has spherical-harmonics gravity-field
+    data (GGM03S) for Earth and raises SimulationServiceError for any
+    other central_body with central_body_degree > 0 -- but that's an
+    engine-layer check that only runs when a scenario is actually
+    simulated. Without a matching schema-layer check, `missionstudio
+    validate`/Scenario.save() (both Basilisk-independent) would report a
+    clean bill of health for a scenario guaranteed to fail the moment it's
+    actually run.
+    """
+    sc = _minimal_scenario()
+    sc.gravity = GravityConfig(central_body="mars", central_body_degree=20)
+    with pytest.raises(ScenarioValidationError, match="only wired up for central_body 'earth'"):
+        sc.validate()
+
+
+def test_spherical_harmonics_on_earth_is_allowed():
+    sc = _minimal_scenario()
+    sc.gravity = GravityConfig(central_body="earth", central_body_degree=20)
+    sc.validate()  # must not raise
+
+
+def test_point_mass_on_non_earth_body_is_allowed():
+    sc = _minimal_scenario()
+    sc.gravity = GravityConfig(central_body="mars", central_body_degree=0)
+    sc.validate()  # must not raise
+
+
 def test_invalid_eccentricity_rejected():
     sc = _minimal_scenario()
     sc.spacecraft[0].orbit.eccentricity = 1.2  # hyperbolic, out of this schema's supported range
@@ -198,6 +227,20 @@ def test_load_scenario_future_schema_version_gives_clear_error(tmp_path):
     path = tmp_path / "future.json"
     path.write_text(json.dumps({"schema_version": 999, "name": "from the future", "epoch_utc": "2030-01-01T00:00:00"}))
     with pytest.raises(ScenarioValidationError, match="upgrade missionStudio"):
+        load_scenario(path)
+
+
+def test_load_scenario_boolean_schema_version_gives_clear_error(tmp_path):
+    """Regression test: bool is a subclass of int in Python
+    (isinstance(True, int) is True), so a malformed "schema_version": true
+    used to pass migrations.migrate()'s isinstance(version, int) check and
+    silently end up stored as a literal True instead of a real version
+    number, rather than raising a clear error like every other malformed
+    schema_version value does.
+    """
+    path = tmp_path / "bool_version.json"
+    path.write_text(json.dumps({"schema_version": True, "name": "x", "epoch_utc": "2030-01-01T00:00:00"}))
+    with pytest.raises(ScenarioValidationError, match="schema_version must be an integer"):
         load_scenario(path)
 
 

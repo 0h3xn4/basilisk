@@ -584,6 +584,20 @@ class GravityConfig:
         _require(self.central_body in SUPPORTED_CENTRAL_BODIES,
                   f"gravity.central_body {self.central_body!r} must be one of {SUPPORTED_CENTRAL_BODIES}")
         _require(self.central_body_degree >= 0, "gravity.central_body_degree must be >= 0")
+        # engine.service.SimulationService.build() only has spherical
+        # -harmonics gravity-field data (GGM03S) for Earth, and raises
+        # SimulationServiceError for any other central_body with
+        # central_body_degree > 0 -- but that's an engine-layer check that
+        # only runs when a scenario is actually simulated. Without this
+        # mirrored check here, `missionstudio validate`/`Scenario.save()`
+        # (both Basilisk-independent, schema-only) would report a clean
+        # bill of health for a scenario guaranteed to fail the moment it's
+        # actually run -- defeating the point of an early, engine
+        # -independent correctness check.
+        _require(self.central_body_degree == 0 or self.central_body == "earth",
+                  f"gravity.central_body_degree > 0 (spherical-harmonics gravity) is only wired up for "
+                  f"central_body 'earth', not {self.central_body!r} -- set central_body_degree = 0 "
+                  f"(point-mass) or central_body = 'earth'")
         for name in self.third_body_perturbers:
             _require(name in SUPPORTED_CENTRAL_BODIES,
                       f"gravity.third_body_perturbers entry {name!r} must be one of {SUPPORTED_CENTRAL_BODIES}")
