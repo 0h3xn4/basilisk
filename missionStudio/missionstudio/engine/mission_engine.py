@@ -59,7 +59,13 @@ written from memory:
   ``scSim.terminate = True`` when a ``terminal=True`` event fires,
   breaking ``ExecuteSimulation()``'s loop early -- no extra plumbing
   needed beyond creating the event before the ``ExecuteSimulation()``
-  call that should be interrupted by it.
+  call that should be interrupted by it. ``ExecuteSimulation()`` itself
+  then unconditionally resets ``scSim.terminate`` back to ``False`` as
+  its own very last statement before returning -- confirmed directly
+  against source (and by a live diagnostic once this was actually run),
+  so a caller can never tell whether a terminal event fired by reading
+  that flag afterward; :meth:`MissionEngine._run_propagate_event` checks
+  the fired event's own ``occurCounter`` instead.
 
 ``assignment``/``report``/``if``/``while``/``script_block`` have no
 Basilisk-API precedent to verify against -- they are this project's own
@@ -327,16 +333,25 @@ class MissionEngine:
 
         cap_days = max(self.scenario.sim_settings.duration_days, 1.0) * _EVENT_PROPAGATE_SAFETY_MULTIPLIER  # [d]
         cap_ns = self._elapsed_ns + macros.sec2nano(cap_days * 86400.0)
-        self.service.scSim.terminate = False
         self.service.scSim.ConfigureStopTime(cap_ns)
         self.service.scSim.ExecuteSimulation()
 
-        if not self.service.scSim.terminate:
+        # NOT scSim.terminate: confirmed directly against SimulationBaseClass.py
+        # that ExecuteSimulation() unconditionally resets it to False as its
+        # own very last statement, whether the loop broke early because a
+        # terminal event fired or ran to natural completion -- checking it
+        # here would always read False regardless of what actually happened
+        # (caught by a live diagnostic once this was actually run: the event
+        # demonstrably DID fire and stop the sim at the exact right instant,
+        # yet this check still claimed it hadn't). The event's own
+        # occurCounter (incremented inside EventHandlerClass.checkEvent()
+        # only when its conditionFunction actually returns True) is the
+        # real signal.
+        if self.service.scSim.eventMap[event_name].occurCounter == 0:
             raise MissionEngineError(
                 f"{path}: propagate stop_condition='event' ({event_kind}) for spacecraft {spacecraft_name!r} "
                 f"did not occur within the {cap_days:.1f}-day safety cap"
             )
-        self.service.scSim.terminate = False  # so a later propagate command's ExecuteSimulation() isn't cut short
         # Unlike duration/epoch, there is no "requested" target here -- the
         # event fired at whatever (task-grid-snapped) instant Basilisk
         # actually detected it, so that IS the new baseline, not something
