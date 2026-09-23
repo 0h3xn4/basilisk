@@ -43,6 +43,18 @@ execution function finishes the job (``InitializeSimulation()``,
 ``ConfigureStopTime()``, ``ExecuteSimulation()``) AFTER the Controller has
 applied every dispersion.
 
+A ``dry_mass_kg`` dispersion writes directly to ``hub.mHub`` (see
+``_QUANTITY_PATHS`` below), which survives ``Reset()`` fine (no module's
+``Reset()`` touches ``hub.mHub``) -- but a real bug, found by audit and
+fixed in ``engine.orbit_maintenance``, used to silently UNDO it on the
+first tick for any spacecraft with ``station_keeping``/``constant_thrust``
+configured: those controllers used to recompute ``hub.mHub`` from their
+own construction-time-captured, undispersed ``dry_mass_kg`` every tick,
+discarding whatever this dispersion had just set. See
+``engine.orbit_maintenance``'s "Shared mass bookkeeping" docstring note --
+those controllers now read ``hub.mHub`` back and only subtract what they
+themselves burn, so a dispersion applied here is preserved correctly.
+
 Dispersion path resolution
 ---------------------------
 Basilisk's dispersion path strings resolve via attribute access, integer

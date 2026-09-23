@@ -1,5 +1,7 @@
 """Tests for gui.sensor_actuator_editor.SensorActuatorListWidget."""
 
+import json
+
 import pytest
 
 pytestmark = pytest.mark.requires_gui
@@ -35,7 +37,10 @@ def test_add_via_dialog(qtbot, monkeypatch):
         self.name_edit.setText("rw-1")
         index = self.kind_combo.findText("reaction_wheel")
         self.kind_combo.setCurrentIndex(index)
-        self.params_edit.setPlainText('{"gsHat_B": [1, 0, 0]}')
+        x, y, z = self._vector_boxes["gsHat_B"]  # spin-box row, not the JSON params box -- see module docstring
+        x.setValue(1.0)
+        y.setValue(0.0)
+        z.setValue(0.0)
         return QDialog.DialogCode.Accepted
 
     monkeypatch.setattr(_ItemEditorDialog, "exec", fake_exec)
@@ -48,7 +53,7 @@ def test_add_via_dialog(qtbot, monkeypatch):
     added = widget.to_list()[0]
     assert added.name == "rw-1"
     assert added.kind == "reaction_wheel"
-    assert added.params == {"gsHat_B": [1, 0, 0]}
+    assert added.params["gsHat_B"] == [1.0, 0.0, 0.0]
     assert changed_count == [1]
 
 
@@ -120,3 +125,92 @@ def test_item_editor_dialog_rejects_empty_name(qtbot):
     dialog.name_edit.setText("")
     with pytest.raises(ValueError, match="name must not be empty"):
         dialog.to_dataclass()
+
+
+def test_new_item_dialog_prefills_params_with_kind_template(qtbot):
+    """Regression test: a brand-new sensor/actuator used to start with an
+    empty ``{}`` params box no matter the kind, forcing a beginner to
+    already know (from reading engine/fsw.py's source) which keys that
+    kind needs. It should now start pre-filled with a working example for
+    whichever kind is selected when the dialog opens (the first entry in
+    SUPPORTED_SENSOR_KINDS, "star_tracker", by default).
+    """
+    from missionstudio.gui.sensor_actuator_editor import _ItemEditorDialog, _template_params
+    from missionstudio.schema.scenario import SUPPORTED_SENSOR_KINDS, SensorConfig
+
+    dialog = _ItemEditorDialog(SensorConfig, SUPPORTED_SENSOR_KINDS)
+    qtbot.addWidget(dialog)
+    assert dialog.kind_combo.currentText() == "star_tracker"
+    dialog.name_edit.setText("st-1")
+
+    config = dialog.to_dataclass()
+    assert config.params == _template_params("star_tracker")
+
+
+def test_switching_kind_does_not_clobber_params_until_reset_clicked(qtbot):
+    """Switching Kind must not silently overwrite whatever the user has
+    already typed into params (or set in the vector spin boxes) -- only
+    the explicit 'Reset to template' button does that (see this dialog's
+    module docstring).
+    """
+    from missionstudio.gui.sensor_actuator_editor import (
+        _ItemEditorDialog,
+        _non_vector_template_params,
+        _vector_specs,
+    )
+    from missionstudio.schema.scenario import SUPPORTED_SENSOR_KINDS, SensorConfig
+
+    dialog = _ItemEditorDialog(SensorConfig, SUPPORTED_SENSOR_KINDS)
+    qtbot.addWidget(dialog)
+    dialog.params_edit.setPlainText('{"hand_typed": true}')
+
+    index = dialog.kind_combo.findText("coarse_sun_sensor")
+    dialog.kind_combo.setCurrentIndex(index)
+    assert json.loads(dialog.params_edit.toPlainText()) == {"hand_typed": True}
+
+    dialog._on_reset_template()
+    assert json.loads(dialog.params_edit.toPlainText()) == _non_vector_template_params("coarse_sun_sensor")
+    for spec in _vector_specs("coarse_sun_sensor"):
+        x, y, z = dialog._vector_boxes[spec.key]
+        assert [x.value(), y.value(), z.value()] == spec.example
+
+
+def test_missing_required_vector_key_is_caught_defensively():
+    """The dialog's own spin-box rows make it structurally impossible to
+    submit a required vector key (e.g. coarse_sun_sensor's nHat_B) with no
+    value -- there's always a row, defaulting to the kind's template
+    example. _missing_required_keys() is exercised directly here as
+    defense in depth (e.g. against a future non-vector required key, or
+    programmatic construction that bypasses the dialog).
+    """
+    from missionstudio.gui.sensor_actuator_editor import _missing_required_keys
+
+    assert _missing_required_keys("coarse_sun_sensor", {}) == ["nHat_B"]
+    assert _missing_required_keys("coarse_sun_sensor", {"nHat_B": [1.0, 0.0, 0.0]}) == []
+    assert _missing_required_keys("reaction_wheel", {}) == ["gsHat_B"]
+
+
+def test_reset_to_template_button_overwrites_params(qtbot):
+    from missionstudio.gui.sensor_actuator_editor import _ItemEditorDialog
+    from missionstudio.schema.scenario import SUPPORTED_ACTUATOR_KINDS, ActuatorConfig
+
+    dialog = _ItemEditorDialog(ActuatorConfig, SUPPORTED_ACTUATOR_KINDS,
+                                item=ActuatorConfig(kind="reaction_wheel", name="rw-1", params={"stale": True}))
+    qtbot.addWidget(dialog)
+    assert dialog.params_edit.toPlainText() == json.dumps({"stale": True}, indent=2)
+
+    dialog._on_reset_template()
+    config = dialog.to_dataclass()
+    assert "gsHat_B" in config.params
+    assert "stale" not in config.params
+
+
+def test_unimplemented_actuator_kind_shows_warning_hint(qtbot):
+    from missionstudio.gui.sensor_actuator_editor import _ItemEditorDialog
+    from missionstudio.schema.scenario import SUPPORTED_ACTUATOR_KINDS, ActuatorConfig
+
+    dialog = _ItemEditorDialog(ActuatorConfig, SUPPORTED_ACTUATOR_KINDS)
+    qtbot.addWidget(dialog)
+    index = dialog.kind_combo.findText("thruster")
+    dialog.kind_combo.setCurrentIndex(index)
+    assert "not simulated yet" in dialog.hint_label.text()

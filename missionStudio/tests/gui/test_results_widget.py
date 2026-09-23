@@ -10,10 +10,10 @@ import pytest
 pytestmark = pytest.mark.requires_gui
 
 
-def _sample_result_set():
+def _sample_result_set(n=50):
     from missionstudio.engine.results import ResultSet, TimeSeries
 
-    t = np.linspace(0, 3600 * 3, 50)
+    t = np.linspace(0, 3600 * 3, n)
     pos = np.column_stack([np.sin(t / 500), np.cos(t / 500), t * 0.001]) * 7.0e6
     vel = np.column_stack([np.cos(t / 500), -np.sin(t / 500), np.zeros_like(t)])
 
@@ -75,3 +75,51 @@ def test_export_with_no_result_is_a_no_op(widget, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: calls.append(1) or ""))
     widget._on_export()  # self._result is None
     assert calls == []
+
+
+def test_set_live_result_populates_combo_on_first_update(widget):
+    widget.set_live_result(_sample_result_set(n=5))
+    assert widget.series_combo.count() == 2
+    assert widget.export_button.isEnabled()
+    assert len(widget.axes.get_lines()) == 3  # x, y, z
+
+
+def test_set_live_result_does_not_reset_users_series_selection(widget):
+    """Regression guard: a live run's series names are fixed from its
+    first chunk (see set_live_result's docstring) -- later chunks with
+    MORE data but the SAME series names must not rebuild series_combo,
+    which would silently snap the user's current selection back to index
+    0 every time a new chunk arrives while they're watching a different
+    series.
+    """
+    widget.set_live_result(_sample_result_set(n=5))
+    widget.series_combo.setCurrentIndex(1)  # "sat-1.velocity_N"
+
+    widget.set_live_result(_sample_result_set(n=25))  # later chunk, more samples, same series names
+
+    assert widget.series_combo.currentIndex() == 1
+    assert widget.series_combo.count() == 2
+
+
+def test_set_live_result_grows_the_plotted_data(widget):
+    widget.set_live_result(_sample_result_set(n=5))
+    first_line_length = len(widget.axes.get_lines()[0].get_xdata())
+
+    widget.set_live_result(_sample_result_set(n=25))
+
+    assert len(widget.axes.get_lines()[0].get_xdata()) > first_line_length
+
+
+def test_set_live_result_rebuilds_combo_if_series_names_change(widget):
+    from missionstudio.engine.results import ResultSet, TimeSeries
+
+    widget.set_live_result(_sample_result_set(n=5))
+    widget.series_combo.setCurrentIndex(1)
+
+    other = ResultSet(scenario_name="demo")
+    other.add(TimeSeries("sat-2.position_N", np.linspace(0, 10, 5), ("x", "y", "z"),
+                          np.zeros((5, 3)), units="m"))
+    widget.set_live_result(other)
+
+    assert widget.series_combo.count() == 1
+    assert widget.series_combo.currentText() == "sat-2.position_N"

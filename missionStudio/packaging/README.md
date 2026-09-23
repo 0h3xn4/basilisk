@@ -57,11 +57,16 @@ than glossed over.
   vendorable sitting around to install with this flag).
 
 * **`missionstudio.desktop.in`** -- the desktop-entry template `install.sh`
-  fills in (`@INSTALL_PREFIX@` -> the venv's parent directory). No icon
-  file is bundled (`Icon=missionstudio` falls back to a generic icon
-  through the desktop icon theme) -- fabricating an icon asset wasn't
-  something this phase produced; add a real one under a name matching
-  `Icon=` in this file whenever the project has one.
+  fills in (`@INSTALL_PREFIX@` -> the venv's parent directory).
+  `Icon=missionstudio` now resolves to a real icon: `install.sh` renders
+  `gui/icons.py`'s procedurally-drawn app icon (QPainter, no bitmap asset
+  in the repo -- see that module's docstring) to
+  `$XDG_DATA_HOME/icons/hicolor/256x256/apps/missionstudio.png` (the
+  standard hicolor icon theme location) right after writing the desktop
+  entry, using the `offscreen` Qt platform plugin so no display is needed
+  even on a headless install. Non-fatal if it fails (e.g. no Qt platform
+  plugins present at all) -- the desktop entry still installs, just with
+  the icon theme's generic fallback.
 
 ## The vendoring decision (why there's no Basilisk wheel here)
 

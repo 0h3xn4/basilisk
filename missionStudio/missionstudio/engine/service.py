@@ -150,7 +150,8 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -173,6 +174,13 @@ _INTEGRATORS = {
     "rkf45": svIntegrators.svIntegratorRKF45,
     "rkf78": svIntegrators.svIntegratorRKF78,
 }
+
+# SimulationService.run_live()'s default chunk count when live_step_s isn't
+# given -- about this many on_progress callbacks over the whole run,
+# regardless of duration_days. A round number, not tuned to any specific
+# scenario; see run_live()'s docstring for the dynamics_task_rate_s clamp
+# that keeps a very short run from producing a sub-tick step instead.
+_LIVE_DEFAULT_FRAMES = 200
 
 
 class SimulationServiceError(Exception):
@@ -234,6 +242,41 @@ def _orbit_ic_to_rv(mu: float, orbit: OrbitIC):
     raise SimulationServiceError(f"unknown orbit IC type {orbit.type!r}")  # unreachable if orbit.validate() passed
 
 
+def _osculating_elements(mu: float, r_bn_n: np.ndarray, v_bn_n: np.ndarray) -> Dict[str, np.ndarray]:
+    """Osculating classical orbital elements (a [m], e [-], i/raan/argp/
+    true_anomaly [rad]) at every recorded (r, v) sample, via
+    ``orbitalMotion.rv2elem`` -- the exact inverse of ``_orbit_ic_to_rv``'s
+    classical-elements branch above, run independently at each sample (not
+    a smoothed/mean-element fit), so a result plot can show how the ACTUAL
+    simulated orbit's shape/orientation evolves, not just position/velocity.
+
+    Near-circular (e -> 0) and/or near-equatorial (i -> 0) samples are a
+    known singularity of the classical elements themselves, not a bug here:
+    ``rv2elem`` zeroes ``raan``/``argp`` in those cases and folds their
+    angle into ``true_anomaly`` instead (e.g. argument of latitude for a
+    circular inclined orbit) -- expect those columns to look degenerate
+    (flat at 0, or a discontinuity) for a near-circular/near-equatorial
+    scenario. This is inherent to osculating classical elements, not
+    something a per-sample computation could avoid.
+    """
+    n = r_bn_n.shape[0]
+    a = np.empty(n)
+    e = np.empty(n)
+    i = np.empty(n)
+    raan = np.empty(n)
+    argp = np.empty(n)
+    true_anomaly = np.empty(n)
+    for k in range(n):
+        oe = orbitalMotion.rv2elem(mu, r_bn_n[k], v_bn_n[k])
+        a[k] = oe.a
+        e[k] = oe.e
+        i[k] = oe.i
+        raan[k] = oe.Omega
+        argp[k] = oe.omega
+        true_anomaly[k] = oe.f
+    return {"a": a, "e": e, "i": i, "raan": raan, "argp": argp, "true_anomaly": true_anomaly}
+
+
 @dataclass
 class _SpacecraftHandle:
     name: str
@@ -250,6 +293,7 @@ class _SpacecraftHandle:
     station_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.station_keeping was configured
     eclipse_out_msg: Optional[object] = None  # Phase 4: only set if power or station_keeping was configured
     phasing_keeping_controller: Optional[object] = None  # Phase 4: only set if sc_config.phasing_keeping was configured
+    constant_thrust_controller: Optional[object] = None  # Phase 5: only set if sc_config.constant_thrust was configured
 
 
 class SimulationService:
@@ -482,12 +526,16 @@ class SimulationService:
         for sc_config in scenario.spacecraft:
             sc_object = spacecraft.Spacecraft()
             sc_object.ModelTag = sc_config.name
-            # See SpacecraftConfig.dry_mass_kg's docstring: station-keeping
-            # propellant is additional mass on top of the dry mass, not
-            # already counted in it.
+            # See SpacecraftConfig.dry_mass_kg's docstring: station-keeping/
+            # constant-thrust propellant is additional mass on top of the
+            # dry mass, not already counted in it -- independent propellant
+            # budgets, so both are added if both are configured (see
+            # ConstantThrustConfig's docstring).
             initial_mass_kg = sc_config.dry_mass_kg
             if sc_config.station_keeping is not None:
                 initial_mass_kg += sc_config.station_keeping.propellant_kg
+            if sc_config.constant_thrust is not None:
+                initial_mass_kg += sc_config.constant_thrust.propellant_kg
             sc_object.hub.mHub = initial_mass_kg
             sc_object.hub.IHubPntBc_B = simHelpers.np2EigenMatrix3d(sc_config.inertia_kg_m2)
             sc_object.hub.sigma_BNInit = [[v] for v in sc_config.sigma_bn_init]
@@ -586,6 +634,18 @@ class SimulationService:
                 handle.station_keeping_controller = orbit_maintenance.build_station_keeping(
                     self.scSim, dyn_task_name, sc_config.name, sc_object, mu, central_body.radEquator,
                     sc_config.dry_mass_kg, sc_config.station_keeping, eclipse_out_msg=sc_eclipse_out_msg,
+                )
+
+            # -- Phase 5: continuous constant-frame thrust
+            # (schema.scenario.ConstantThrustConfig) -- independent of
+            # fsw_mode/sensors/power/station_keeping like the blocks above;
+            # see engine.orbit_maintenance's ConstantFrameThrustController
+            # docstring. Uses its OWN extForceTorque effector (not shared
+            # with station_keeping's), so both may be configured together.
+            if sc_config.constant_thrust is not None:
+                handle.constant_thrust_controller = orbit_maintenance.build_constant_thrust(
+                    self.scSim, dyn_task_name, sc_config.name, sc_object,
+                    sc_config.dry_mass_kg, sc_config.constant_thrust,
                 )
 
             # -- Phase 4: atmospheric drag (schema.scenario.SpacecraftConfig
@@ -737,6 +797,15 @@ class SimulationService:
                 name: handle.station_keeping_controller for name, handle in self._handles.items()
                 if handle.station_keeping_controller is not None
             }
+            custom_models_by_spacecraft = {
+                sc_config.name: {
+                    "path": sc_config.vizard_model_path,
+                    "offset_m": sc_config.vizard_model_offset_m,
+                    "rotation_deg": sc_config.vizard_model_rotation_deg,
+                    "scale": sc_config.vizard_model_scale,
+                }
+                for sc_config in scenario.spacecraft if sc_config.vizard_model_path is not None
+            }
             try:
                 self._viz = vizard.enable_vizard(
                     self.scSim, dyn_task_name, sc_objects_in_order, self.vizard_request,
@@ -745,6 +814,7 @@ class SimulationService:
                     battery_by_spacecraft=battery_by_spacecraft,
                     station_keeping_by_spacecraft=station_keeping_by_spacecraft,
                     access_out_msgs=self._access_out_msgs,
+                    custom_models_by_spacecraft=custom_models_by_spacecraft,
                 )
             except vizard.VizardError as exc:
                 raise SimulationServiceError(str(exc)) from exc
@@ -759,21 +829,111 @@ class SimulationService:
         """Build (if not already built) and execute the simulation, then
         extract every spacecraft's logged time histories into a
         :class:`~missionstudio.engine.results.ResultSet`: always
-        position/velocity, plus (Phase 2, only for a spacecraft that
-        actually has them configured) attitude/body-rate/sun-heading,
-        commanded control torque, reaction wheel speeds, and one series per
-        attached sensor.
+        position/velocity plus osculating Keplerian elements (semi-major
+        axis, eccentricity, inclination, RAAN, argument of periapsis, true
+        anomaly -- see :func:`_osculating_elements`), plus (Phase 2, only
+        for a spacecraft that actually has them configured) attitude/
+        body-rate/sun-heading, commanded control torque, reaction wheel
+        speeds, and one series per attached sensor.
+
+        See :meth:`run_live` for a variant that streams intermediate
+        results back while the simulation is still running (e.g. to drive
+        a live-updating plot), rather than only once at the end.
+        """
+        if self.scSim is None:
+            self.build()
+        self.scSim.ExecuteSimulation()
+        return self._extract_results()
+
+    def run_live(self, on_progress: Callable[[ResultSet, float], None],
+                 live_step_s: Optional[float] = None) -> ResultSet:
+        """Same as :meth:`run`, except the simulation is executed in small
+        time chunks and ``on_progress(partial_result, fraction_complete)``
+        is called after each one, so a caller (missionStudio's GUI) can
+        redraw a plot while the run is still in flight instead of only
+        once it finishes.
+
+        This relies on a documented, supported Basilisk pattern: repeated
+        ``ConfigureStopTime()``/``ExecuteSimulation()`` pairs. ``ExecuteSimulation()``
+        always resumes from wherever ``TotalSim.NextTaskTime`` currently
+        is (see ``SimulationBaseClass.ExecuteSimulation()``'s
+        ``CheckStopCondition()`` loop) rather than restarting from t=0, so
+        calling it again with a larger stop time just continues the same
+        run. Recorders keep accumulating samples across chunks exactly as
+        they would across one uninterrupted call, so each chunk's
+        :meth:`_extract_results` is simply "whatever has been logged so
+        far" -- not a separate bookkeeping path from :meth:`run`. Which
+        series exist is decided once by ``self.scenario``/:meth:`build`,
+        never by how much data has been recorded yet, so the set of series
+        names is identical across every ``on_progress`` call (including
+        the first) and matches :meth:`run`'s -- only the amount of data in
+        each grows.
+
+        Args:
+            on_progress: called after each chunk with
+                ``(partial_result, fraction_complete)``, ``fraction_complete``
+                in ``[0, 1]`` (exactly ``1.0`` on the final call). Any
+                exception it raises propagates out of ``run_live`` and
+                aborts the run, same as an exception anywhere else in the
+                simulation would.
+            live_step_s: how much sim time to advance per chunk/callback
+                [s]. Defaults to
+                ``duration_days * 86400 / _LIVE_DEFAULT_FRAMES`` (about
+                ``_LIVE_DEFAULT_FRAMES`` callbacks over the whole run),
+                clamped to never be smaller than one dynamics tick
+                (``sim_settings.dynamics_task_rate_s``) -- ``ExecuteSimulation()``
+                has real per-call overhead, so a sub-tick step would only
+                add Python-loop cost with no extra simulated time to show
+                for it.
         """
         if self.scSim is None:
             self.build()
 
-        self.scSim.ExecuteSimulation()
+        stop_time_s = self.scenario.sim_settings.duration_days * 86400.0  # [s]
+        stop_time_ns = macros.sec2nano(stop_time_s)
+        if live_step_s is None:
+            live_step_s = max(
+                self.scenario.sim_settings.dynamics_task_rate_s,
+                stop_time_s / _LIVE_DEFAULT_FRAMES,
+            )  # [s]
+        step_ns = max(1, macros.sec2nano(live_step_s))
 
+        next_stop_ns = min(step_ns, stop_time_ns)
+        while True:
+            self.scSim.ConfigureStopTime(next_stop_ns)
+            self.scSim.ExecuteSimulation()
+            fraction_complete = min(1.0, next_stop_ns / stop_time_ns)
+            on_progress(self._extract_results(), fraction_complete)
+            if next_stop_ns >= stop_time_ns:
+                break
+            next_stop_ns = min(next_stop_ns + step_ns, stop_time_ns)
+
+        return self._extract_results()
+
+    def _extract_results(self) -> ResultSet:
+        """Reads every recorder currently attached in ``self._handles``
+        into a fresh :class:`~missionstudio.engine.results.ResultSet` --
+        whatever has been logged so far, whether that's a full run's worth
+        (:meth:`run`) or one chunk's worth mid-run (:meth:`run_live`)."""
         result = ResultSet(scenario_name=self.scenario.name)
         for name, handle in self._handles.items():
             t_s = handle.recorder.times() * macros.NANO2SEC
             result.add(TimeSeries(f"{name}.position_N", t_s, ("x", "y", "z"), handle.recorder.r_BN_N, units="m"))
             result.add(TimeSeries(f"{name}.velocity_N", t_s, ("x", "y", "z"), handle.recorder.v_BN_N, units="m/s"))
+
+            # Osculating Keplerian elements -- see _osculating_elements()'s
+            # docstring for the near-circular/near-equatorial caveat. One
+            # TimeSeries per element (not one combined series), matching
+            # this method's own convention for mixed-unit quantities below
+            # (e.g. station_keeping's separate .burn_on/.delta_v series).
+            oe = _osculating_elements(self.mu, handle.recorder.r_BN_N, handle.recorder.v_BN_N)
+            result.add(TimeSeries(f"{name}.orbit_elements.semi_major_axis", t_s, ("a",), oe["a"], units="m"))
+            result.add(TimeSeries(f"{name}.orbit_elements.eccentricity", t_s, ("e",), oe["e"], units="-"))
+            result.add(TimeSeries(f"{name}.orbit_elements.inclination", t_s, ("i",), oe["i"], units="rad"))
+            result.add(TimeSeries(f"{name}.orbit_elements.raan", t_s, ("raan",), oe["raan"], units="rad"))
+            result.add(TimeSeries(f"{name}.orbit_elements.arg_periapsis", t_s, ("argp",), oe["argp"], units="rad"))
+            result.add(TimeSeries(f"{name}.orbit_elements.true_anomaly", t_s, ("true_anomaly",),
+                                   oe["true_anomaly"], units="rad"))
 
             if handle.nav_recorder is not None:
                 nav_t_s = handle.nav_recorder.times() * macros.NANO2SEC
@@ -846,6 +1006,15 @@ class SimulationService:
                 result.add(TimeSeries(f"{name}.phasing_keeping.delta_v", pk_t_s, ("cumulative_delta_v",),
                                        np.asarray(phase_controller.deltaVLog), units="m/s"))
 
+            if handle.constant_thrust_controller is not None:
+                ct_controller = handle.constant_thrust_controller
+                ct_t_s = np.asarray(ct_controller.tLog)
+                result.add(TimeSeries(f"{name}.constant_thrust.propellant_remaining", ct_t_s,
+                                       ("propellant_remaining",), np.asarray(ct_controller.propellantLog),
+                                       units="kg"))
+                result.add(TimeSeries(f"{name}.constant_thrust.delta_v", ct_t_s, ("cumulative_delta_v",),
+                                       np.asarray(ct_controller.deltaVLog), units="m/s"))
+
         for (gs_name, sc_name), recorder in self._access_recorders.items():
             access_t_s = recorder.times() * macros.NANO2SEC
             series_name = f"{gs_name}.access_to_{sc_name}"
@@ -863,10 +1032,10 @@ class SimulationService:
         # engine.link_budget's module docstring for what this does and does
         # NOT account for), only for spacecraft that opted in via
         # schema.scenario.RFLinkConfig.
-        for sc_config in scenario.spacecraft:
+        for sc_config in self.scenario.spacecraft:
             if sc_config.rf_link is None:
                 continue
-            for gs_config in scenario.ground_stations:
+            for gs_config in self.scenario.ground_stations:
                 result.add(link_budget.link_margin_series(
                     result, gs_config.name, sc_config.name, sc_config.rf_link, gs_config
                 ))

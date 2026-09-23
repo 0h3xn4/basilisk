@@ -43,7 +43,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QSplitter,
+    QStyle,
     QTabWidget,
+    QToolBar,
 )
 
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
@@ -114,22 +116,26 @@ class MainWindow(QMainWindow):
 
     # -- menu ---------------------------------------------------------------
     def _build_menu(self) -> None:
+        style = self.style()
         file_menu = self.menuBar().addMenu("&File")
 
-        new_action = QAction("&New Scenario", self)
+        new_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "&New Scenario", self)
         new_action.setShortcut(QKeySequence.StandardKey.New)
+        new_action.setToolTip("New Scenario (Ctrl+N)")
         new_action.triggered.connect(self.on_new)
         file_menu.addAction(new_action)
         self.new_action = new_action
 
-        open_action = QAction("&Open...", self)
+        open_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "&Open...", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.setToolTip("Open a scenario file (Ctrl+O)")
         open_action.triggered.connect(self.on_open)
         file_menu.addAction(open_action)
         self.open_action = open_action
 
-        save_action = QAction("&Save", self)
+        save_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "&Save", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_action.setToolTip("Save (Ctrl+S)")
         save_action.triggered.connect(self.on_save)
         file_menu.addAction(save_action)
         self.save_action = save_action
@@ -147,26 +153,73 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
         run_menu = self.menuBar().addMenu("&Run")
-        run_action = QAction("&Run Simulation", self)
+        run_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay), "&Run Simulation", self)
         run_action.setShortcut("Ctrl+R")
+        run_action.setToolTip("Run Simulation (Ctrl+R)")
         run_action.triggered.connect(self.on_run)
         run_menu.addAction(run_action)
         self.run_action = run_action
 
-        check_kernels_action = QAction("&Check Kernels", self)
+        live_plot_action = QAction("&Live Plot", self)
+        live_plot_action.setCheckable(True)
+        live_plot_action.setChecked(True)
+        live_plot_action.setToolTip(
+            "Update the Results plot as the simulation runs, instead of only once it finishes"
+        )
+        run_menu.addAction(live_plot_action)
+        self.live_plot_action = live_plot_action
+
+        check_kernels_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
+                                        "&Check Kernels", self)
+        check_kernels_action.setToolTip("Check/fetch SPICE kernels")
         check_kernels_action.triggered.connect(self.kernel_status_widget.refresh)
         run_menu.addAction(check_kernels_action)
         self.check_kernels_action = check_kernels_action
 
-        vizard_action = QAction("&Vizard...", self)
+        vizard_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DesktopIcon), "&Vizard...", self)
+        vizard_action.setToolTip("Configure Vizard visualization for the next run")
         vizard_action.triggered.connect(self.on_configure_vizard)
         run_menu.addAction(vizard_action)
         self.vizard_action = vizard_action
 
-        monte_carlo_action = QAction("Run &Monte Carlo...", self)
+        monte_carlo_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward),
+                                      "Run &Monte Carlo...", self)
+        monte_carlo_action.setToolTip("Run a Monte Carlo batch")
         monte_carlo_action.triggered.connect(self.on_run_monte_carlo)
         run_menu.addAction(monte_carlo_action)
         self.monte_carlo_action = monte_carlo_action
+
+        self._build_toolbar()
+
+    def _build_toolbar(self) -> None:
+        """Puts the SAME QAction instances the menu bar uses onto a
+        QToolBar -- one signal connection per action, both surfaces always
+        agree (enabled/disabled state included, e.g. while a run is in
+        flight -- see :meth:`_set_running`).
+        """
+        toolbar = QToolBar("Main", self)
+        toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(toolbar)
+
+        toolbar.addAction(self.new_action)
+        toolbar.addAction(self.open_action)
+        toolbar.addAction(self.save_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.run_action)
+        toolbar.addAction(self.live_plot_action)
+        toolbar.addAction(self.monte_carlo_action)
+        toolbar.addAction(self.vizard_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.check_kernels_action)
+
+        # "Run Simulation" is the app's primary call-to-action -- visually
+        # distinguished with the accent color (see theme.py's
+        # QToolButton#primaryToolButton rule), same idea as a web app's
+        # primary button.
+        run_button = toolbar.widgetForAction(self.run_action)
+        if run_button is not None:
+            run_button.setObjectName("primaryToolButton")
 
     def _update_window_title(self) -> None:
         name = self._current_path.name if self._current_path else "untitled"
@@ -260,14 +313,24 @@ class MainWindow(QMainWindow):
         single run's worker was still using ``self._run_worker``, silently
         losing track of it. One run at a time.
         """
-        for action in (self.run_action, self.monte_carlo_action, self.vizard_action, self.check_kernels_action):
+        for action in (self.run_action, self.live_plot_action, self.monte_carlo_action, self.vizard_action,
+                       self.check_kernels_action):
             action.setEnabled(not running)
 
-    def _start_busy(self, message: str) -> None:
+    def _start_busy(self, message: str, determinate: bool = False) -> None:
         self._set_running(True)
         self._busy_elapsed.start()
         self._busy_label.setText("0:00 elapsed")
         self._busy_label.setVisible(True)
+        # A live-plot run reports real progress (engine.service.
+        # SimulationService.run_live()'s fraction_complete) -- a real
+        # percentage bar for it, rather than the indeterminate ("marching
+        # ants") bar every other run still uses, since nothing else here
+        # exposes a step/run progress callback to drive one (see the
+        # class-level comment by self._busy_progress's construction).
+        self._busy_progress.setRange(0, 100 if determinate else 0)
+        if determinate:
+            self._busy_progress.setValue(0)
         self._busy_progress.setVisible(True)
         self._busy_timer.start()
         self.statusBar().showMessage(message)
@@ -306,11 +369,24 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Cannot run invalid scenario", str(exc))
             return
 
-        self._start_busy(f"Running {scenario.name}...")
-        self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request)
+        live = self.live_plot_action.isChecked()
+        self._start_busy(f"Running {scenario.name}...", determinate=live)
+        if live:
+            # Clear any previous run's plot rather than leaving it up
+            # while this run's first chunk is still in flight -- it would
+            # otherwise look like this run already has results before it
+            # actually does.
+            self.results_widget.set_result(None)
+            self.right_tabs.setCurrentWidget(self.results_widget)
+        self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request, live=live)
+        self._run_worker.progress.connect(self._on_run_progress)
         self._run_worker.finished_ok.connect(self._on_run_finished)
         self._run_worker.failed.connect(self._on_run_failed)
         self._run_worker.start()
+
+    def _on_run_progress(self, partial_result, fraction: float) -> None:
+        self.results_widget.set_live_result(partial_result)
+        self._busy_progress.setValue(int(round(fraction * 100)))
 
     def _on_run_finished(self, result) -> None:
         self._stop_busy(f"Run complete: {len(result.series)} result series.")

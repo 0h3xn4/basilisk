@@ -106,6 +106,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     if any(sc.station_keeping is not None for sc in scenario.spacecraft):
         print("Station-keeping summary:")
         _print_station_keeping_summary(scenario, result)
+    if any(sc.constant_thrust is not None for sc in scenario.spacecraft):
+        print("Constant-thrust summary:")
+        _print_constant_thrust_summary(scenario, result)
     return 0
 
 
@@ -149,6 +152,28 @@ def _print_station_keeping_summary(scenario, result) -> None:
         if sc.phasing_keeping is not None:
             print(f"    (altitude-keeping: {station_keeping_delta_v_m_s:.3f} m/s, "
                   f"phasing vs. {sc.phasing_keeping.chief_spacecraft!r}: {phasing_delta_v_m_s:.3f} m/s)")
+
+
+def _print_constant_thrust_summary(scenario, result) -> None:
+    """Same idea as :func:`_print_station_keeping_summary`, for
+    ``constant_thrust`` -- an INDEPENDENT propellant budget/tank from
+    station_keeping's (see ``schema.scenario.ConstantThrustConfig``'s
+    docstring), so this is always its own separate line, never combined
+    with the station-keeping summary above even when both are configured
+    on the same spacecraft.
+    """
+    for sc in scenario.spacecraft:
+        if sc.constant_thrust is None:
+            continue
+        delta_v_series = result.series.get(f"{sc.name}.constant_thrust.delta_v")
+        propellant_series = result.series.get(f"{sc.name}.constant_thrust.propellant_remaining")
+        if delta_v_series is None or propellant_series is None or len(delta_v_series.data) == 0:
+            continue
+        delta_v_m_s = float(delta_v_series.data[-1, 0])
+        propellant_remaining_kg = float(propellant_series.data[-1, 0])
+        propellant_used_kg = sc.constant_thrust.propellant_kg - propellant_remaining_kg
+        print(f"  {sc.name}: {delta_v_m_s:.3f} m/s delta-V ({sc.constant_thrust.frame} frame), "
+              f"{propellant_used_kg:.3f} kg propellant used ({propellant_remaining_kg:.3f} kg remaining)")
 
 
 def cmd_monte_carlo(args: argparse.Namespace) -> int:

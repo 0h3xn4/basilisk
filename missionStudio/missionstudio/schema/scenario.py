@@ -330,6 +330,57 @@ class StationKeepingConfig:
                   f"{spacecraft_name}: station_keeping.eclipse_sunlit_threshold must be in (0, 1]")
 
 
+SUPPORTED_THRUST_FRAMES = ("VNB", "RTN")
+
+
+@dataclass
+class ConstantThrustConfig:
+    """Continuous (always-on), constant-magnitude thrust with a fixed
+    DIRECTION IN A ROTATING FRAME (``frame``: ``"VNB"`` -- velocity/orbit
+    -normal/binormal -- or ``"RTN"`` -- radial/transverse/orbit-normal;
+    see ``engine.orbit_maintenance``'s ``_vnb_basis``/``_rtn_basis`` for
+    the exact axis definitions), with delta-V and propellant bookkeeping
+    (same rocket-equation approach as ``StationKeepingConfig`` -- see that
+    class's docstring). Built for
+    :data:`Scenario.simulation_mode`\\ 's ``"orbit_only"`` use case: a
+    delta-V/propellant budget for a maneuver whose direction is defined
+    relative to the orbit (e.g. always-prograde, or a fixed out-of-plane
+    component) rather than needing any attitude model to point a specific
+    body axis -- an INERTIALLY-fixed thrust direction would drift
+    relative to the orbit as the spacecraft moves, which is why this is
+    VNB/RTN-relative, re-evaluated every simulation tick from the
+    spacecraft's current state, not a fixed inertial vector.
+
+    Independent of ``StationKeepingConfig`` -- both may be set on the same
+    spacecraft (separate propellant budgets/tanks, unlike
+    ``StationKeepingConfig``/``PhasingKeepingConfig``'s deliberately
+    shared one -- see ``PhasingKeepingConfig``'s docstring for that case)
+    and not restricted to orbit-only mode; a full-attitude scenario can
+    use this too if a simple always-on maneuver (rather than an
+    altitude-deadband-triggered one) is what's wanted.
+
+    ``None`` (the default) means no constant-frame thrust is simulated for
+    that spacecraft.
+    """
+
+    frame: str = "VNB"  # one of SUPPORTED_THRUST_FRAMES
+    direction: list = field(default_factory=lambda: [1.0, 0.0, 0.0])  # unit vector in `frame` [-]
+    thrust_n: float = 0.01  # [N]
+    isp_s: float = 1500.0  # [s]
+    propellant_kg: float = 2.0  # [kg] initial propellant mass available
+
+    def validate(self, spacecraft_name: str) -> None:
+        _require(self.frame in SUPPORTED_THRUST_FRAMES,
+                  f"{spacecraft_name}: constant_thrust.frame {self.frame!r} must be one of "
+                  f"{SUPPORTED_THRUST_FRAMES}")
+        _require(len(self.direction) == 3, f"{spacecraft_name}: constant_thrust.direction must have 3 elements")
+        _require(any(abs(v) > 1e-12 for v in self.direction),
+                  f"{spacecraft_name}: constant_thrust.direction must not be the zero vector")
+        _require(self.thrust_n > 0, f"{spacecraft_name}: constant_thrust.thrust_n must be > 0")
+        _require(self.isp_s > 0, f"{spacecraft_name}: constant_thrust.isp_s must be > 0")
+        _require(self.propellant_kg >= 0, f"{spacecraft_name}: constant_thrust.propellant_kg must be >= 0")
+
+
 @dataclass
 class PhasingKeepingConfig:
     """Constellation-wide phasing maintenance: holds this (follower)
@@ -442,6 +493,19 @@ class SpacecraftConfig:
     rf_link: Optional[RFLinkConfig] = None
     station_keeping: Optional[StationKeepingConfig] = None
     phasing_keeping: Optional[PhasingKeepingConfig] = None
+    constant_thrust: Optional[ConstantThrustConfig] = None
+
+    # Phase 5: PURELY COSMETIC Vizard display -- replaces this spacecraft's
+    # default cube icon with a custom CAD model
+    # (Basilisk.utilities.vizSupport.createCustomModel()). Never affects
+    # simulated physics: mass properties, drag/SRP area, etc. still come
+    # from dry_mass_kg/inertia_kg_m2/drag_area_m2/srp_area_m2 above, same
+    # as when this is unset. None (the default) leaves Vizard's own
+    # default icon in place.
+    vizard_model_path: Optional[str] = None  # path to a .obj file, or "CUBE"/"CYLINDER"/"SPHERE"
+    vizard_model_offset_m: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    vizard_model_rotation_deg: list = field(default_factory=lambda: [0.0, 0.0, 0.0])  # 3-2-1 Euler (z,y,x)
+    vizard_model_scale: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
 
     def validate(self) -> None:
         _require(bool(self.name), "spacecraft.name must not be empty")
@@ -499,6 +563,15 @@ class SpacecraftConfig:
                       f"{self.name}: phasing_keeping requires station_keeping to also be set on this spacecraft "
                       "-- they share one physical thruster/propellant tank (see PhasingKeepingConfig's docstring)")
             self.phasing_keeping.validate(self.name)
+        if self.constant_thrust is not None:
+            self.constant_thrust.validate(self.name)
+
+        if self.vizard_model_path is not None:
+            _require(bool(self.vizard_model_path.strip()), f"{self.name}: vizard_model_path must not be blank")
+        _require(len(self.vizard_model_offset_m) == 3, f"{self.name}: vizard_model_offset_m must have 3 elements")
+        _require(len(self.vizard_model_rotation_deg) == 3,
+                  f"{self.name}: vizard_model_rotation_deg must have 3 elements")
+        _require(len(self.vizard_model_scale) == 3, f"{self.name}: vizard_model_scale must have 3 elements")
 
 
 @dataclass
@@ -643,12 +716,33 @@ class SimSettings:
                   f"sim_settings.integrator {self.integrator!r} must be one of {SUPPORTED_INTEGRATORS}")
 
 
+SUPPORTED_SIMULATION_MODES = ("full_attitude", "orbit_only")
+
+
 @dataclass
 class Scenario:
     name: str
     epoch_utc: str  # ISO 8601, e.g. "2030-01-01T00:00:00" -- single source of
     # truth for time; TAI/TT/ET are DERIVED (see engine/time_system.py), never
     # separately stored, so they cannot drift out of sync with epoch_utc.
+    # Chosen up front (the GUI's scenario editor puts it at the top of the
+    # form, "before starting with anything else" per the feature request
+    # this responds to): "full_attitude" (the default, and everything this
+    # schema always supported) simulates attitude/sensors/actuators/FSW/
+    # power normally. "orbit_only" is a beginner-friendly, deliberately
+    # STRICTER mode for pure orbit-propagation questions (delta-V budgets,
+    # orbit lifetime, station-keeping cadence, ...) where attitude doesn't
+    # matter and modeling it is only friction: no spacecraft may set
+    # fsw_mode/sensors/actuators/power in this mode (Scenario.validate()
+    # rejects it with a specific error naming the offending spacecraft and
+    # field, same "don't let something look configured that isn't" honesty
+    # as everywhere else in this schema) -- the spacecraft is simulated as
+    # a cannonball with SpacecraftConfig.drag_area_m2/srp_area_m2 as its
+    # average cross-section. station_keeping/phasing_keeping/
+    # constant_thrust remain available in EITHER mode: none of them need
+    # attitude knowledge (their thrust directions are prograde or
+    # orbit-frame-relative, not a commanded body axis).
+    simulation_mode: str = "full_attitude"
     gravity: GravityConfig = field(default_factory=GravityConfig)
     spacecraft: list = field(default_factory=list)  # list[SpacecraftConfig], >= 1 required
     ground_stations: list = field(default_factory=list)  # list[GroundStationConfig]
@@ -667,12 +761,29 @@ class Scenario:
                 f"scenario.epoch_utc {self.epoch_utc!r} is not a valid ISO 8601 datetime "
                 f"(e.g. '2030-01-01T00:00:00'): {exc}"
             ) from exc
+        _require(self.simulation_mode in SUPPORTED_SIMULATION_MODES,
+                  f"scenario.simulation_mode {self.simulation_mode!r} must be one of {SUPPORTED_SIMULATION_MODES}")
         self.gravity.validate()
         _require(len(self.spacecraft) >= 1, "scenario needs at least one spacecraft")
         names = [sc.name for sc in self.spacecraft]
         _require(len(names) == len(set(names)), f"spacecraft names must be unique, got {names}")
         for sc in self.spacecraft:
             sc.validate()
+        if self.simulation_mode == "orbit_only":
+            for sc in self.spacecraft:
+                _require(sc.fsw_mode is None,
+                          f"{sc.name}: fsw_mode is set but scenario.simulation_mode is 'orbit_only' -- attitude "
+                          "control needs 'full_attitude' mode, or remove fsw_mode from this spacecraft")
+                _require(not sc.sensors,
+                          f"{sc.name}: sensors are set but scenario.simulation_mode is 'orbit_only' -- sensors "
+                          "need 'full_attitude' mode, or remove them from this spacecraft")
+                _require(not sc.actuators,
+                          f"{sc.name}: actuators are set but scenario.simulation_mode is 'orbit_only' -- "
+                          "actuators need 'full_attitude' mode, or remove them from this spacecraft")
+                _require(sc.power is None,
+                          f"{sc.name}: power is set but scenario.simulation_mode is 'orbit_only' -- a real solar"
+                          "-panel power budget needs the simulated attitude 'full_attitude' mode provides, or "
+                          "remove power from this spacecraft")
         gs_names = [gs.name for gs in self.ground_stations]
         _require(len(gs_names) == len(set(gs_names)), f"ground_station names must be unique, got {gs_names}")
         for gs in self.ground_stations:
@@ -726,9 +837,12 @@ class Scenario:
             station_keeping = StationKeepingConfig(**station_keeping_data) if station_keeping_data is not None else None
             phasing_keeping_data = sc.pop("phasing_keeping", None)
             phasing_keeping = PhasingKeepingConfig(**phasing_keeping_data) if phasing_keeping_data is not None else None
+            constant_thrust_data = sc.pop("constant_thrust", None)
+            constant_thrust = ConstantThrustConfig(**constant_thrust_data) if constant_thrust_data is not None else None
             spacecraft.append(SpacecraftConfig(orbit=orbit, sensors=sensors, actuators=actuators,
                                                 power=power, rf_link=rf_link, station_keeping=station_keeping,
-                                                phasing_keeping=phasing_keeping, **sc))
+                                                phasing_keeping=phasing_keeping, constant_thrust=constant_thrust,
+                                                **sc))
 
         return Scenario(
             gravity=gravity, sim_settings=sim_settings, space_weather=space_weather,
