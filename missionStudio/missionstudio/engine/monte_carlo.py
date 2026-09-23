@@ -236,7 +236,16 @@ def run_monte_carlo(scenario: Scenario, mc_config: MonteCarloConfig, archive_dir
         raise MonteCarloError("monte_carlo.enabled is False -- set it True before calling run_monte_carlo()")
 
     archive_dir = Path(archive_dir)
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # e.g. archive_dir already exists as a plain file, or is
+        # unwritable -- without this, the raw OSError would escape
+        # run_monte_carlo() as something other than MonteCarloError, so
+        # cli.py's cmd_monte_carlo() (which only catches MonteCarloError)
+        # would let it surface as an uncaught traceback instead of this
+        # module's usual "ERROR: ..." + specific exit code convention.
+        raise MonteCarloError(f"could not create Monte Carlo archive directory {archive_dir}: {exc}") from exc
 
     controller = Controller()
     controller.setSimulationFunction(functools.partial(_create_sim, scenario))

@@ -788,6 +788,68 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   series names (which are fixed from the first chunk -- only the amount
   of data grows), so watching a live run doesn't keep resetting whichever
   series the user is currently looking at.
+* **Another full-codebase audit, this time with real fan-out coverage.**
+  A single-pass review of the live-plot/mass-bookkeeping commits found
+  and fixed two issues in `engine.service.run_live()`: a scenario whose
+  `duration_days` is small enough to round to 0 ns via `macros.sec2nano()`
+  (schema-valid -- `sim_settings.validate()` only requires `> 0`) used to
+  raise a bare `ZeroDivisionError` computing `fraction_complete` instead
+  of a clear error; and `_LIVE_DEFAULT_FRAMES` was lowered from 200 to 60,
+  since each live callback's `_extract_results()` redoes O(samples-so-far)
+  work from the FULL recorder history rather than just the new samples,
+  so total extraction cost scaled with frame count. A follow-up pass
+  fanned out across the rest of the codebase (GUI layer, remaining engine
+  modules, schema/CLI/packaging) and found six more real, independently
+  -verified bugs:
+  * `gui.main_window._on_run_finished` called `ResultsWidget.set_result()`
+    instead of `set_live_result()` -- so the moment a live-watched run
+    actually finished, whichever series the user had selected to watch
+    snapped back to the first one, undoing the whole point of
+    `set_live_result()`'s selection-preserving design at the one moment
+    the final data matters most.
+  * `gui.kernel_status_widget.KernelStatusWidget.refresh()` had no
+    re-entrancy guard: `MainWindow`'s "Check Kernels" menu/toolbar action
+    calls it directly, independent of `refresh_button`'s own disabled
+    -while-fetching state, so triggering it again mid-fetch reassigned
+    `self._worker`, dropping the only Python reference to the
+    still-running (unparented) `QThread` -- a real Qt crash risk ("QThread:
+    Destroyed while thread is still running"). Now a no-op while a fetch
+    is already in flight.
+  * `gui.main_window.MainWindow.closeEvent` never checked whether
+    `_run_worker`/`_mc_worker` was still running before accepting the
+    close -- starting a run doesn't mark the scenario dirty, so closing
+    the window mid-run (no cooperative-cancellation hook exists for a
+    synchronous `SimulationService.run()`/`run_live()`/`run_monte_carlo()`
+    call) could tear down the process out from under a live `QThread`.
+    Now refuses to close (with a clear message) while either worker is
+    running.
+  * `engine.spaceweather.validate_file()`'s `covers_range` check compared
+    a date-only (midnight) timestamp parsed from the CSV's last row
+    against a full `end_utc` datetime that can carry a non-zero
+    time-of-day (`scenario.epoch_utc` isn't required to be midnight) --
+    so a CelesTrak file that genuinely covered the scenario's end date
+    was often misclassified as not covering it, forcing an unnecessary
+    fallback to synthetic (fabricated) space weather. Fixed to compare
+    calendar dates.
+  * `engine.time_system.utc_iso_to_spice_string()` hardcoded a literal
+    `.000` milliseconds field instead of deriving it from `epoch_utc`,
+    silently discarding any sub-second precision a user specified.
+  * `cli.py`'s `cmd_spaceweather_resolve` had no exception handling
+    around `sw.resolve()` (every other command in the file does), and
+    `engine.monte_carlo.run_monte_carlo()`'s `archive_dir.mkdir(...)`
+    sat outside its own `try`/`except` -- both let a real, reachable
+    failure (a missing `local_file_path`; `--archive-dir` already
+    existing as a plain file) surface as a raw traceback instead of this
+    project's "ERROR: ..." + specific exit code convention. Both now
+    report cleanly.
+  * `packaging/install.sh` picked the just-built wheel with
+    `ls | tail -n1` (lexicographic order) -- since `build_wheel.sh` never
+    cleans its output directory, re-running `install.sh` against the same
+    `--prefix` after a version bump left old and new wheels side by side,
+    and `"...-1.10.0..."` sorts BEFORE `"...-1.9.0..."` as a string,
+    silently installing the OLDER version. Fixed to pick by modification
+    time (`ls -t`) instead, so the wheel `build_wheel.sh` just built is
+    always the one selected.
 
 ## Repository layout
 

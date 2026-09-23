@@ -267,6 +267,57 @@ def test_run_with_live_plot_clears_previous_result_and_shows_results_tab(window,
     assert window.right_tabs.currentWidget() is window.results_widget
 
 
+def test_run_finished_preserves_users_series_selection(window):
+    """Regression test for an audit finding: _on_run_finished() used to
+    call ResultsWidget.set_result(), which unconditionally rebuilds
+    series_combo and resets its selection to the first series -- so the
+    instant a live-watched run actually finished, whatever series the
+    user had picked to watch snapped back to the first one. It must use
+    set_live_result() instead, which only rebuilds when the series set
+    itself changes.
+    """
+    from missionstudio.engine.results import ResultSet, TimeSeries
+
+    def _result():
+        rs = ResultSet(scenario_name="test")
+        rs.add(TimeSeries("sat-1.position_N", [0.0], ("x", "y", "z"), [[0.0, 0.0, 0.0]], units="m"))
+        rs.add(TimeSeries("sat-1.velocity_N", [0.0], ("x", "y", "z"), [[0.0, 0.0, 0.0]], units="m/s"))
+        return rs
+
+    window._on_run_progress(_result(), 0.5)
+    window.results_widget.series_combo.setCurrentIndex(1)  # "sat-1.velocity_N"
+
+    window._on_run_finished(_result())
+
+    assert window.results_widget.series_combo.currentIndex() == 1
+
+
+def test_close_while_run_in_progress_is_blocked(window, qtbot, monkeypatch):
+    import threading
+
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    info_calls = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: info_calls.append(a)))
+
+    release = threading.Event()
+    monkeypatch.setattr(RunWorker, "run", lambda self: release.wait(5))
+
+    window.on_run()
+    qtbot.waitUntil(lambda: window._run_worker.isRunning(), timeout=5000)
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert not event.isAccepted()
+    assert len(info_calls) == 1
+
+    release.set()
+    qtbot.waitUntil(lambda: not window._run_worker.isRunning(), timeout=5000)
+
+
 def test_run_progress_updates_results_widget_and_busy_bar(window):
     from missionstudio.engine.results import ResultSet, TimeSeries
 

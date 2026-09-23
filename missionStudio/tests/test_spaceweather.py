@@ -51,6 +51,29 @@ def test_validate_file_rejects_insufficient_date_range(tmp_path):
     assert not result.covers_range
 
 
+def test_validate_file_covers_range_ignores_time_of_day(tmp_path):
+    """Regression test for an audit finding: covers_range used to compare
+    a date-only (midnight) timestamp parsed from the CSV's last row
+    against a full end_utc datetime, so a file whose last row IS the
+    scenario's own end date was wrongly rejected whenever end_utc carried
+    a non-zero time-of-day (daily-resolution data covers its whole day,
+    not just its midnight instant). service.py builds end_utc as
+    datetime.fromisoformat(scenario.epoch_utc) + a timedelta, and
+    Scenario.validate() does not require epoch_utc to be midnight, so this
+    is a real, reachable scenario shape.
+    """
+    path = tmp_path / "covers.csv"
+    header = ",".join(sw.REQUIRED_COLUMNS)
+    row_tail = "," + ",".join(["5"] * 8) + ",5,100,100"
+    path.write_text(header + "\n" + "2030-01-01" + row_tail + "\n" + "2030-01-05" + row_tail + "\n")
+
+    start_utc = datetime(2030, 1, 1, 14, 0, 0)
+    end_utc = datetime(2030, 1, 5, 14, 0, 0)  # same calendar date as the file's last row, but later in the day
+    result = sw.validate_file(path, start_utc, end_utc)
+
+    assert result.covers_range, result.message
+
+
 def test_validate_file_detects_unsorted_dates(tmp_path):
     path = tmp_path / "unsorted.csv"
     header = ",".join(sw.REQUIRED_COLUMNS)

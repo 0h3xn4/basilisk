@@ -238,11 +238,15 @@ def cmd_spaceweather_resolve(args: argparse.Namespace) -> int:
 
     start = datetime.fromisoformat(scenario.epoch_utc)
     end = start + timedelta(days=scenario.sim_settings.duration_days)
-    resolved = sw.resolve(
-        scenario.space_weather.source, start, end,
-        local_file_path=scenario.space_weather.local_file_path,
-        cache_dir=scenario.space_weather.cache_dir,
-    )
+    try:
+        resolved = sw.resolve(
+            scenario.space_weather.source, start, end,
+            local_file_path=scenario.space_weather.local_file_path,
+            cache_dir=scenario.space_weather.cache_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 -- report ANY resolve failure with a specific message, not a bare traceback
+        print(f"ERROR: space weather resolve failed: {exc}", file=sys.stderr)
+        return 3
     print(f"Resolved to: {resolved.path}")
     print(f"Synthetic: {resolved.is_synthetic}")
     for warning in resolved.warnings:

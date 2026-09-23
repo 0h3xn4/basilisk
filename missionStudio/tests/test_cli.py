@@ -68,6 +68,27 @@ def test_spaceweather_resolve_reports_resolution(tmp_path, capsys):
     assert "Synthetic:" in out
 
 
+def test_spaceweather_resolve_reports_a_clean_error_instead_of_a_traceback(tmp_path, capsys):
+    """Regression test for an audit finding: cmd_spaceweather_resolve() had
+    no exception handling around sw.resolve(), unlike every other command
+    in this file -- a SpaceWeatherError (e.g. source="local_file" pointing
+    at a missing file, which schema validation allows since it only
+    requires the path string to be non-empty) used to propagate as a raw
+    traceback instead of this file's "ERROR: ..." + specific exit code
+    convention.
+    """
+    from missionstudio.schema.scenario import SpaceWeatherConfig
+
+    path = tmp_path / "scenario.json"
+    _write_scenario(path, space_weather=SpaceWeatherConfig(
+        source="local_file", local_file_path=str(tmp_path / "does_not_exist.csv")))
+
+    rc = cli.main(["spaceweather-resolve", str(path)])
+
+    assert rc == 3
+    assert "ERROR: space weather resolve failed" in capsys.readouterr().err
+
+
 def test_generate_constellation_writes_new_scenario(tmp_path, capsys):
     path = tmp_path / "template.json"
     _write_scenario(path)
