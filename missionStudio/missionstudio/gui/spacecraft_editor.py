@@ -848,8 +848,7 @@ class SpacecraftListWidget(QWidget):
     def set_central_body_provider(self, provider) -> None:
         """``provider`` is a zero-argument callable returning the
         scenario's current central-body name, e.g.
-        ``lambda: self.central_body_combo.currentText()`` from
-        ``ScenarioEditorWidget``.
+        ``lambda: self._gravity.central_body`` from ``ScenarioEditorWidget``.
         """
         self._central_body_provider = provider
 

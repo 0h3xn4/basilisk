@@ -71,6 +71,51 @@ def test_simulation_mode_combo_drives_spacecraft_list_provider(widget):
     assert widget.spacecraft_list._simulation_mode() == "full_attitude"
 
 
+def test_propagation_summary_reflects_defaults(widget):
+    assert "earth" in widget.propagation_summary_label.text()
+    assert "point-mass" in widget.propagation_summary_label.text()
+
+
+def test_edit_propagation_setup_updates_state_and_emits_changed(widget, qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.propagation_setup_dialog import PropagationSetupDialog
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    widget.spacecraft_list.from_list([
+        SpacecraftConfig(name="sat-1", orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0],
+                                                       velocity_km_s=[0, 7.5, 0]))
+    ])
+
+    def fake_exec(self):
+        self.central_body_degree_spin.setValue(4)
+        self.enable_harmonics_check.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(PropagationSetupDialog, "exec", fake_exec)
+
+    with qtbot.waitSignal(widget.changed, timeout=1000):
+        widget._on_edit_propagation_setup()
+
+    assert widget._gravity.central_body_degree == 4
+    assert "harmonics" in widget.propagation_summary_label.text()
+
+    got = widget.to_scenario()
+    assert got.gravity.central_body_degree == 4
+
+
+def test_edit_propagation_setup_cancel_leaves_state_unchanged(widget, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from missionstudio.gui.propagation_setup_dialog import PropagationSetupDialog
+
+    monkeypatch.setattr(PropagationSetupDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+
+    before = widget._gravity
+    widget._on_edit_propagation_setup()
+    assert widget._gravity is before
+
+
 def test_third_body_perturbers_round_trip(widget):
     from missionstudio.schema.scenario import GravityConfig, Scenario, SpacecraftConfig, OrbitIC
 
@@ -83,13 +128,6 @@ def test_third_body_perturbers_round_trip(widget):
     widget.from_scenario(scenario)
     got = widget.to_scenario()
     assert sorted(got.gravity.third_body_perturbers) == ["moon", "sun"]
-
-
-def test_central_body_removed_from_third_body_choices(widget):
-    widget.central_body_combo.setCurrentText("sun")
-    choices = [widget.third_body_list.item(i).text() for i in range(widget.third_body_list.count())]
-    assert "sun" not in choices
-    assert "earth" in choices
 
 
 def test_live_validation_reacts_to_bad_edit(widget, qtbot):
@@ -109,14 +147,6 @@ def test_to_scenario_raises_on_invalid_state(widget):
 
     with pytest.raises(ScenarioValidationError):
         widget.to_scenario()  # no spacecraft yet
-
-
-def test_space_weather_local_file_field_enabled_only_for_local_file_source(widget):
-    assert not widget.local_file_edit.isEnabled()
-    widget.space_weather_source_combo.setCurrentText("local_file")
-    assert widget.local_file_edit.isEnabled()
-    widget.space_weather_source_combo.setCurrentText("synthetic")
-    assert not widget.local_file_edit.isEnabled()
 
 
 def test_monte_carlo_round_trips(widget):

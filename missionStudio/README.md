@@ -850,6 +850,48 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
     silently installing the OLDER version. Fixed to pick by modification
     time (`ls -t`) instead, so the wheel `build_wheel.sh` just built is
     always the one selected.
+* **A dedicated "Propagation setup" window, and an explicit on/off switch
+  for every perturbation.** Direct feedback: gravity/integrator/space
+  -weather settings were three separate, always-visible group boxes
+  buried in the middle of the main scenario form, and spherical-harmonics
+  gravity had no explicit enable control -- unchecking it meant zeroing
+  out (and losing) whatever degree/order the user had typed. Fixed:
+  * New `gui.propagation_setup_dialog.PropagationSetupDialog` -- one
+    window for everything that governs how a scenario's orbits
+    propagate: central body, gravity model, the numerical integrator/
+    step/duration, and the space-weather source atmospheric drag reads.
+    `gui.scenario_editor.ScenarioEditorWidget`'s main form now shows a
+    compact read-only summary of the current settings plus a single
+    "Edit Propagation Setup..." button that opens it, replacing the three
+    scattered group boxes.
+  * Every perturbation this app actually wires up in `engine.service` now
+    has its own explicit on/off control: a new "Enable spherical
+    -harmonics gravity" checkbox (GUI-only concept -- `schema.scenario.
+    GravityConfig` still has just the one `central_body_degree` field,
+    `0` still means point-mass; the checkbox folds back into it on OK,
+    but the spin box's value is never reset by unchecking it, so
+    re-checking it brings the same degree/order right back); third-body
+    point-mass perturbers (already a per-body checkbox list, moved into
+    the new dialog unchanged); atmospheric drag and solar radiation
+    pressure (`enable_drag`/`enable_srp`, already per-spacecraft -- see
+    below for why). The harmonics checkbox is also auto-disabled (and
+    unchecked) whenever the central body isn't Earth, since
+    `engine.service.build()` only has gravity-field data (GGM03S) for
+    Earth -- the GUI can no longer construct that invalid combination in
+    the first place, rather than letting the user discover it only when
+    a run fails.
+  * **Cannonball (orbit-only) mode already exposed every spacecraft
+    parameter the active perturbations need** -- confirmed, not new:
+    `dry_mass_kg`, `drag_coeff`/`drag_area_m2`, and `srp_coeff`/
+    `srp_area_m2` all live on `SpacecraftEditorDialog`'s "Orbit / mass"
+    tab, which (unlike Sensors/actuators/FSW/Power) is never hidden in
+    "orbit_only" mode, from Phase 5's earlier drag/SRP work.
+  * Caught while rendering the new dialog and looking at it, not from
+    reading the layout code (same discipline as every other UI bug this
+    project has found this way): a word-wrapped `QLabel`'s `sizeHint()`
+    reports the width needed to lay its text out on ONE line unless
+    something else constrains it -- without a cap, the dialog's intro
+    label alone stretched the whole window to ~1360px wide.
 
 ## Repository layout
 
@@ -882,6 +924,7 @@ missionStudio/
       icons.py                       -- Phase 5: procedurally-drawn app icon
       main_window.py                 -- MainWindow: File/Run menus + toolbar, ties everything together
       scenario_editor.py             -- the full scenario form + live validation
+      propagation_setup_dialog.py    -- Phase 5: gravity/perturbations + integrator + space weather, one dedicated window
       spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW, power/propulsion/link budget)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
       vizard_dialog.py               -- Phase 2: "enable Vizard for the next run" dialog
@@ -914,6 +957,7 @@ missionStudio/
       test_ground_station_editor.py
       test_constellation_dialog.py   -- Phase 4
       test_scenario_editor.py
+      test_propagation_setup_dialog.py
       test_results_widget.py
       test_kernel_status_widget.py
       test_run_worker.py
