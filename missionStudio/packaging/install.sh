@@ -81,7 +81,15 @@ python3 -m pip install --quiet --upgrade pip
 if [[ -z "$missionstudio_wheel" ]]; then
     echo "No --missionstudio-wheel given -- building one with build_wheel.sh ..."
     "$script_dir/build_wheel.sh" "$prefix/dist"
-    missionstudio_wheel=$(ls -1 "$prefix"/dist/missionstudio-*.whl | tail -n1)
+    # Newest-BUILT, not lexicographically-last: build_wheel.sh never cleans
+    # its output directory, so re-running this script against the same
+    # --prefix after a version bump leaves old and new wheels side by side
+    # (e.g. missionstudio-1.10.0-*.whl and missionstudio-1.9.0-*.whl) --
+    # plain `ls | tail -n1` string-sorts "1.10.0" before "1.9.0" ('1' <
+    # '9' at the first differing character) and would silently pick the
+    # OLDER wheel. `ls -t` sorts by modification time instead, so the one
+    # build_wheel.sh just built above is always first.
+    missionstudio_wheel=$(ls -1t "$prefix"/dist/missionstudio-*.whl | head -n1)
 fi
 
 echo "Installing missionstudio (+ gui extra) from $missionstudio_wheel ..."

@@ -180,7 +180,16 @@ _INTEGRATORS = {
 # regardless of duration_days. A round number, not tuned to any specific
 # scenario; see run_live()'s docstring for the dynamics_task_rate_s clamp
 # that keeps a very short run from producing a sub-tick step instead.
-_LIVE_DEFAULT_FRAMES = 200
+#
+# Deliberately modest, not e.g. 200+: each callback's _extract_results()
+# call redoes O(samples-so-far) work (rebuilds every TimeSeries, including
+# the per-sample osculating-elements math, from the FULL recorder history,
+# not just this chunk's new samples -- see _extract_results()'s
+# docstring), so the total extraction work across a live run scales with
+# frame count. 60 still reads as smooth/live to a user watching a plot
+# update, while keeping that multiplier small relative to a single
+# non-live run() call.
+_LIVE_DEFAULT_FRAMES = 60
 
 
 class SimulationServiceError(Exception):
@@ -891,6 +900,18 @@ class SimulationService:
 
         stop_time_s = self.scenario.sim_settings.duration_days * 86400.0  # [s]
         stop_time_ns = macros.sec2nano(stop_time_s)
+        if stop_time_ns <= 0:
+            # sim_settings.validate() only requires duration_days > 0, not
+            # that it's large enough to round to at least 1 ns once
+            # converted -- reachable from a scenario built/edited outside
+            # the GUI's spinbox floor (e.g. a hand-written or scripted
+            # scenario JSON). Without this guard, fraction_complete's
+            # division below would raise a bare ZeroDivisionError instead
+            # of a clear, actionable error.
+            raise SimulationServiceError(
+                f"sim_settings.duration_days={self.scenario.sim_settings.duration_days!r} is too small to "
+                f"simulate (rounds to 0 ns) -- use a larger duration"
+            )
         if live_step_s is None:
             live_step_s = max(
                 self.scenario.sim_settings.dynamics_task_rate_s,

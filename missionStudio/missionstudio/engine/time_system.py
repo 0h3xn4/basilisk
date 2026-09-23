@@ -87,10 +87,15 @@ def utc_iso_to_spice_string(epoch_utc: str) -> str:
     """``'2030-01-01T00:00:00'`` -> a SPICE-recognizable time string
     (``'2030 JAN 01 00:00:00.000 (UTC)'``), matching the exact format
     ``missionAnalysis/mission_config.py``'s ``EPOCH_SPICE_STRING`` already
-    uses elsewhere in this repo.
+    uses elsewhere in this repo. Any sub-second precision in ``epoch_utc``
+    (schema.scenario.Scenario.validate() only requires it to parse as ISO
+    8601, not to be a whole second) is preserved to millisecond
+    resolution -- ``dt.microsecond`` rounded down to milliseconds, not a
+    literal ``.000`` that would silently discard it.
     """
     dt = datetime.fromisoformat(epoch_utc)
-    return dt.strftime("%Y %b %d %H:%M:%S.000 (UTC)").upper()
+    millis = dt.microsecond // 1000
+    return (dt.strftime("%Y %b %d %H:%M:%S") + f".{millis:03d} (UTC)").upper()
 
 
 @contextlib.contextmanager

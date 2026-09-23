@@ -62,6 +62,24 @@ def test_run_live_reports_progress_and_matches_run():
     assert np.array_equal(live_pos.data, plain_pos.data)
 
 
+def test_run_live_rejects_a_duration_too_small_to_simulate():
+    """Regression test for an audit finding: sim_settings.validate() only
+    requires duration_days > 0, not that it's large enough to survive
+    macros.sec2nano() rounding to at least 1 ns -- run_live() used to
+    divide by that (possibly zero) nanosecond count to compute
+    fraction_complete, raising a bare ZeroDivisionError instead of a
+    clear, actionable SimulationServiceError.
+    """
+    from missionstudio.engine.service import SimulationService, SimulationServiceError
+
+    scenario = load_scenario(SCENARIO_PATH)
+    scenario.sim_settings.duration_days = 1e-16  # rounds to 0 ns via macros.sec2nano()
+
+    service = SimulationService(scenario)
+    with pytest.raises(SimulationServiceError, match="too small to simulate"):
+        service.run_live(lambda partial, fraction: None)
+
+
 def test_run_live_honors_explicit_step():
     from missionstudio.engine.service import SimulationService
 

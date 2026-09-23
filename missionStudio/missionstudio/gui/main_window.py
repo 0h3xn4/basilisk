@@ -390,7 +390,16 @@ class MainWindow(QMainWindow):
 
     def _on_run_finished(self, result) -> None:
         self._stop_busy(f"Run complete: {len(result.series)} result series.")
-        self.results_widget.set_result(result)
+        # set_live_result(), not set_result(): a live run's final chunk and
+        # its "finished" result always share the same series names, so
+        # using set_result() here would rebuild series_combo and silently
+        # snap the user's current selection back to the first series the
+        # instant the run they were watching actually completes -- see
+        # ResultsWidget.set_live_result()'s docstring for why that rebuild
+        # is skipped when the series set hasn't changed. Also correct for
+        # a non-live run: set_live_result() still rebuilds normally
+        # whenever the series set differs from whatever was shown before.
+        self.results_widget.set_live_result(result)
         self.right_tabs.setCurrentWidget(self.results_widget)
 
     def _on_run_failed(self, message: str) -> None:
@@ -434,6 +443,25 @@ class MainWindow(QMainWindow):
 
     # -- window lifecycle ---------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:
+        # Refuse to close while a background run/Monte Carlo QThread is
+        # still alive -- starting a run doesn't mark the scenario dirty, so
+        # _confirm_discard_unsaved() alone would let the window (and, with
+        # it, the whole process, since Qt tears down QApplication.exec()
+        # once the last window closes) close right out from under a still
+        # -running worker. Neither worker is parented, and
+        # SimulationService.run()/run_live()/run_monte_carlo() are
+        # synchronous Basilisk calls with no cooperative-cancellation hook
+        # to interrupt, so there is no safe way to stop it early here --
+        # closing must simply wait, same as it would for any other
+        # in-progress, no-undo operation.
+        for worker, label in ((self._run_worker, "A simulation"), (self._mc_worker, "A Monte Carlo run")):
+            if worker is not None and worker.isRunning():
+                QMessageBox.information(
+                    self, "Run in progress",
+                    f"{label} is still running. Please wait for it to finish (or fail) before closing missionStudio.",
+                )
+                event.ignore()
+                return
         if self._confirm_discard_unsaved():
             event.accept()
         else:
