@@ -928,6 +928,113 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
     through instead of raising the same clear error every other malformed
     `schema_version` value gets.
 
+## What Phase 6 (Mission Sequence architecture) adds -- in progress
+
+A GMAT/FreeFlyer-inspired **Resources / Mission Sequence / Output**
+organization, requested directly: separate "what exists" (spacecraft,
+gravity, ground stations, ... -- everything the schema already had) from
+"what happens, in time order" (propagate, maneuver, assign, report,
+conditionals) and "what a run produced". Explicitly NOT a port of GMAT's
+or FreeFlyer's own object model -- the organizing idea (resources vs. a
+time-ordered sequence) is what's borrowed; everywhere Basilisk's own
+architecture is a better fit than copying either tool's shape (its native
+event mechanism, its continuous feedback controllers, its message/recorder
+architecture, its own Monte Carlo framework), this keeps using Basilisk's
+own mechanism rather than reshaping it to look like GMAT/FreeFlyer.
+
+This phase is landing in reviewable stages, matching its own plan: data
+model first (this section), then an execution engine, then file-format/
+GUI-sync work, then the GUI itself -- each stage additive, so every
+existing scenario file and every existing test keeps passing unchanged at
+every step (confirmed after each stage: the full suite's pass count only
+ever grows).
+
+**Data model (`schema/command.py`, `schema/references.py`,
+`schema/validation.py`) -- landed:**
+
+* `schema.command.Command`: one envelope dataclass (`kind`, optional
+  `label`, `params` dict, `children` for `if`/`while` nesting) covering
+  the minimum command set this phase scoped: `propagate` (duration/epoch/
+  event-based stop conditions -- events deliberately limited to periapsis/
+  apoapsis passage for now, meant to be built on Basilisk's own
+  `SimulationBaseClass.EventHandlerClass` rather than a hand-rolled
+  polling loop), `maneuver` (impulsive delta-V, inertial/VNB/RTN frame --
+  VNB/RTN meant to reuse `engine.orbit_maintenance`'s already-written,
+  already-tested `_vnb_basis`/`_rtn_basis` helpers), `assignment`,
+  `report`, `if`/`while`, `script_block`. One envelope dataclass rather
+  than one Python class per kind, matching the exact shape
+  `SensorConfig`/`ActuatorConfig`/`fsw_params` already use in this schema
+  for the same reason (very different per-kind shapes, no
+  discriminated-union (de)serialization mechanism elsewhere in this
+  schema to reuse). Targeting/optimization commands are explicitly out of
+  scope for now, per this feature's own scoping decision.
+* `Command.validate()` is a COLLECTING validator -- returns every problem
+  found in a command (and its `children` subtree) as a list, each with an
+  item path, rather than raising on the first one. `Scenario.validate()`
+  (unchanged, still raise-fast, exactly as before this phase) now also
+  walks `mission_sequence`, folding each command's collected errors into
+  one combined message per command -- still raise-fast ACROSS commands,
+  preserving that method's existing behavior/contract exactly.
+  `schema.validation.validate_all(scenario)` is the genuinely
+  fully-collecting entry point requested: every command's every problem,
+  plus every dangling spacecraft/ground-station reference across the
+  whole sequence, all at once -- stated plainly in its own docstring that
+  the RESOURCE side of that same call is still at-most-one-message (since
+  it delegates to the unchanged, raise-fast `scenario.validate()`
+  rather than retrofitting ~15 existing resource validators into
+  collecting ones, which was judged out of proportion to this change).
+* `Scenario.mission_sequence: list[Command] = []` -- additive, empty by
+  default, so it changes nothing about how any existing scenario file
+  loads, validates, or runs; `engine.service.SimulationService.run()`/
+  `run_live()` are untouched. Round-trips losslessly through the existing
+  JSON format (`Command` is a plain dataclass, so `dataclasses.asdict()`
+  -- already how `Scenario.to_dict()` works -- recurses through it with
+  no extra code; only the read direction needed a hand-written
+  `Command.from_dict()`, matching every other nested dataclass in
+  `Scenario.from_dict()`). The existing JSON file format itself now
+  reads as GMAT's `BeginMissionSequence` split in miniature -- every
+  existing top-level field is "resources", the new `mission_sequence` key
+  is the sequence -- without inventing a new text format.
+* `schema.references`: `find_spacecraft_references()`/
+  `find_ground_station_references()` (an empty list means "safe to
+  delete" -- GMAT's own "delete refused, listing every referencing item"
+  behavior, which this project's spacecraft/ground-station list widgets
+  did not have before this: `_on_remove()` deleted unconditionally, with
+  no reference check of any kind, confirmed by reading both before
+  writing this) and `rename_spacecraft()`/`rename_ground_station()`
+  (FreeFlyer's "rename symbol" behavior -- renames the resource AND
+  every reference to it, atomically). Every reference site is hand-listed
+  (`phasing_keeping.chief_spacecraft`, Monte Carlo `dispersion.
+  spacecraft`, `fsw_params['target_ground_station']`, and every command
+  kind/nesting depth that can name a resource) rather than found via
+  generic reflection, matching this schema's own established style
+  (explicit and auditable over generic) at the cost of needing a new
+  entry here whenever a new reference site is added elsewhere.
+
+**Verification:** 62 new tests (`tests/test_command.py`,
+`tests/test_references.py`, `tests/test_validation.py`, plus additions to
+`tests/test_scenario_schema.py`), all Basilisk-independent (this whole
+layer has no Basilisk import) -- model round-trip (including through a
+real `save()`/`load_scenario()` file round-trip, and an explicit
+command-ordering/reordering check), reference-integrity (find/rename,
+including references nested inside `if`/`while` and the dotted-path form
+`assignment.target` uses), and collecting-validation (multiple bad
+commands and multiple dangling references, all reported at once, not just
+the first). Full suite after this stage: 430 passed, 22 skipped (was 366
+passed/22 skipped before -- the 22 skips are unrelated, pre-existing
+`requires_basilisk` tests; zero regressions, zero new skips, since this
+stage adds no Basilisk-dependent code).
+
+**Not yet landed (this phase's remaining stages):** the execution engine
+(`engine.mission_engine`, walking `mission_sequence` against a real
+`SimulationService`, verified against `examples/scenarioOrbitManeuver.py`
+-- an official Basilisk example doing exactly this -- and this checkout's
+own `hubEffector`/`spacecraft` C++ source before any of it was written,
+per this project's "no guessing about a Basilisk API" discipline); Command
+Summary capture; the GUI (Resources/Mission/Output dock panels, script
+editor, debug console) -- see this file's own design-discussion notes for
+the detailed staged plan.
+
 ## Repository layout
 
 ```
@@ -939,6 +1046,9 @@ missionStudio/
     schema/
       scenario.py                    -- Scenario and friends, validation, save/load
       migrations.py                  -- schema-version migration registry
+      command.py                     -- Phase 6: Command (Mission Sequence), collecting validate()
+      references.py                  -- Phase 6: reference-integrity (find/rename) for resources + commands
+      validation.py                  -- Phase 6: validate_all() -- fully-collecting scenario-wide validation
     engine/
       time_system.py                 -- UTC/TAI/TT/ET, single source of truth (needs Basilisk)
       kernels.py                     -- SPICE kernel fetch/status (needs Basilisk)
@@ -977,6 +1087,9 @@ missionStudio/
   tests/
     conftest.py                      -- requires_basilisk / requires_gui auto-skip markers
     test_scenario_schema.py
+    test_command.py                    -- Phase 6
+    test_references.py                 -- Phase 6
+    test_validation.py                 -- Phase 6
     test_spaceweather.py
     test_results.py
     test_link_budget.py              -- Phase 4

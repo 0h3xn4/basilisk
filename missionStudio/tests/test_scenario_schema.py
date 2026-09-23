@@ -886,3 +886,107 @@ def test_phasing_keeping_rejects_bad_tuning_knobs(field, value, match):
 def test_phasing_keeping_full_scenario_validates():
     scenario = _chief_and_follower_scenario()
     scenario.validate()  # must not raise
+
+
+# -- Mission sequence (schema.command.Command) -------------------------------
+
+def test_mission_sequence_defaults_to_empty_list():
+    assert _minimal_scenario().mission_sequence == []
+
+
+def test_mission_sequence_empty_does_not_affect_existing_validation():
+    """An empty mission_sequence (every scenario written before this field
+    existed) must validate exactly as before -- this is the whole point of
+    it being additive/opt-in.
+    """
+    _minimal_scenario().validate()  # must not raise
+
+
+def test_mission_sequence_round_trips_through_save_load(tmp_path):
+    from missionstudio.schema.command import Command
+
+    scenario = _minimal_scenario(mission_sequence=[
+        Command(kind="propagate", params={"stop_condition": "duration", "duration_days": 0.5}),
+        Command(kind="if", label="Check periapsis", params={"condition": "alt_km < 500"}, children=[
+            Command(kind="maneuver", label="Raise orbit",
+                     params={"spacecraft": "sat-1", "delta_v_m_s": [0.0, 10.0, 0.0], "frame": "vnb"}),
+        ]),
+        Command(kind="report", params={"series": ["sat-1.position_N"]}),
+    ])
+
+    path = tmp_path / "scenario.json"
+    scenario.save(path)
+    loaded = load_scenario(path)
+
+    assert loaded.mission_sequence == scenario.mission_sequence
+    assert loaded.mission_sequence[1].label == "Check periapsis"
+    assert loaded.mission_sequence[1].children[0].params["frame"] == "vnb"
+
+
+def test_scenario_validate_raises_on_first_bad_command():
+    from missionstudio.schema.command import Command
+
+    scenario = _minimal_scenario(mission_sequence=[Command(kind="maneuver", params={})])
+    with pytest.raises(ScenarioValidationError, match="spacecraft"):
+        scenario.validate()
+
+
+def test_scenario_validate_raises_on_dangling_command_reference():
+    from missionstudio.schema.command import Command
+
+    scenario = _minimal_scenario(mission_sequence=[
+        Command(kind="maneuver", params={"spacecraft": "no-such-spacecraft", "delta_v_m_s": [1.0, 0.0, 0.0]}),
+    ])
+    with pytest.raises(ScenarioValidationError, match="no-such-spacecraft"):
+        scenario.validate()
+
+
+def test_scenario_validate_accepts_valid_mission_sequence():
+    from missionstudio.schema.command import Command
+
+    scenario = _minimal_scenario(mission_sequence=[
+        Command(kind="propagate", params={"stop_condition": "duration", "duration_days": 1.0}),
+        Command(kind="maneuver", params={"spacecraft": "sat-1", "delta_v_m_s": [1.0, 0.0, 0.0]}),
+    ])
+    scenario.validate()  # must not raise
+
+
+def test_mission_sequence_preserves_command_order_through_round_trip(tmp_path):
+    """mission_sequence is walked IN ORDER by the (not-yet-written)
+    execution engine, so order is semantically load-bearing, not
+    incidental -- explicitly locked in here, on top of the general
+    round-trip test above.
+    """
+    from missionstudio.schema.command import Command
+
+    labels = ["first", "second", "third", "fourth"]
+    scenario = _minimal_scenario(mission_sequence=[
+        Command(kind="script_block", label=label, params={"code": f"# {label}"}) for label in labels
+    ])
+
+    path = tmp_path / "scenario.json"
+    scenario.save(path)
+    loaded = load_scenario(path)
+
+    assert [c.label for c in loaded.mission_sequence] == labels
+
+
+def test_mission_sequence_insert_and_reorder():
+    """Reordering (insert-before/-after, drag-to-reorder in the eventual
+    GUI) is just ordinary list manipulation on mission_sequence -- this
+    locks in that Scenario doesn't do anything surprising (sorting,
+    deduplication, etc.) that would fight that.
+    """
+    from missionstudio.schema.command import Command
+
+    a = Command(kind="script_block", label="a", params={"code": "pass"})
+    b = Command(kind="script_block", label="b", params={"code": "pass"})
+    c = Command(kind="script_block", label="c", params={"code": "pass"})
+    scenario = _minimal_scenario(mission_sequence=[a, b])
+
+    scenario.mission_sequence.insert(1, c)  # a, c, b
+    assert [cmd.label for cmd in scenario.mission_sequence] == ["a", "c", "b"]
+
+    scenario.mission_sequence.reverse()  # b, c, a
+    assert [cmd.label for cmd in scenario.mission_sequence] == ["b", "c", "a"]
+    scenario.validate()  # must not raise -- order never affects validity for this command set
