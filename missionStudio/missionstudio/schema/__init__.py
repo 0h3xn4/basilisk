@@ -1,3 +1,18 @@
+from .command import (
+    SUPPORTED_COMMAND_KINDS,
+    SUPPORTED_EVENT_KINDS,
+    SUPPORTED_MANEUVER_FRAMES,
+    SUPPORTED_STOP_CONDITIONS,
+    Command,
+)
+from .references import (
+    Reference,
+    ReferenceError,
+    find_ground_station_references,
+    find_spacecraft_references,
+    rename_ground_station,
+    rename_spacecraft,
+)
 from .scenario import (
     Scenario,
     ScenarioValidationError,
@@ -28,6 +43,7 @@ from .scenario import (
     DISPERSION_KINDS_BY_QUANTITY,
     load_scenario,
 )
+from .validation import validate_all
 
 __all__ = [
     "Scenario",
@@ -58,4 +74,19 @@ __all__ = [
     "DISPERSION_QUANTITIES",
     "DISPERSION_KINDS_BY_QUANTITY",
     "load_scenario",
+    # Mission sequence (schema.command)
+    "Command",
+    "SUPPORTED_COMMAND_KINDS",
+    "SUPPORTED_STOP_CONDITIONS",
+    "SUPPORTED_EVENT_KINDS",
+    "SUPPORTED_MANEUVER_FRAMES",
+    # Reference integrity (schema.references)
+    "Reference",
+    "ReferenceError",
+    "find_spacecraft_references",
+    "find_ground_station_references",
+    "rename_spacecraft",
+    "rename_ground_station",
+    # Collecting validation (schema.validation)
+    "validate_all",
 ]

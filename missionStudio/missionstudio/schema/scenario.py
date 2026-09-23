@@ -61,6 +61,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .command import Command
+
 CURRENT_SCHEMA_VERSION = 1
 
 # SPICE-recognized central body name strings this schema accepts, matching
@@ -584,6 +586,20 @@ class GravityConfig:
         _require(self.central_body in SUPPORTED_CENTRAL_BODIES,
                   f"gravity.central_body {self.central_body!r} must be one of {SUPPORTED_CENTRAL_BODIES}")
         _require(self.central_body_degree >= 0, "gravity.central_body_degree must be >= 0")
+        # engine.service.SimulationService.build() only has spherical
+        # -harmonics gravity-field data (GGM03S) for Earth, and raises
+        # SimulationServiceError for any other central_body with
+        # central_body_degree > 0 -- but that's an engine-layer check that
+        # only runs when a scenario is actually simulated. Without this
+        # mirrored check here, `missionstudio validate`/`Scenario.save()`
+        # (both Basilisk-independent, schema-only) would report a clean
+        # bill of health for a scenario guaranteed to fail the moment it's
+        # actually run -- defeating the point of an early, engine
+        # -independent correctness check.
+        _require(self.central_body_degree == 0 or self.central_body == "earth",
+                  f"gravity.central_body_degree > 0 (spherical-harmonics gravity) is only wired up for "
+                  f"central_body 'earth', not {self.central_body!r} -- set central_body_degree = 0 "
+                  f"(point-mass) or central_body = 'earth'")
         for name in self.third_body_perturbers:
             _require(name in SUPPORTED_CENTRAL_BODIES,
                       f"gravity.third_body_perturbers entry {name!r} must be one of {SUPPORTED_CENTRAL_BODIES}")
@@ -749,6 +765,16 @@ class Scenario:
     space_weather: SpaceWeatherConfig = field(default_factory=SpaceWeatherConfig)
     sim_settings: SimSettings = field(default_factory=SimSettings)
     monte_carlo: MonteCarloConfig = field(default_factory=MonteCarloConfig)
+    # Ordered "Mission Sequence" commands (Propagate/Maneuver/Assignment/
+    # Report/If/While/ScriptBlock -- see schema.command.Command), walked in
+    # order by engine.mission_engine. Empty (the default) for every
+    # scenario written before this field existed, and for any scenario
+    # that still just wants "propagate once for sim_settings.duration_days"
+    # -- engine.service.SimulationService's existing run()/run_live()
+    # behavior is completely unchanged and is still what an empty
+    # mission_sequence means; engine.mission_engine is an ADDITIVE,
+    # separate execution path only used when this is non-empty.
+    mission_sequence: list = field(default_factory=list)  # list[Command]
     description: str = ""
     schema_version: int = CURRENT_SCHEMA_VERSION
 
@@ -807,6 +833,32 @@ class Scenario:
                       f"monte_carlo dispersion.spacecraft {dispersion.spacecraft!r} is not one of "
                       f"this scenario's spacecraft {names}")
 
+        # Mission sequence (schema.command.Command) -- structural
+        # validation only (each command's own .validate() already
+        # collects every problem IN that command into one combined
+        # message here; raise-fast ACROSS commands, i.e. this stops at
+        # the first bad command, same as every other check in this
+        # method). schema.validation.validate_all() is the fully
+        # -collecting, "every command's every problem" entry point --
+        # see that module's docstring for why this method doesn't
+        # attempt that itself.
+        for i, command in enumerate(self.mission_sequence):
+            command_errors = command.validate(f"mission_sequence[{i}]")
+            _require(not command_errors, "; ".join(command_errors))
+        # local import: schema.references only imports schema.scenario
+        # under TYPE_CHECKING (never at runtime), so this has no real
+        # import cycle to avoid -- kept local anyway, matching
+        # load_scenario()'s own "from . import migrations" precedent, so
+        # a future change to that TYPE_CHECKING guard can't silently
+        # create one here.
+        from .references import _command_references
+
+        for ref in _command_references(self.mission_sequence, "mission_sequence"):
+            known = names if ref.resource_kind == "spacecraft" else gs_names
+            _require(ref.name in known,
+                      f"{ref.path}: {ref.resource_kind} {ref.name!r} is not one of this scenario's "
+                      f"{ref.resource_kind}s {sorted(known)}")
+
     # -- (de)serialization -------------------------------------------------
     def to_dict(self) -> dict:
         return asdict(self)
@@ -844,9 +896,12 @@ class Scenario:
                                                 phasing_keeping=phasing_keeping, constant_thrust=constant_thrust,
                                                 **sc))
 
+        mission_sequence = [Command.from_dict(c) for c in data.pop("mission_sequence", [])]
+
         return Scenario(
             gravity=gravity, sim_settings=sim_settings, space_weather=space_weather,
-            ground_stations=ground_stations, spacecraft=spacecraft, monte_carlo=monte_carlo, **data,
+            ground_stations=ground_stations, spacecraft=spacecraft, monte_carlo=monte_carlo,
+            mission_sequence=mission_sequence, **data,
         )
 
     def save(self, path: "str | Path") -> None:
