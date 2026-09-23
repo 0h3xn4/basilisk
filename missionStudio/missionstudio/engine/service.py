@@ -151,7 +151,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -174,6 +174,13 @@ _INTEGRATORS = {
     "rkf45": svIntegrators.svIntegratorRKF45,
     "rkf78": svIntegrators.svIntegratorRKF78,
 }
+
+# SimulationService.run_live()'s default chunk count when live_step_s isn't
+# given -- about this many on_progress callbacks over the whole run,
+# regardless of duration_days. A round number, not tuned to any specific
+# scenario; see run_live()'s docstring for the dynamics_task_rate_s clamp
+# that keeps a very short run from producing a sub-tick step instead.
+_LIVE_DEFAULT_FRAMES = 200
 
 
 class SimulationServiceError(Exception):
@@ -828,12 +835,86 @@ class SimulationService:
         for a spacecraft that actually has them configured) attitude/
         body-rate/sun-heading, commanded control torque, reaction wheel
         speeds, and one series per attached sensor.
+
+        See :meth:`run_live` for a variant that streams intermediate
+        results back while the simulation is still running (e.g. to drive
+        a live-updating plot), rather than only once at the end.
+        """
+        if self.scSim is None:
+            self.build()
+        self.scSim.ExecuteSimulation()
+        return self._extract_results()
+
+    def run_live(self, on_progress: Callable[[ResultSet, float], None],
+                 live_step_s: Optional[float] = None) -> ResultSet:
+        """Same as :meth:`run`, except the simulation is executed in small
+        time chunks and ``on_progress(partial_result, fraction_complete)``
+        is called after each one, so a caller (missionStudio's GUI) can
+        redraw a plot while the run is still in flight instead of only
+        once it finishes.
+
+        This relies on a documented, supported Basilisk pattern: repeated
+        ``ConfigureStopTime()``/``ExecuteSimulation()`` pairs. ``ExecuteSimulation()``
+        always resumes from wherever ``TotalSim.NextTaskTime`` currently
+        is (see ``SimulationBaseClass.ExecuteSimulation()``'s
+        ``CheckStopCondition()`` loop) rather than restarting from t=0, so
+        calling it again with a larger stop time just continues the same
+        run. Recorders keep accumulating samples across chunks exactly as
+        they would across one uninterrupted call, so each chunk's
+        :meth:`_extract_results` is simply "whatever has been logged so
+        far" -- not a separate bookkeeping path from :meth:`run`. Which
+        series exist is decided once by ``self.scenario``/:meth:`build`,
+        never by how much data has been recorded yet, so the set of series
+        names is identical across every ``on_progress`` call (including
+        the first) and matches :meth:`run`'s -- only the amount of data in
+        each grows.
+
+        Args:
+            on_progress: called after each chunk with
+                ``(partial_result, fraction_complete)``, ``fraction_complete``
+                in ``[0, 1]`` (exactly ``1.0`` on the final call). Any
+                exception it raises propagates out of ``run_live`` and
+                aborts the run, same as an exception anywhere else in the
+                simulation would.
+            live_step_s: how much sim time to advance per chunk/callback
+                [s]. Defaults to
+                ``duration_days * 86400 / _LIVE_DEFAULT_FRAMES`` (about
+                ``_LIVE_DEFAULT_FRAMES`` callbacks over the whole run),
+                clamped to never be smaller than one dynamics tick
+                (``sim_settings.dynamics_task_rate_s``) -- ``ExecuteSimulation()``
+                has real per-call overhead, so a sub-tick step would only
+                add Python-loop cost with no extra simulated time to show
+                for it.
         """
         if self.scSim is None:
             self.build()
 
-        self.scSim.ExecuteSimulation()
+        stop_time_s = self.scenario.sim_settings.duration_days * 86400.0  # [s]
+        stop_time_ns = macros.sec2nano(stop_time_s)
+        if live_step_s is None:
+            live_step_s = max(
+                self.scenario.sim_settings.dynamics_task_rate_s,
+                stop_time_s / _LIVE_DEFAULT_FRAMES,
+            )  # [s]
+        step_ns = max(1, macros.sec2nano(live_step_s))
 
+        next_stop_ns = min(step_ns, stop_time_ns)
+        while True:
+            self.scSim.ConfigureStopTime(next_stop_ns)
+            self.scSim.ExecuteSimulation()
+            fraction_complete = min(1.0, next_stop_ns / stop_time_ns)
+            on_progress(self._extract_results(), fraction_complete)
+            if next_stop_ns >= stop_time_ns:
+                break
+            next_stop_ns = min(next_stop_ns + step_ns, stop_time_ns)
+
+        return self._extract_results()
+
+    def _extract_results(self) -> ResultSet:
+        """Reads every recorder currently attached in ``self._handles``
+        into a fresh :class:`~missionstudio.engine.results.ResultSet` --
+        whatever has been logged so far, whether that's a full run's worth
+        (:meth:`run`) or one chunk's worth mid-run (:meth:`run_live`)."""
         result = ResultSet(scenario_name=self.scenario.name)
         for name, handle in self._handles.items():
             t_s = handle.recorder.times() * macros.NANO2SEC

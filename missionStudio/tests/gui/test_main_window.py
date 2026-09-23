@@ -196,9 +196,9 @@ def test_run_passes_vizard_request_to_worker(window, monkeypatch):
     captured = {}
     original_init = RunWorker.__init__
 
-    def spy_init(self, scenario, vizard_request=None, parent=None):
+    def spy_init(self, scenario, vizard_request=None, live=False, parent=None):
         captured["vizard_request"] = vizard_request
-        original_init(self, scenario, vizard_request=vizard_request, parent=parent)
+        original_init(self, scenario, vizard_request=vizard_request, live=live, parent=parent)
 
     monkeypatch.setattr(RunWorker, "__init__", spy_init)
     monkeypatch.setattr(RunWorker, "start", lambda self: None)  # don't actually spin up the thread
@@ -216,8 +216,69 @@ def test_run_starts_busy_indicator_and_disables_other_run_actions(window, monkey
     window.on_run()
     assert window._busy_timer.isActive()
     assert not window.run_action.isEnabled()
+    assert not window.live_plot_action.isEnabled()  # can't toggle it mid-run either
     assert not window.monte_carlo_action.isEnabled()  # can't start a second run while one is in flight
     assert "Running" in window.statusBar().currentMessage()
+
+
+def test_live_plot_action_is_checked_by_default(window):
+    assert window.live_plot_action.isChecked()
+
+
+def test_run_passes_live_flag_from_action_to_worker(window, monkeypatch):
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    captured = {}
+    original_init = RunWorker.__init__
+
+    def spy_init(self, scenario, vizard_request=None, live=False, parent=None):
+        captured["live"] = live
+        original_init(self, scenario, vizard_request=vizard_request, live=live, parent=parent)
+
+    monkeypatch.setattr(RunWorker, "__init__", spy_init)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)
+
+    window.live_plot_action.setChecked(True)
+    window.on_run()
+    assert captured["live"] is True
+
+    window.live_plot_action.setChecked(False)
+    window.on_run()
+    assert captured["live"] is False
+
+
+def test_run_with_live_plot_clears_previous_result_and_shows_results_tab(window, monkeypatch):
+    from missionstudio.engine.results import ResultSet, TimeSeries
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)
+
+    stale = ResultSet(scenario_name="stale")
+    stale.add(TimeSeries("sat-1.position_N", [0.0], ("x", "y", "z"), [[0.0, 0.0, 0.0]], units="m"))
+    window.results_widget.set_result(stale)
+    window.right_tabs.setCurrentWidget(window.kernel_status_widget)
+
+    window.live_plot_action.setChecked(True)
+    window.on_run()
+
+    assert window.results_widget.series_combo.count() == 0
+    assert window.right_tabs.currentWidget() is window.results_widget
+
+
+def test_run_progress_updates_results_widget_and_busy_bar(window):
+    from missionstudio.engine.results import ResultSet, TimeSeries
+
+    window._start_busy("Running test...", determinate=True)
+    partial = ResultSet(scenario_name="test")
+    partial.add(TimeSeries("sat-1.position_N", [0.0, 1.0], ("x", "y", "z"),
+                            [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], units="m"))
+
+    window._on_run_progress(partial, 0.5)
+
+    assert window.results_widget.series_combo.count() == 1
+    assert window._busy_progress.value() == 50
 
 
 def test_run_finished_stops_busy_indicator_and_reenables_actions(window):

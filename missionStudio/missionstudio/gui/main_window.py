@@ -160,6 +160,15 @@ class MainWindow(QMainWindow):
         run_menu.addAction(run_action)
         self.run_action = run_action
 
+        live_plot_action = QAction("&Live Plot", self)
+        live_plot_action.setCheckable(True)
+        live_plot_action.setChecked(True)
+        live_plot_action.setToolTip(
+            "Update the Results plot as the simulation runs, instead of only once it finishes"
+        )
+        run_menu.addAction(live_plot_action)
+        self.live_plot_action = live_plot_action
+
         check_kernels_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
                                         "&Check Kernels", self)
         check_kernels_action.setToolTip("Check/fetch SPICE kernels")
@@ -198,6 +207,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.save_action)
         toolbar.addSeparator()
         toolbar.addAction(self.run_action)
+        toolbar.addAction(self.live_plot_action)
         toolbar.addAction(self.monte_carlo_action)
         toolbar.addAction(self.vizard_action)
         toolbar.addSeparator()
@@ -303,14 +313,24 @@ class MainWindow(QMainWindow):
         single run's worker was still using ``self._run_worker``, silently
         losing track of it. One run at a time.
         """
-        for action in (self.run_action, self.monte_carlo_action, self.vizard_action, self.check_kernels_action):
+        for action in (self.run_action, self.live_plot_action, self.monte_carlo_action, self.vizard_action,
+                       self.check_kernels_action):
             action.setEnabled(not running)
 
-    def _start_busy(self, message: str) -> None:
+    def _start_busy(self, message: str, determinate: bool = False) -> None:
         self._set_running(True)
         self._busy_elapsed.start()
         self._busy_label.setText("0:00 elapsed")
         self._busy_label.setVisible(True)
+        # A live-plot run reports real progress (engine.service.
+        # SimulationService.run_live()'s fraction_complete) -- a real
+        # percentage bar for it, rather than the indeterminate ("marching
+        # ants") bar every other run still uses, since nothing else here
+        # exposes a step/run progress callback to drive one (see the
+        # class-level comment by self._busy_progress's construction).
+        self._busy_progress.setRange(0, 100 if determinate else 0)
+        if determinate:
+            self._busy_progress.setValue(0)
         self._busy_progress.setVisible(True)
         self._busy_timer.start()
         self.statusBar().showMessage(message)
@@ -349,11 +369,24 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Cannot run invalid scenario", str(exc))
             return
 
-        self._start_busy(f"Running {scenario.name}...")
-        self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request)
+        live = self.live_plot_action.isChecked()
+        self._start_busy(f"Running {scenario.name}...", determinate=live)
+        if live:
+            # Clear any previous run's plot rather than leaving it up
+            # while this run's first chunk is still in flight -- it would
+            # otherwise look like this run already has results before it
+            # actually does.
+            self.results_widget.set_result(None)
+            self.right_tabs.setCurrentWidget(self.results_widget)
+        self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request, live=live)
+        self._run_worker.progress.connect(self._on_run_progress)
         self._run_worker.finished_ok.connect(self._on_run_finished)
         self._run_worker.failed.connect(self._on_run_failed)
         self._run_worker.start()
+
+    def _on_run_progress(self, partial_result, fraction: float) -> None:
+        self.results_widget.set_live_result(partial_result)
+        self._busy_progress.setValue(int(round(fraction * 100)))
 
     def _on_run_finished(self, result) -> None:
         self._stop_busy(f"Run complete: {len(result.series)} result series.")

@@ -34,6 +34,20 @@ def test_run_without_basilisk_emits_failed(qtbot):
 
 
 @pytest.mark.skipif(_BASILISK_AVAILABLE, reason="this test's premise is specifically that Basilisk is unavailable")
+def test_live_run_without_basilisk_emits_failed(qtbot):
+    """The live=True path fails the same way as live=False -- the
+    ImportError happens before either run()/run_live() is ever reached
+    (see RunWorker.run()'s try block).
+    """
+    from missionstudio.gui.run_worker import RunWorker
+
+    worker = RunWorker(_load_two_body_scenario(), live=True)
+    with qtbot.waitSignal(worker.failed, timeout=5000) as blocker:
+        worker.start()
+    assert "Basilisk is not installed" in blocker.args[0]
+
+
+@pytest.mark.skipif(_BASILISK_AVAILABLE, reason="this test's premise is specifically that Basilisk is unavailable")
 def test_monte_carlo_worker_without_basilisk_emits_failed(qtbot, tmp_path):
     from missionstudio.gui.run_worker import MonteCarloWorker
     from missionstudio.schema.scenario import MonteCarloConfig

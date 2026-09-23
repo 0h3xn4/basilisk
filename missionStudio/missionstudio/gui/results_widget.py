@@ -70,6 +70,29 @@ class ResultsWidget(QWidget):
         self.export_button.setEnabled(result is not None and bool(result.series))
         self._redraw()
 
+    def set_live_result(self, result: ResultSet) -> None:
+        """Updates the plot with one chunk's worth of a still-running
+        simulation (see ``gui.run_worker.RunWorker``'s ``progress`` signal /
+        :meth:`engine.service.SimulationService.run_live`). Unlike
+        :meth:`set_result`, this never rebuilds ``series_combo`` once it
+        already holds this result's series names -- the set of series a
+        live run reports is fixed from its very first callback (which
+        series exist is decided by the scenario, not by how much data has
+        been recorded), so rebuilding it every chunk would keep resetting
+        whatever series the user is currently looking at, fighting them
+        while they watch it run.
+        """
+        is_first_update = self._result is None or set(self._result.series) != set(result.series)
+        self._result = result
+        if is_first_update:
+            self.series_combo.blockSignals(True)
+            self.series_combo.clear()
+            for name in result.series:
+                self.series_combo.addItem(name)
+            self.series_combo.blockSignals(False)
+            self.export_button.setEnabled(bool(result.series))
+        self._redraw()
+
     def _redraw(self) -> None:
         self.axes.clear()
         if self._result is not None and self.series_combo.count() > 0:

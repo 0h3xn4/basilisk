@@ -760,6 +760,34 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
   without a Basilisk build, so factoring the actual arithmetic out is what
   makes `tests/test_propellant_bookkeeping.py`'s regression coverage for
   this bug possible at all).
+* **A live-updating Results plot.** Previously the plot stayed on "Run a
+  simulation to see results here" for the entire duration of a run, then
+  jumped straight to the finished result -- no feedback beyond the
+  indeterminate busy bar for however long the run took. `engine.service.
+  SimulationService` gained `run_live(on_progress, live_step_s=None)`: a
+  variant of `run()` that executes the simulation in small time chunks
+  (repeated `ConfigureStopTime()`/`ExecuteSimulation()` pairs -- a
+  documented, supported Basilisk pattern, since `ExecuteSimulation()`
+  always resumes from wherever it last stopped rather than restarting)
+  instead of one uninterrupted call, calling `on_progress(partial_result,
+  fraction_complete)` after each chunk. Recorders keep accumulating
+  samples across chunks exactly as they would across one call, so each
+  chunk's result is genuinely "whatever has been logged so far", not a
+  separate/approximate bookkeeping path from `run()` -- confirmed by
+  `tests/test_service_run_live.py`, which checks a chunked `run_live()`
+  run reproduces a plain `run()` run's final position/velocity exactly.
+  The new "Live Plot" toggle (Run menu and toolbar, on by default)
+  controls whether `gui.run_worker.RunWorker` drives the run through
+  `run_live()` (emitting a new `progress` Qt signal per chunk, connected
+  to `gui.results_widget.ResultsWidget.set_live_result()`) or the
+  original one-shot `run()`; the status bar's busy indicator also becomes
+  a real 0-100% progress bar instead of the indeterminate one whenever
+  Live Plot is on, since `run_live()` is the one case where a genuine
+  completion fraction exists. `set_live_result()` deliberately never
+  rebuilds the series dropdown once it already holds the running result's
+  series names (which are fixed from the first chunk -- only the amount
+  of data grows), so watching a live run doesn't keep resetting whichever
+  series the user is currently looking at.
 
 ## Repository layout
 
