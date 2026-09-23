@@ -51,7 +51,11 @@ MIGRATIONS: Dict[int, Callable[[dict], dict]] = {}
 
 def migrate(data: dict) -> dict:
     version = data.get("schema_version")
-    if not isinstance(version, int):
+    # bool is a subclass of int in Python (isinstance(True, int) is True),
+    # so a malformed file with "schema_version": true/false would
+    # otherwise pass this check and silently end up stored as a literal
+    # True/False rather than a real version number.
+    if not isinstance(version, int) or isinstance(version, bool):
         raise ScenarioValidationError(
             f"schema_version must be an integer, got {version!r}"
         )

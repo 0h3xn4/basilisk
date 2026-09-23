@@ -77,6 +77,17 @@ class KernelStatusWidget(QWidget):
         self._worker: _KernelFetchWorker | None = None
 
     def refresh(self) -> None:
+        # Re-entrancy guard: refresh_button disables itself for the
+        # duration of a fetch, but MainWindow's "Check Kernels"
+        # menu/toolbar action calls this method directly and isn't tied to
+        # that button's enabled state (see main_window.py's Run menu). Without
+        # this guard, triggering that action again while a fetch is still
+        # in flight would reassign self._worker, dropping the only Python
+        # reference to the still-running QThread -- undefined behavior in
+        # Qt ("QThread: Destroyed while thread is still running"), up to
+        # and including a hard process abort.
+        if self._worker is not None and self._worker.isRunning():
+            return
         self.refresh_button.setEnabled(False)
         self.status_label.setText("Checking kernels...")
         self.table.setRowCount(0)

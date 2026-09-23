@@ -51,6 +51,32 @@ def test_refresh_disables_button_while_running(widget, qtbot, monkeypatch):
     qtbot.waitUntil(lambda: widget.refresh_button.isEnabled(), timeout=5000)
 
 
+def test_refresh_while_already_running_does_not_orphan_the_worker(widget, qtbot, monkeypatch):
+    """Regression test for an audit finding: MainWindow's "Check Kernels"
+    menu/toolbar action calls refresh() directly, independent of
+    refresh_button's enabled state -- so calling refresh() again while a
+    fetch is still in flight used to reassign self._worker, dropping the
+    only Python reference to the still-running QThread (a real Qt crash
+    risk: "QThread: Destroyed while thread is still running").
+    """
+    import threading
+
+    from missionstudio.gui.kernel_status_widget import _KernelFetchWorker
+
+    release = threading.Event()
+    monkeypatch.setattr(_KernelFetchWorker, "run", lambda self: release.wait(5) and self.finished_ok.emit([]))
+
+    widget.refresh()
+    qtbot.waitUntil(lambda: widget._worker.isRunning(), timeout=5000)
+    first_worker = widget._worker
+
+    widget.refresh()  # e.g. the toolbar action firing again -- must be a no-op
+    assert widget._worker is first_worker
+
+    release.set()
+    qtbot.waitUntil(lambda: widget.refresh_button.isEnabled(), timeout=5000)
+
+
 @pytest.mark.skipif(_BASILISK_AVAILABLE, reason="this test's premise is specifically that Basilisk is unavailable")
 def test_refresh_without_basilisk_reports_clear_status(widget, qtbot):
     widget.refresh()

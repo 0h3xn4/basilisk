@@ -51,6 +51,29 @@ def test_validate_file_rejects_insufficient_date_range(tmp_path):
     assert not result.covers_range
 
 
+def test_validate_file_covers_range_ignores_time_of_day(tmp_path):
+    """Regression test for an audit finding: covers_range used to compare
+    a date-only (midnight) timestamp parsed from the CSV's last row
+    against a full end_utc datetime, so a file whose last row IS the
+    scenario's own end date was wrongly rejected whenever end_utc carried
+    a non-zero time-of-day (daily-resolution data covers its whole day,
+    not just its midnight instant). service.py builds end_utc as
+    datetime.fromisoformat(scenario.epoch_utc) + a timedelta, and
+    Scenario.validate() does not require epoch_utc to be midnight, so this
+    is a real, reachable scenario shape.
+    """
+    path = tmp_path / "covers.csv"
+    header = ",".join(sw.REQUIRED_COLUMNS)
+    row_tail = "," + ",".join(["5"] * 8) + ",5,100,100"
+    path.write_text(header + "\n" + "2030-01-01" + row_tail + "\n" + "2030-01-05" + row_tail + "\n")
+
+    start_utc = datetime(2030, 1, 1, 14, 0, 0)
+    end_utc = datetime(2030, 1, 5, 14, 0, 0)  # same calendar date as the file's last row, but later in the day
+    result = sw.validate_file(path, start_utc, end_utc)
+
+    assert result.covers_range, result.message
+
+
 def test_validate_file_detects_unsorted_dates(tmp_path):
     path = tmp_path / "unsorted.csv"
     header = ",".join(sw.REQUIRED_COLUMNS)
@@ -116,7 +139,16 @@ def test_resolve_celestrak_falls_back_when_unreachable_or_insufficient(tmp_path)
     start, end = datetime(2030, 1, 1), datetime(2030, 1, 5)
     resolved = sw.resolve("celestrak", start, end, cache_dir=tmp_path)
     assert resolved.path.exists()
-    assert resolved.warnings, "expected at least one warning explaining what happened"
+    # A clean, real CelesTrak fetch (is_synthetic False, no warnings) is a
+    # perfectly good outcome -- see the docstring above, "either outcome is
+    # a pass". A warning is only expected on the FALLBACK path
+    # (is_synthetic True or a warning-carrying local_file_path substitution);
+    # requiring one unconditionally was a real bug in this test, caught on a
+    # machine where CelesTrak is actually reachable (this project's own
+    # development sandbox never exercised the "success" branch, only the
+    # "blocked" one, so this was never caught until now).
+    if resolved.is_synthetic:
+        assert resolved.warnings, "expected at least one warning explaining the fallback to synthetic data"
     # Whatever happened, the file it points to must itself be valid.
     result = sw.validate_file(resolved.path, start, end)
     assert result.ok, f"resolve() returned an unusable file: {result.message}"

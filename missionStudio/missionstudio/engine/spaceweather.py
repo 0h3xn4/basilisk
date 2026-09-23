@@ -161,9 +161,19 @@ def validate_file(path, start_utc: datetime, end_utc: datetime) -> ValidationRes
     covers_range = False
     if first_date and last_date:
         try:
+            # Compare calendar dates, not full datetimes: each DATE row is
+            # daily-resolution data covering its ENTIRE day, but
+            # start_utc/end_utc can carry a non-zero time-of-day (e.g.
+            # scenario.epoch_utc="...T14:00:00" -- Scenario.validate()
+            # only requires it to parse as ISO 8601, not to be midnight).
+            # Comparing full datetimes made a file whose last row is the
+            # scenario's own end date fail this check whenever end_utc's
+            # time-of-day was after midnight, even though that day's data
+            # is genuinely present -- see this module's docstring/audit
+            # note.
             covers_range = (
-                datetime.strptime(first_date, "%Y-%m-%d") <= start_utc
-                and datetime.strptime(last_date, "%Y-%m-%d") >= end_utc
+                datetime.strptime(first_date, "%Y-%m-%d").date() <= start_utc.date()
+                and datetime.strptime(last_date, "%Y-%m-%d").date() >= end_utc.date()
             )
         except ValueError:
             covers_range = False

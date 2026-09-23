@@ -574,6 +574,467 @@ swept under the rug):
   indication. Fixed: the stale name is now surfaced as its own selectable
   entry and round-tripped as-is instead.
 
+## What Phase 5 adds
+
+Driven directly by feedback from actually using the Phase 4 GUI + engine
+(this phase is in progress; bullets are added as pieces land):
+
+* **Result plots/CSV export now include osculating Keplerian elements**,
+  not just inertial position/velocity. `engine.service` computes semi-major
+  axis, eccentricity, inclination, RAAN, argument of periapsis, and true
+  anomaly at every recorded sample (`orbitalMotion.rv2elem`, the exact
+  inverse of the classical-elements orbit-IC conversion already used
+  elsewhere in this file) and adds them to `ResultSet` as
+  `{spacecraft}.orbit_elements.{semi_major_axis,eccentricity,inclination,
+  raan,arg_periapsis,true_anomaly}` -- one series per element (mixed units:
+  m/-/rad), matching the existing convention for e.g.
+  `station_keeping.burn_on`/`.delta_v`. `gui.results_widget`/the CLI's CSV
+  export need no changes for these to show up -- both are already driven
+  generically by whatever `ResultSet.series` contains. Near-circular
+  and/or near-equatorial orbits have an inherent singularity in RAAN/
+  argument of periapsis/true anomaly (see
+  `engine.service._osculating_elements`'s docstring) -- not a bug, just
+  how classical elements behave at those limits.
+* **Sensor/actuator/FSW-mode setup is no longer a blank JSON box with zero
+  guidance.** User feedback: configuring a spacecraft's sensors, actuators,
+  and attitude-control mode was "confusing and not beginner friendly" --
+  each dialog offered only a Kind/mode combo and an empty `{}` params box,
+  so a user had to already know (by reading `engine/fsw.py`'s source)
+  which JSON keys a given kind needs, their units, and which are required.
+  A missing required key (e.g. `coarse_sun_sensor`'s `nHat_B`,
+  `reaction_wheel`'s `gsHat_B`, `locationPointing`'s
+  `target_ground_station`) wasn't caught there either -- only much later,
+  decontextualized, when the whole spacecraft dialog's
+  `SpacecraftConfig.validate()` ran (sensors/actuators) or not at all
+  until `Run Simulation` actually failed deep inside `engine.fsw`
+  (FSW mode). Fixed in both `gui.sensor_actuator_editor` and
+  `gui.spacecraft_editor`'s FSW tab: a per-kind/per-mode help label (key
+  name, required/optional, units, one-line description) that updates live
+  as the Kind/FSW-mode combo changes; a new spacecraft/sensor/actuator
+  starts pre-filled with a working example instead of `{}`; a "Reset to
+  template" button refills the params box for the CURRENTLY selected
+  kind/mode on demand (switching kind never silently overwrites what's
+  already typed, to avoid destroying in-progress edits); and both dialogs
+  now check required keys themselves and raise an immediate, specific
+  error naming exactly what's missing, right where the params box is.
+  `SUPPORTED_ACTUATOR_KINDS`'s `"thruster"`/`"magnetic_torque_rod"`
+  (schema-valid but not wired up -- see the Phase 0 section above) and
+  `locationPointing`'s `fsw_params["target_body"]` option now show an
+  explicit in-dialog warning instead of silently accepting a
+  configuration that fails only when the simulation actually runs.
+* **Sensor/actuator body-frame direction vectors get dedicated X/Y/Z spin
+  boxes**, not a bare 3-element array inside the params JSON box -- see
+  `gui.sensor_actuator_editor`'s module docstring for exactly why
+  DIRECTION (not position) is the one thing about sensor/actuator
+  "placement" that actually affects the physics these Basilisk modules
+  simulate here, plus a Normalize button since Basilisk does not
+  renormalize a non-unit vector itself.
+* **Reusable spacecraft "bus" templates.** A brand-new spacecraft used to
+  start from `SpacecraftConfig()`'s bare dataclass defaults (100 kg, flat
+  10 kg*m^2 inertia, no sensors/actuators/power/attitude control) -- a
+  placeholder, not anything resembling a real vehicle. The new
+  `engine.spacecraft_templates` module (pure schema data, no Basilisk
+  import, same split as `engine.constellation`) ships three starting
+  points -- a passive 3U CubeSat (drag/SRP enabled, no ADCS, good for
+  orbit-only delta-V/lifetime studies), a 3-axis-stabilized 3U CubeSat
+  (coarse sun sensor + 3 reaction wheels + `sunSafePoint` + a small power
+  budget), and a 100 kg ESPA-class smallsat (star tracker + coarse sun
+  sensor + 3 reaction wheels + `inertial3D` + a ~1 m-class power budget) --
+  each internally consistent and validated, with rounded,
+  order-of-magnitude-reasonable numbers (never a fabricated-precision
+  datasheet figure; see that module's docstring). The spacecraft list's
+  new "New from template..." button (next to "Add...") opens a small
+  picker, then the ordinary `SpacecraftEditorDialog` pre-filled with the
+  chosen template so the user still sets the actual name/orbit/anything
+  else themselves, exactly like editing any other spacecraft.
+* **Custom 3D models in Vizard.** The last piece of "adequately represent
+  the correct placement" feedback: `SpacecraftConfig.vizard_model_path`
+  (plus `vizard_model_offset_m`/`_rotation_deg`/`_scale`) wires
+  `Basilisk.utilities.vizSupport.createCustomModel()` in, replacing a
+  spacecraft's default cube icon with a real `.obj` mesh (or Vizard's
+  `CUBE`/`CYLINDER`/`SPHERE` primitives) at a chosen body-frame offset/
+  rotation/scale. PURELY COSMETIC -- it changes nothing about simulated
+  physics (mass, drag/SRP area, etc. are unaffected either way); the
+  spacecraft editor's new "Vizard model (cosmetic)" tab says so up front,
+  same "don't offer a control that looks like it does something it
+  doesn't" discipline as everywhere else in this app.
+* **Orbit-only simulation mode, plus a constant-frame thrust maneuver.**
+  `Scenario.simulation_mode` ("full_attitude", the default and everything
+  this schema always supported, or "orbit_only") is the first field in
+  the scenario editor's form, chosen before anything else per the
+  feature request this responds to. "Orbit only" is a stricter,
+  beginner-friendly mode for pure orbit-propagation questions (delta-V
+  budgets, orbit lifetime, station-keeping cadence, ...): no spacecraft
+  may have `fsw_mode`/`sensors`/`actuators`/`power` set (`Scenario.
+  validate()` rejects it with a specific per-field error), so the
+  spacecraft editor hides the Sensors/actuators and FSW tabs and the
+  Power budget group while it's selected -- the spacecraft is simulated
+  as a cannonball with `drag_area_m2`/`srp_area_m2` (which finally got a
+  real editor too, on the Orbit/mass tab -- previously round-tripped only,
+  with no UI to actually SET them anywhere) as its average cross-section.
+  `station_keeping`/`phasing_keeping`/the new `constant_thrust` remain
+  available in EITHER mode, since none of them need attitude knowledge.
+
+  `SpacecraftConfig.constant_thrust` is new: a continuous (always-on),
+  constant-magnitude thrust with a fixed direction in a ROTATING orbit
+  frame -- VNB (velocity/orbit-normal/binormal) or RTN (radial/
+  transverse/orbit-normal), re-evaluated every simulation tick from the
+  spacecraft's current state (`engine.orbit_maintenance._vnb_basis`/
+  `_rtn_basis`) -- rather than a direction fixed in the inertial frame,
+  which would drift relative to the orbit as the spacecraft moves. Delta
+  -V/propellant bookkeeping mirrors `StationKeepingConfig`'s own rocket
+  -equation approach (station-keeping's burn model itself is UNCHANGED --
+  still a fixed prograde reboost -- this is a separate, independent
+  mechanism with its own propellant tank, addable alongside station
+  -keeping on the same spacecraft). `missionstudio run` prints a
+  "Constant-thrust summary" line per spacecraft, same idea as the
+  existing station-keeping summary.
+* **A real visual theme, an app icon, a toolbar, and assorted UI polish.**
+  Direct user feedback: "looks very unfinished... not very intuitive and
+  comfortable". The app previously ran on whatever the platform's native
+  Qt style happened to render, with no icon and no toolbar. Now:
+  * `gui/theme.py` -- one QSS stylesheet + palette (`apply_theme()`,
+    called once from `gui/app.py`), on top of Qt's "Fusion" base style
+    (the one built-in style that renders identically, and predictably
+    styleable via QSS, across Linux/macOS/Windows). A small, consistent
+    color system (one neutral slate scale + one accent blue, reused
+    everywhere -- focus rings, selection highlight, the primary action
+    button, progress bars) rather than per-widget rules picked ad hoc.
+    Pure presentation layer: no widget's behavior, signals, or layout
+    structure changed because of it.
+  * `gui/icons.py` -- the app icon, drawn procedurally with `QPainter`
+    (a central body + an inclined orbit ellipse + a satellite dot) rather
+    than shipped as a bitmap asset, so there's no binary file to keep in
+    sync with the theme's colors. Used as the window/taskbar icon
+    (`app.py`) and, rendered to a real PNG under the standard XDG
+    hicolor icon theme location, the Linux desktop entry's icon
+    (`packaging/install.sh`, closing a gap that `Icon=missionstudio` was
+    falling back to a generic icon).
+  * `MainWindow` gained a toolbar (New/Open/Save, Run Simulation/Monte
+    Carlo/Vizard/Check Kernels) using the SAME `QAction` instances the
+    menu bar already had -- one signal connection each, so toolbar and
+    menu always agree, including which actions are disabled while a run
+    is in flight. "Run Simulation" is visually the primary action
+    (accent-colored), the same "one obvious main button" convention a
+    web app would use.
+  * The results panel used to be a blank white plot with no explanation
+    before any run -- now shows "Run a simulation to see results here".
+  * `SpacecraftEditorDialog`'s five tabs used to share ONE height (a
+    `QTabWidget` sizes every tab to fit whichever page is tallest, a
+    real, easy-to-miss Qt behavior -- the "Power / propulsion / link
+    budget" tab's five stacked groups forced "Orbit / mass", a third the
+    height, to render with a large dead-space gap, and pushed the whole
+    dialog's natural size to over 1000px tall). Caught by actually
+    rendering the dialog and looking at it, not from reading the layout
+    code. Fixed: each tab now scrolls independently (`_scrollable()`),
+    same pattern `gui.scenario_editor.ScenarioEditorWidget`'s own
+    top-level form already used.
+  * The Monte Carlo group box was labeled "Monte Carlo (Phase 3)" --
+    internal development-phase numbering with no meaning to an end user,
+    now just "Monte Carlo".
+* **Fixed a silent mass-bookkeeping bug found by a full-codebase audit.**
+  `StationKeepingController`/`PhasingKeepingController`/
+  `ConstantFrameThrustController` each used to recompute an ABSOLUTE
+  `scObject.hub.mHub = dryMass + propellant` every tick, from their own
+  construction-time-captured belief about the spacecraft's mass. That's
+  fine in isolation, but two real, previously-silent failure modes fall out
+  of it: (1) `station_keeping` and the new `constant_thrust` are an
+  explicitly supported combination on the same spacecraft, and whichever
+  controller's `UpdateState` happened to run last each tick would overwrite
+  `hub.mHub`, discarding the other controller's propellant burn entirely;
+  (2) a Monte Carlo `dry_mass_kg` dispersion writes directly to `hub.mHub`
+  before any controller's first tick (see `engine.monte_carlo`'s "why
+  `SimulationService.build(initialize=False)`" docstring section) -- the
+  very first `UpdateState` call would then silently reset that dispersed
+  mass back to the nominal, undispersed value, quietly defeating the
+  dispersion for the rest of the run. Fixed at the root: all three
+  controllers now read the spacecraft's CURRENT total mass at the top of
+  each tick and subtract only what THIS tank burns THIS tick -- a
+  self-contained delta, order-independent no matter how many other
+  controllers or a prior dispersion already touched the same mass. The
+  shared fix lives in a new `engine.propellant_bookkeeping.
+  apply_propellant_burn()` (pure math, no Basilisk import -- same "pure
+  math, no Basilisk" split as `engine.constellation`/
+  `engine.spacecraft_templates`, and for the same reason:
+  `engine.orbit_maintenance` itself can never be unit-tested in a sandbox
+  without a Basilisk build, so factoring the actual arithmetic out is what
+  makes `tests/test_propellant_bookkeeping.py`'s regression coverage for
+  this bug possible at all).
+* **A live-updating Results plot.** Previously the plot stayed on "Run a
+  simulation to see results here" for the entire duration of a run, then
+  jumped straight to the finished result -- no feedback beyond the
+  indeterminate busy bar for however long the run took. `engine.service.
+  SimulationService` gained `run_live(on_progress, live_step_s=None)`: a
+  variant of `run()` that executes the simulation in small time chunks
+  (repeated `ConfigureStopTime()`/`ExecuteSimulation()` pairs -- a
+  documented, supported Basilisk pattern, since `ExecuteSimulation()`
+  always resumes from wherever it last stopped rather than restarting)
+  instead of one uninterrupted call, calling `on_progress(partial_result,
+  fraction_complete)` after each chunk. Recorders keep accumulating
+  samples across chunks exactly as they would across one call, so each
+  chunk's result is genuinely "whatever has been logged so far", not a
+  separate/approximate bookkeeping path from `run()` -- confirmed by
+  `tests/test_service_run_live.py`, which checks a chunked `run_live()`
+  run reproduces a plain `run()` run's final position/velocity exactly.
+  The new "Live Plot" toggle (Run menu and toolbar, on by default)
+  controls whether `gui.run_worker.RunWorker` drives the run through
+  `run_live()` (emitting a new `progress` Qt signal per chunk, connected
+  to `gui.results_widget.ResultsWidget.set_live_result()`) or the
+  original one-shot `run()`; the status bar's busy indicator also becomes
+  a real 0-100% progress bar instead of the indeterminate one whenever
+  Live Plot is on, since `run_live()` is the one case where a genuine
+  completion fraction exists. `set_live_result()` deliberately never
+  rebuilds the series dropdown once it already holds the running result's
+  series names (which are fixed from the first chunk -- only the amount
+  of data grows), so watching a live run doesn't keep resetting whichever
+  series the user is currently looking at.
+* **Another full-codebase audit, this time with real fan-out coverage.**
+  A single-pass review of the live-plot/mass-bookkeeping commits found
+  and fixed two issues in `engine.service.run_live()`: a scenario whose
+  `duration_days` is small enough to round to 0 ns via `macros.sec2nano()`
+  (schema-valid -- `sim_settings.validate()` only requires `> 0`) used to
+  raise a bare `ZeroDivisionError` computing `fraction_complete` instead
+  of a clear error; and `_LIVE_DEFAULT_FRAMES` was lowered from 200 to 60,
+  since each live callback's `_extract_results()` redoes O(samples-so-far)
+  work from the FULL recorder history rather than just the new samples,
+  so total extraction cost scaled with frame count. A follow-up pass
+  fanned out across the rest of the codebase (GUI layer, remaining engine
+  modules, schema/CLI/packaging) and found six more real, independently
+  -verified bugs:
+  * `gui.main_window._on_run_finished` called `ResultsWidget.set_result()`
+    instead of `set_live_result()` -- so the moment a live-watched run
+    actually finished, whichever series the user had selected to watch
+    snapped back to the first one, undoing the whole point of
+    `set_live_result()`'s selection-preserving design at the one moment
+    the final data matters most.
+  * `gui.kernel_status_widget.KernelStatusWidget.refresh()` had no
+    re-entrancy guard: `MainWindow`'s "Check Kernels" menu/toolbar action
+    calls it directly, independent of `refresh_button`'s own disabled
+    -while-fetching state, so triggering it again mid-fetch reassigned
+    `self._worker`, dropping the only Python reference to the
+    still-running (unparented) `QThread` -- a real Qt crash risk ("QThread:
+    Destroyed while thread is still running"). Now a no-op while a fetch
+    is already in flight.
+  * `gui.main_window.MainWindow.closeEvent` never checked whether
+    `_run_worker`/`_mc_worker` was still running before accepting the
+    close -- starting a run doesn't mark the scenario dirty, so closing
+    the window mid-run (no cooperative-cancellation hook exists for a
+    synchronous `SimulationService.run()`/`run_live()`/`run_monte_carlo()`
+    call) could tear down the process out from under a live `QThread`.
+    Now refuses to close (with a clear message) while either worker is
+    running.
+  * `engine.spaceweather.validate_file()`'s `covers_range` check compared
+    a date-only (midnight) timestamp parsed from the CSV's last row
+    against a full `end_utc` datetime that can carry a non-zero
+    time-of-day (`scenario.epoch_utc` isn't required to be midnight) --
+    so a CelesTrak file that genuinely covered the scenario's end date
+    was often misclassified as not covering it, forcing an unnecessary
+    fallback to synthetic (fabricated) space weather. Fixed to compare
+    calendar dates.
+  * `engine.time_system.utc_iso_to_spice_string()` hardcoded a literal
+    `.000` milliseconds field instead of deriving it from `epoch_utc`,
+    silently discarding any sub-second precision a user specified.
+  * `cli.py`'s `cmd_spaceweather_resolve` had no exception handling
+    around `sw.resolve()` (every other command in the file does), and
+    `engine.monte_carlo.run_monte_carlo()`'s `archive_dir.mkdir(...)`
+    sat outside its own `try`/`except` -- both let a real, reachable
+    failure (a missing `local_file_path`; `--archive-dir` already
+    existing as a plain file) surface as a raw traceback instead of this
+    project's "ERROR: ..." + specific exit code convention. Both now
+    report cleanly.
+  * `packaging/install.sh` picked the just-built wheel with
+    `ls | tail -n1` (lexicographic order) -- since `build_wheel.sh` never
+    cleans its output directory, re-running `install.sh` against the same
+    `--prefix` after a version bump left old and new wheels side by side,
+    and `"...-1.10.0..."` sorts BEFORE `"...-1.9.0..."` as a string,
+    silently installing the OLDER version. Fixed to pick by modification
+    time (`ls -t`) instead, so the wheel `build_wheel.sh` just built is
+    always the one selected.
+* **A dedicated "Propagation setup" window, and an explicit on/off switch
+  for every perturbation.** Direct feedback: gravity/integrator/space
+  -weather settings were three separate, always-visible group boxes
+  buried in the middle of the main scenario form, and spherical-harmonics
+  gravity had no explicit enable control -- unchecking it meant zeroing
+  out (and losing) whatever degree/order the user had typed. Fixed:
+  * New `gui.propagation_setup_dialog.PropagationSetupDialog` -- one
+    window for everything that governs how a scenario's orbits
+    propagate: central body, gravity model, the numerical integrator/
+    step/duration, and the space-weather source atmospheric drag reads.
+    `gui.scenario_editor.ScenarioEditorWidget`'s main form now shows a
+    compact read-only summary of the current settings plus a single
+    "Edit Propagation Setup..." button that opens it, replacing the three
+    scattered group boxes.
+  * Every perturbation this app actually wires up in `engine.service` now
+    has its own explicit on/off control: a new "Enable spherical
+    -harmonics gravity" checkbox (GUI-only concept -- `schema.scenario.
+    GravityConfig` still has just the one `central_body_degree` field,
+    `0` still means point-mass; the checkbox folds back into it on OK,
+    but the spin box's value is never reset by unchecking it, so
+    re-checking it brings the same degree/order right back); third-body
+    point-mass perturbers (already a per-body checkbox list, moved into
+    the new dialog unchanged); atmospheric drag and solar radiation
+    pressure (`enable_drag`/`enable_srp`, already per-spacecraft -- see
+    below for why). The harmonics checkbox is also auto-disabled (and
+    unchecked) whenever the central body isn't Earth, since
+    `engine.service.build()` only has gravity-field data (GGM03S) for
+    Earth -- the GUI can no longer construct that invalid combination in
+    the first place, rather than letting the user discover it only when
+    a run fails.
+  * **Cannonball (orbit-only) mode already exposed every spacecraft
+    parameter the active perturbations need** -- confirmed, not new:
+    `dry_mass_kg`, `drag_coeff`/`drag_area_m2`, and `srp_coeff`/
+    `srp_area_m2` all live on `SpacecraftEditorDialog`'s "Orbit / mass"
+    tab, which (unlike Sensors/actuators/FSW/Power) is never hidden in
+    "orbit_only" mode, from Phase 5's earlier drag/SRP work.
+  * Caught while rendering the new dialog and looking at it, not from
+    reading the layout code (same discipline as every other UI bug this
+    project has found this way): a word-wrapped `QLabel`'s `sizeHint()`
+    reports the width needed to lay its text out on ONE line unless
+    something else constrains it -- without a cap, the dialog's intro
+    label alone stretched the whole window to ~1360px wide.
+* **Another audit round, two more real bugs found and fixed.** A
+  fan-out re-sweep after the Propagation Setup work landed:
+  * `schema.scenario.GravityConfig.validate()` never checked that
+    spherical-harmonics gravity (`central_body_degree > 0`) is only wired
+    up for Earth -- `engine.service.SimulationService.build()` already
+    rejects any other central body with that combination, but only at
+    simulation time. Without a matching schema-layer check,
+    `missionstudio validate`/`Scenario.save()` (both deliberately
+    Basilisk-independent, meant as an early correctness check) gave a
+    clean bill of health to a scenario guaranteed to fail the moment it
+    was actually run. Now rejected at the schema layer too.
+  * `engine.monte_carlo`'s `dry_mass_kg` dispersion wrote its generated
+    value ABSOLUTELY to `hub.mHub` (Basilisk's dispersion framework has
+    no notion of "add this on top of what's already there") -- but
+    `hub.mHub` is `dry_mass_kg + propellant` for any spacecraft with
+    `station_keeping`/`constant_thrust` configured, not just
+    `dry_mass_kg` (see `SpacecraftConfig.dry_mass_kg`'s own documented
+    contract). A `dry_mass_kg` dispersion on such a spacecraft was
+    therefore silently dispersing the TOTAL mass under that name --
+    bounds picked to disperse just the dry mass actually dispersed dry
+    mass + propellant, quietly shrinking the effective dry-mass spread by
+    exactly the propellant amount on every run, with the station-keeping
+    controller's own (unaffected, independently-tracked) propellant
+    belief silently inconsistent with the result from tick zero. Fixed
+    with two small dispersion subclasses
+    (`_DryMassPlusPropellantUniformDispersion`/
+    `_DryMassPlusPropellantNormalDispersion`) that add the target
+    spacecraft's configured propellant back on top of the generated
+    dry-mass value before it's written to `hub.mHub`, matching
+    `service.py`'s own `initial_mass_kg` computation exactly. Also fixed,
+    same audit: `migrations.migrate()`'s `schema_version` type check used
+    `isinstance(version, int)`, but `bool` is a subclass of `int` in
+    Python, so a malformed `"schema_version": true` silently passed
+    through instead of raising the same clear error every other malformed
+    `schema_version` value gets.
+
+## What Phase 6 (Mission Sequence architecture) adds -- in progress
+
+A GMAT/FreeFlyer-inspired **Resources / Mission Sequence / Output**
+organization, requested directly: separate "what exists" (spacecraft,
+gravity, ground stations, ... -- everything the schema already had) from
+"what happens, in time order" (propagate, maneuver, assign, report,
+conditionals) and "what a run produced". Explicitly NOT a port of GMAT's
+or FreeFlyer's own object model -- the organizing idea (resources vs. a
+time-ordered sequence) is what's borrowed; everywhere Basilisk's own
+architecture is a better fit than copying either tool's shape (its native
+event mechanism, its continuous feedback controllers, its message/recorder
+architecture, its own Monte Carlo framework), this keeps using Basilisk's
+own mechanism rather than reshaping it to look like GMAT/FreeFlyer.
+
+This phase is landing in reviewable stages, matching its own plan: data
+model first (this section), then an execution engine, then file-format/
+GUI-sync work, then the GUI itself -- each stage additive, so every
+existing scenario file and every existing test keeps passing unchanged at
+every step (confirmed after each stage: the full suite's pass count only
+ever grows).
+
+**Data model (`schema/command.py`, `schema/references.py`,
+`schema/validation.py`) -- landed:**
+
+* `schema.command.Command`: one envelope dataclass (`kind`, optional
+  `label`, `params` dict, `children` for `if`/`while` nesting) covering
+  the minimum command set this phase scoped: `propagate` (duration/epoch/
+  event-based stop conditions -- events deliberately limited to periapsis/
+  apoapsis passage for now, meant to be built on Basilisk's own
+  `SimulationBaseClass.EventHandlerClass` rather than a hand-rolled
+  polling loop), `maneuver` (impulsive delta-V, inertial/VNB/RTN frame --
+  VNB/RTN meant to reuse `engine.orbit_maintenance`'s already-written,
+  already-tested `_vnb_basis`/`_rtn_basis` helpers), `assignment`,
+  `report`, `if`/`while`, `script_block`. One envelope dataclass rather
+  than one Python class per kind, matching the exact shape
+  `SensorConfig`/`ActuatorConfig`/`fsw_params` already use in this schema
+  for the same reason (very different per-kind shapes, no
+  discriminated-union (de)serialization mechanism elsewhere in this
+  schema to reuse). Targeting/optimization commands are explicitly out of
+  scope for now, per this feature's own scoping decision.
+* `Command.validate()` is a COLLECTING validator -- returns every problem
+  found in a command (and its `children` subtree) as a list, each with an
+  item path, rather than raising on the first one. `Scenario.validate()`
+  (unchanged, still raise-fast, exactly as before this phase) now also
+  walks `mission_sequence`, folding each command's collected errors into
+  one combined message per command -- still raise-fast ACROSS commands,
+  preserving that method's existing behavior/contract exactly.
+  `schema.validation.validate_all(scenario)` is the genuinely
+  fully-collecting entry point requested: every command's every problem,
+  plus every dangling spacecraft/ground-station reference across the
+  whole sequence, all at once -- stated plainly in its own docstring that
+  the RESOURCE side of that same call is still at-most-one-message (since
+  it delegates to the unchanged, raise-fast `scenario.validate()`
+  rather than retrofitting ~15 existing resource validators into
+  collecting ones, which was judged out of proportion to this change).
+* `Scenario.mission_sequence: list[Command] = []` -- additive, empty by
+  default, so it changes nothing about how any existing scenario file
+  loads, validates, or runs; `engine.service.SimulationService.run()`/
+  `run_live()` are untouched. Round-trips losslessly through the existing
+  JSON format (`Command` is a plain dataclass, so `dataclasses.asdict()`
+  -- already how `Scenario.to_dict()` works -- recurses through it with
+  no extra code; only the read direction needed a hand-written
+  `Command.from_dict()`, matching every other nested dataclass in
+  `Scenario.from_dict()`). The existing JSON file format itself now
+  reads as GMAT's `BeginMissionSequence` split in miniature -- every
+  existing top-level field is "resources", the new `mission_sequence` key
+  is the sequence -- without inventing a new text format.
+* `schema.references`: `find_spacecraft_references()`/
+  `find_ground_station_references()` (an empty list means "safe to
+  delete" -- GMAT's own "delete refused, listing every referencing item"
+  behavior, which this project's spacecraft/ground-station list widgets
+  did not have before this: `_on_remove()` deleted unconditionally, with
+  no reference check of any kind, confirmed by reading both before
+  writing this) and `rename_spacecraft()`/`rename_ground_station()`
+  (FreeFlyer's "rename symbol" behavior -- renames the resource AND
+  every reference to it, atomically). Every reference site is hand-listed
+  (`phasing_keeping.chief_spacecraft`, Monte Carlo `dispersion.
+  spacecraft`, `fsw_params['target_ground_station']`, and every command
+  kind/nesting depth that can name a resource) rather than found via
+  generic reflection, matching this schema's own established style
+  (explicit and auditable over generic) at the cost of needing a new
+  entry here whenever a new reference site is added elsewhere.
+
+**Verification:** 62 new tests (`tests/test_command.py`,
+`tests/test_references.py`, `tests/test_validation.py`, plus additions to
+`tests/test_scenario_schema.py`), all Basilisk-independent (this whole
+layer has no Basilisk import) -- model round-trip (including through a
+real `save()`/`load_scenario()` file round-trip, and an explicit
+command-ordering/reordering check), reference-integrity (find/rename,
+including references nested inside `if`/`while` and the dotted-path form
+`assignment.target` uses), and collecting-validation (multiple bad
+commands and multiple dangling references, all reported at once, not just
+the first). Full suite after this stage: 430 passed, 22 skipped (was 366
+passed/22 skipped before -- the 22 skips are unrelated, pre-existing
+`requires_basilisk` tests; zero regressions, zero new skips, since this
+stage adds no Basilisk-dependent code).
+
+**Not yet landed (this phase's remaining stages):** the execution engine
+(`engine.mission_engine`, walking `mission_sequence` against a real
+`SimulationService`, verified against `examples/scenarioOrbitManeuver.py`
+-- an official Basilisk example doing exactly this -- and this checkout's
+own `hubEffector`/`spacecraft` C++ source before any of it was written,
+per this project's "no guessing about a Basilisk API" discipline); Command
+Summary capture; the GUI (Resources/Mission/Output dock panels, script
+editor, debug console) -- see this file's own design-discussion notes for
+the detailed staged plan.
+
 ## Repository layout
 
 ```
@@ -585,6 +1046,9 @@ missionStudio/
     schema/
       scenario.py                    -- Scenario and friends, validation, save/load
       migrations.py                  -- schema-version migration registry
+      command.py                     -- Phase 6: Command (Mission Sequence), collecting validate()
+      references.py                  -- Phase 6: reference-integrity (find/rename) for resources + commands
+      validation.py                  -- Phase 6: validate_all() -- fully-collecting scenario-wide validation
     engine/
       time_system.py                 -- UTC/TAI/TT/ET, single source of truth (needs Basilisk)
       kernels.py                     -- SPICE kernel fetch/status (needs Basilisk)
@@ -595,12 +1059,17 @@ missionStudio/
       vizard.py                      -- Phase 2: Vizard integration (needs Basilisk, imported lazily)
       monte_carlo.py                 -- Phase 3: Basilisk.utilities.MonteCarlo bridge (needs Basilisk)
       link_budget.py                 -- Phase 4: downlink RF link-margin estimate (no Basilisk needed)
-      orbit_maintenance.py           -- Phase 4: station-keeping + phasing-keeping controllers, delta-V/propellant bookkeeping (needs Basilisk)
+      orbit_maintenance.py           -- Phase 4/5: station-keeping + phasing-keeping + constant-frame-thrust controllers, delta-V/propellant bookkeeping (needs Basilisk)
+      propellant_bookkeeping.py      -- Phase 5: shared per-tick mass/propellant delta math (no Basilisk needed)
       constellation.py               -- Phase 4: Walker-pattern constellation generator + SeparationSchedule (no Basilisk needed)
+      spacecraft_templates.py        -- Phase 5: reusable spacecraft "bus" templates (no Basilisk needed)
     gui/
       app.py                         -- QApplication entry point
-      main_window.py                 -- MainWindow: File/Run menus, ties everything together
+      theme.py                       -- Phase 5: app-wide QSS stylesheet + palette
+      icons.py                       -- Phase 5: procedurally-drawn app icon
+      main_window.py                 -- MainWindow: File/Run menus + toolbar, ties everything together
       scenario_editor.py             -- the full scenario form + live validation
+      propagation_setup_dialog.py    -- Phase 5: gravity/perturbations + integrator + space weather, one dedicated window
       spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW, power/propulsion/link budget)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
       vizard_dialog.py               -- Phase 2: "enable Vizard for the next run" dialog
@@ -608,6 +1077,7 @@ missionStudio/
       ground_station_editor.py       -- ground station list + add/edit/remove dialog
       orbit_ic_widget.py             -- classical-elements (true/mean anomaly)/Cartesian/TLE orbit editor
       constellation_dialog.py        -- Phase 4: "Generate Walker constellation" dialog
+      spacecraft_template_dialog.py  -- Phase 5: "New from template" picker dialog
       kernel_status_widget.py        -- SPICE kernel status panel
       results_widget.py              -- matplotlib results plot + CSV export
       run_worker.py                  -- SimulationService/Monte Carlo on a background QThread
@@ -617,6 +1087,9 @@ missionStudio/
   tests/
     conftest.py                      -- requires_basilisk / requires_gui auto-skip markers
     test_scenario_schema.py
+    test_command.py                    -- Phase 6
+    test_references.py                 -- Phase 6
+    test_validation.py                 -- Phase 6
     test_spaceweather.py
     test_results.py
     test_link_budget.py              -- Phase 4
@@ -632,6 +1105,7 @@ missionStudio/
       test_ground_station_editor.py
       test_constellation_dialog.py   -- Phase 4
       test_scenario_editor.py
+      test_propagation_setup_dialog.py
       test_results_widget.py
       test_kernel_status_widget.py
       test_run_worker.py

@@ -29,31 +29,23 @@ sensors/actuators/FSW modes, which this editor deliberately omits).
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
-    QDoubleSpinBox,
-    QFileDialog,
+    QDialog,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from ..schema.scenario import (
-    SUPPORTED_CENTRAL_BODIES,
-    SUPPORTED_INTEGRATORS,
     GravityConfig,
-    MonteCarloConfig,
     Scenario,
     ScenarioValidationError,
     SimSettings,
@@ -86,9 +78,7 @@ class ScenarioEditorWidget(QWidget):
         layout = QVBoxLayout(content)
 
         layout.addWidget(self._build_identity_group())
-        layout.addWidget(self._build_gravity_group())
-        layout.addWidget(self._build_sim_settings_group())
-        layout.addWidget(self._build_space_weather_group())
+        layout.addWidget(self._build_propagation_group())
         layout.addWidget(self._build_spacecraft_group())
         layout.addWidget(self._build_ground_station_group())
         layout.addWidget(self._build_monte_carlo_group())
@@ -109,6 +99,30 @@ class ScenarioEditorWidget(QWidget):
         self.name_edit.textChanged.connect(self.changed)
         form.addRow("Name", self.name_edit)
 
+        # First choice in the form, deliberately -- per the feature
+        # request this responds to, simulation mode should be picked
+        # "before starting with anything else". "Orbit only" is a
+        # stricter, beginner-friendly mode: Scenario.validate() rejects
+        # any spacecraft with fsw_mode/sensors/actuators/power set while
+        # this is selected (see Scenario.simulation_mode's docstring) --
+        # switching TO "Orbit only" on a scenario that already has those
+        # set will make Save/Run fail with a specific error naming what to
+        # remove, same "surface it, don't silently drop it" discipline as
+        # everywhere else in this app.
+        self.simulation_mode_combo = QComboBox()
+        self.simulation_mode_combo.addItem("Full attitude (sensors, actuators, FSW, power)",
+                                            userData="full_attitude")
+        self.simulation_mode_combo.addItem("Orbit only (cannonball -- no attitude features)",
+                                            userData="orbit_only")
+        self.simulation_mode_combo.setToolTip(
+            "Full attitude: sensors, actuators, FSW pointing/control, and power budgets are all available.\n"
+            "Orbit only: a simpler cannonball spacecraft (drag_area_m2/srp_area_m2 as its average cross-section) "
+            "for pure orbit-propagation questions (delta-V budgets, orbit lifetime, station-keeping cadence, ...) "
+            "-- no sensors/actuators/FSW/power on any spacecraft in this mode."
+        )
+        self.simulation_mode_combo.currentIndexChanged.connect(self.changed)
+        form.addRow("Simulation mode", self.simulation_mode_combo)
+
         self.epoch_edit = QLineEdit("2030-01-01T00:00:00")
         self.epoch_edit.setPlaceholderText("ISO 8601 UTC, e.g. 2030-01-01T00:00:00")
         self.epoch_edit.textChanged.connect(self.changed)
@@ -120,118 +134,66 @@ class ScenarioEditorWidget(QWidget):
         form.addRow("Description", self.description_edit)
         return group
 
-    def _build_gravity_group(self) -> QGroupBox:
-        group = QGroupBox("Gravity")
-        form = QFormLayout(group)
+    def _build_propagation_group(self) -> QGroupBox:
+        """Gravity/perturbations, integrator/duration, and space weather
+        all live in a dedicated :class:`PropagationSetupDialog` now (user
+        feedback specifically asked for "a full and comprehensive
+        propagate setup window" plus the ability to switch each
+        perturbation on/off individually) -- this group box is just a
+        read-only summary of the current settings plus the button that
+        opens it. ``self._gravity``/``self._sim_settings``/
+        ``self._space_weather`` are this widget's actual source of truth
+        for those three dataclasses (mirroring how ``self.spacecraft_list``
+        owns the spacecraft list); the dialog only ever replaces them
+        wholesale, on OK.
+        """
+        self._gravity = GravityConfig()
+        self._sim_settings = SimSettings()
+        self._space_weather = SpaceWeatherConfig()
 
-        self.central_body_combo = QComboBox()
-        self.central_body_combo.addItems(SUPPORTED_CENTRAL_BODIES)
-        self.central_body_combo.setCurrentText("earth")
-        self.central_body_combo.currentTextChanged.connect(self._on_central_body_changed)
-        self.central_body_combo.currentTextChanged.connect(self.changed)
-        form.addRow("Central body", self.central_body_combo)
-
-        self.central_body_degree_spin = QSpinBox()
-        self.central_body_degree_spin.setRange(0, 360)
-        self.central_body_degree_spin.setToolTip("0 = point-mass gravity. >0 = spherical harmonics (Earth only).")
-        self.central_body_degree_spin.valueChanged.connect(self.changed)
-        form.addRow("Spherical-harmonics degree/order (0 = point-mass)", self.central_body_degree_spin)
-
-        self.third_body_list = QListWidget()
-        self.third_body_list.setFixedHeight(90)
-        self.third_body_list.itemChanged.connect(self.changed)
-        form.addRow("Third-body perturbers", self.third_body_list)
-        self._refresh_third_body_choices()
-
+        group = QGroupBox("Propagation setup")
+        layout = QVBoxLayout(group)
+        self.propagation_summary_label = QLabel()
+        self.propagation_summary_label.setWordWrap(True)
+        layout.addWidget(self.propagation_summary_label)
+        edit_button = QPushButton("Edit Propagation Setup...")
+        edit_button.clicked.connect(self._on_edit_propagation_setup)
+        layout.addWidget(edit_button)
+        self._refresh_propagation_summary()
         return group
 
-    def _on_central_body_changed(self, _text: str) -> None:
-        self._refresh_third_body_choices()
+    def _on_edit_propagation_setup(self) -> None:
+        from .propagation_setup_dialog import PropagationSetupDialog
 
-    def _refresh_third_body_choices(self, checked: list | None = None) -> None:
-        checked = set(checked) if checked is not None else self._checked_third_bodies()
-        central = self.central_body_combo.currentText()
-        self.third_body_list.blockSignals(True)
-        self.third_body_list.clear()
-        for body in SUPPORTED_CENTRAL_BODIES:
-            if body == central:
-                continue
-            item = QListWidgetItem(body)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if body in checked else Qt.CheckState.Unchecked)
-            self.third_body_list.addItem(item)
-        self.third_body_list.blockSignals(False)
+        dialog = PropagationSetupDialog(self._gravity, self._sim_settings, self._space_weather, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._gravity = dialog.to_gravity()
+            self._sim_settings = dialog.to_sim_settings()
+            self._space_weather = dialog.to_space_weather()
+            self._refresh_propagation_summary()
+            self.changed.emit()
 
-    def _checked_third_bodies(self) -> list:
-        result = []
-        for i in range(self.third_body_list.count()):
-            item = self.third_body_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                result.append(item.text())
-        return result
-
-    def _build_sim_settings_group(self) -> QGroupBox:
-        group = QGroupBox("Simulation settings")
-        form = QFormLayout(group)
-
-        self.duration_days_spin = QDoubleSpinBox()
-        self.duration_days_spin.setRange(0.0001, 100000.0)
-        self.duration_days_spin.setDecimals(4)
-        self.duration_days_spin.setValue(1.0)
-        self.duration_days_spin.valueChanged.connect(self.changed)
-        form.addRow("Duration [days]", self.duration_days_spin)
-
-        self.task_rate_spin = QDoubleSpinBox()
-        self.task_rate_spin.setRange(0.001, 1.0e6)
-        self.task_rate_spin.setDecimals(3)
-        self.task_rate_spin.setValue(10.0)
-        self.task_rate_spin.valueChanged.connect(self.changed)
-        form.addRow("Dynamics task rate [s]", self.task_rate_spin)
-
-        self.integrator_combo = QComboBox()
-        self.integrator_combo.addItems(SUPPORTED_INTEGRATORS)
-        self.integrator_combo.setCurrentText("rkf78")
-        self.integrator_combo.currentTextChanged.connect(self.changed)
-        form.addRow("Integrator", self.integrator_combo)
-
-        return group
-
-    def _build_space_weather_group(self) -> QGroupBox:
-        group = QGroupBox("Space weather (drives atmospheric drag when enabled -- see README.md)")
-        form = QFormLayout(group)
-
-        self.space_weather_source_combo = QComboBox()
-        self.space_weather_source_combo.addItems(["celestrak", "local_file", "synthetic"])
-        self.space_weather_source_combo.currentTextChanged.connect(self._on_space_weather_source_changed)
-        self.space_weather_source_combo.currentTextChanged.connect(self.changed)
-        form.addRow("Source", self.space_weather_source_combo)
-
-        local_file_row = QHBoxLayout()
-        self.local_file_edit = QLineEdit()
-        self.local_file_edit.textChanged.connect(self.changed)
-        self.local_file_browse_button = QPushButton("Browse...")
-        self.local_file_browse_button.clicked.connect(self._on_browse_local_file)
-        local_file_row.addWidget(self.local_file_edit)
-        local_file_row.addWidget(self.local_file_browse_button)
-        form.addRow("Local file (used as fallback, or directly if source=local_file)", local_file_row)
-
-        self._on_space_weather_source_changed(self.space_weather_source_combo.currentText())
-        return group
-
-    def _on_space_weather_source_changed(self, source: str) -> None:
-        self.local_file_edit.setEnabled(source == "local_file")
-        self.local_file_browse_button.setEnabled(source == "local_file")
-
-    def _on_browse_local_file(self) -> None:
-        path, _filter = QFileDialog.getOpenFileName(self, "Select space-weather CSV", "", "CSV files (*.csv)")
-        if path:
-            self.local_file_edit.setText(path)
+    def _refresh_propagation_summary(self) -> None:
+        gravity, sim, sw = self._gravity, self._sim_settings, self._space_weather
+        gravity_bits = [gravity.central_body]
+        gravity_bits.append(
+            f"spherical harmonics (degree {gravity.central_body_degree})"
+            if gravity.central_body_degree > 0 else "point-mass"
+        )
+        if gravity.third_body_perturbers:
+            gravity_bits.append("+" + ", ".join(gravity.third_body_perturbers))
+        self.propagation_summary_label.setText(
+            f"{' | '.join(gravity_bits)}\n"
+            f"{sim.integrator}, {sim.dynamics_task_rate_s:g} s step, {sim.duration_days:g} day(s)\n"
+            f"space weather: {sw.source}"
+        )
 
     def _build_spacecraft_group(self) -> QGroupBox:
         group = QGroupBox("Spacecraft")
         layout = QVBoxLayout(group)
         self.spacecraft_list = SpacecraftListWidget()
-        self.spacecraft_list.set_central_body_provider(lambda: self.central_body_combo.currentText())
+        self.spacecraft_list.set_central_body_provider(lambda: self._gravity.central_body)
+        self.spacecraft_list.set_simulation_mode_provider(lambda: self.simulation_mode_combo.currentData())
         self.spacecraft_list.changed.connect(self.changed)
         self.spacecraft_list.changed.connect(self._refresh_monte_carlo_spacecraft_names)
         layout.addWidget(self.spacecraft_list)
@@ -263,21 +225,11 @@ class ScenarioEditorWidget(QWidget):
         scenario = Scenario(
             name=self.name_edit.text().strip(),
             epoch_utc=self.epoch_edit.text().strip(),
+            simulation_mode=self.simulation_mode_combo.currentData(),
             description=self.description_edit.toPlainText(),
-            gravity=GravityConfig(
-                central_body=self.central_body_combo.currentText(),
-                central_body_degree=self.central_body_degree_spin.value(),
-                third_body_perturbers=self._checked_third_bodies(),
-            ),
-            sim_settings=SimSettings(
-                duration_days=self.duration_days_spin.value(),
-                dynamics_task_rate_s=self.task_rate_spin.value(),
-                integrator=self.integrator_combo.currentText(),
-            ),
-            space_weather=SpaceWeatherConfig(
-                source=self.space_weather_source_combo.currentText(),
-                local_file_path=self.local_file_edit.text().strip() or None,
-            ),
+            gravity=self._gravity,
+            sim_settings=self._sim_settings,
+            space_weather=self._space_weather,
             spacecraft=self.spacecraft_list.to_list(),
             ground_stations=self.ground_station_list.to_list(),
             monte_carlo=self.monte_carlo_group.to_dataclass(),
@@ -288,18 +240,15 @@ class ScenarioEditorWidget(QWidget):
     def from_scenario(self, scenario: Scenario) -> None:
         self.name_edit.setText(scenario.name)
         self.epoch_edit.setText(scenario.epoch_utc)
+        mode_index = self.simulation_mode_combo.findData(scenario.simulation_mode)
+        if mode_index >= 0:
+            self.simulation_mode_combo.setCurrentIndex(mode_index)
         self.description_edit.setPlainText(scenario.description)
 
-        self.central_body_combo.setCurrentText(scenario.gravity.central_body)
-        self.central_body_degree_spin.setValue(scenario.gravity.central_body_degree)
-        self._refresh_third_body_choices(scenario.gravity.third_body_perturbers)
-
-        self.duration_days_spin.setValue(scenario.sim_settings.duration_days)
-        self.task_rate_spin.setValue(scenario.sim_settings.dynamics_task_rate_s)
-        self.integrator_combo.setCurrentText(scenario.sim_settings.integrator)
-
-        self.space_weather_source_combo.setCurrentText(scenario.space_weather.source)
-        self.local_file_edit.setText(scenario.space_weather.local_file_path or "")
+        self._gravity = scenario.gravity
+        self._sim_settings = scenario.sim_settings
+        self._space_weather = scenario.space_weather
+        self._refresh_propagation_summary()
 
         self.spacecraft_list.from_list(scenario.spacecraft)
         self.ground_station_list.from_list(scenario.ground_stations)

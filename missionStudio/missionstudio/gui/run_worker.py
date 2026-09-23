@@ -39,11 +39,20 @@ from ..schema.scenario import MonteCarloConfig, Scenario
 class RunWorker(QThread):
     finished_ok = Signal(object)  # engine.results.ResultSet
     failed = Signal(str)
+    progress = Signal(object, float)  # engine.results.ResultSet (partial), fraction_complete in [0, 1]
 
-    def __init__(self, scenario: Scenario, vizard_request: Optional[object] = None, parent=None):
+    def __init__(self, scenario: Scenario, vizard_request: Optional[object] = None, live: bool = False, parent=None):
         super().__init__(parent)
         self.scenario = scenario
         self.vizard_request = vizard_request  # engine.vizard.VizardRequest, or None
+        # When True, runs via SimulationService.run_live() instead of
+        # run(), emitting `progress` after each chunk so a connected
+        # ResultsWidget can redraw as the simulation goes -- see
+        # MainWindow.on_run()/the "Live plot" toggle. Qt signals emitted
+        # from a QThread are queued to the receiver's own thread
+        # automatically (the default AutoConnection), so this is safe to
+        # connect straight to GUI-thread slots without extra locking.
+        self.live = live
 
     def run(self) -> None:
         try:
@@ -56,7 +65,10 @@ class RunWorker(QThread):
             return
         try:
             service = SimulationService(self.scenario, vizard_request=self.vizard_request)
-            result = service.run()
+            if self.live:
+                result = service.run_live(lambda partial, fraction: self.progress.emit(partial, fraction))
+            else:
+                result = service.run()
         except Exception as exc:  # noqa: BLE001 -- surface ANY failure to the GUI, never crash the worker silently
             self.failed.emit(str(exc))
             return
