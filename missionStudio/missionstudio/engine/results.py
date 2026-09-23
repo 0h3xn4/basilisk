@@ -60,7 +60,19 @@ class TimeSeries:
         self.time_s = np.asarray(self.time_s, dtype=float)
         self.data = np.asarray(self.data, dtype=float)
         if self.data.ndim == 1:
-            self.data = self.data.reshape(-1, 1)
+            # A recorder that never logged a single sample (e.g.
+            # engine.mission_engine.MissionEngine.run() on a
+            # mission_sequence with no propagate command in it at all --
+            # ExecuteSimulation() is never called, so Basilisk's own
+            # recorder .r_BN_N-style accessor returns a bare 1-D array of
+            # shape (0,) rather than (0, len(columns)), losing the column
+            # count entirely) can't be told apart from a genuinely
+            # single-column series by shape alone once it's empty -- trust
+            # the caller-supplied `columns` for the column count in that
+            # case rather than guessing 1 (confirmed reachable directly
+            # against a real Basilisk build; not a hypothetical).
+            self.data = self.data.reshape(0, len(self.columns)) if self.data.shape[0] == 0 \
+                else self.data.reshape(-1, 1)
         if self.data.shape[0] != self.time_s.shape[0]:
             raise ResultsError(
                 f"TimeSeries {self.name!r}: time_s has {self.time_s.shape[0]} samples but "

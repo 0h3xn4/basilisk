@@ -33,12 +33,14 @@ def _circular_orbit(semi_major_axis_km=7000.0, inclination_deg=51.6, eccentricit
     )
 
 
-def _scenario(duration_days=0.2, dynamics_task_rate_s=10.0, mission_sequence=None, **spacecraft_overrides):
+def _scenario(duration_days=0.2, dynamics_task_rate_s=10.0, mission_sequence=None, third_body_perturbers=(),
+              **spacecraft_overrides):
     spacecraft_kwargs = dict(name="sat-1", orbit=_circular_orbit())
     spacecraft_kwargs.update(spacecraft_overrides)
     return Scenario(
         name="mission engine test", epoch_utc="2030-01-01T00:00:00",
-        gravity=GravityConfig(central_body="earth", central_body_degree=0, third_body_perturbers=[]),
+        gravity=GravityConfig(central_body="earth", central_body_degree=0,
+                               third_body_perturbers=list(third_body_perturbers)),
         spacecraft=[SpacecraftConfig(**spacecraft_kwargs)],
         sim_settings=SimSettings(duration_days=duration_days, dynamics_task_rate_s=dynamics_task_rate_s,
                                   integrator="rkf78"),
@@ -168,15 +170,32 @@ def test_propagate_event_periapsis_stops_near_zero_radial_velocity():
 
 
 def test_propagate_event_unknown_spacecraft_raises():
+    """MissionEngine's own "unknown spacecraft" check in
+    _run_propagate_event is unreachable through a normal Scenario, since
+    schema.validation/Scenario.validate() (run inside build()) already
+    rejects a mission_sequence command naming a spacecraft that isn't in
+    scenario.spacecraft -- confirmed directly (this was originally written
+    expecting MissionEngineError and instead hit ScenarioValidationError).
+    Reaches the engine's own defensive check instead via the documented
+    "reuse an already-built service" path: a service built from a
+    scenario that legitimately has "sat-1" is deliberately paired here
+    with a DIFFERENT scenario (only used for its mission_sequence) that
+    references a name the built service was never given -- the one real
+    way this class's own check is reachable, not a contrived one.
+    """
     from missionstudio.engine.mission_engine import MissionEngine, MissionEngineError
+    from missionstudio.engine.service import SimulationService
 
-    scenario = _scenario(mission_sequence=[
+    service = SimulationService(_scenario())  # only ever knows about "sat-1"
+    service.build()
+
+    mismatched_scenario = _scenario(mission_sequence=[
         Command(kind="propagate", params={
             "stop_condition": "event", "event_kind": "periapsis", "spacecraft": "does-not-exist",
         }),
     ])
     with pytest.raises(MissionEngineError, match="unknown spacecraft"):
-        MissionEngine(scenario).run()
+        MissionEngine(mismatched_scenario, service=service).run()
 
 
 def _read_velocity_state(handle):
@@ -235,13 +254,23 @@ def test_maneuver_vnb_prograde_increases_speed_by_exact_magnitude():
 
 
 def test_maneuver_unknown_spacecraft_raises():
+    """See test_propagate_event_unknown_spacecraft_raises's docstring for
+    why this needs a pre-built, deliberately mismatched service rather
+    than a plain Scenario -- Scenario.validate() (run inside build())
+    already rejects an unknown spacecraft name in mission_sequence before
+    MissionEngine's own check would ever run.
+    """
     from missionstudio.engine.mission_engine import MissionEngine, MissionEngineError
+    from missionstudio.engine.service import SimulationService
 
-    scenario = _scenario(mission_sequence=[
+    service = SimulationService(_scenario())  # only ever knows about "sat-1"
+    service.build()
+
+    mismatched_scenario = _scenario(mission_sequence=[
         Command(kind="maneuver", params={"spacecraft": "ghost", "delta_v_m_s": [1.0, 0.0, 0.0]}),
     ])
     with pytest.raises(MissionEngineError, match="unknown spacecraft"):
-        MissionEngine(scenario).run()
+        MissionEngine(mismatched_scenario, service=service).run()
 
 
 def test_assignment_updates_live_station_keeping_thrust():
@@ -249,7 +278,11 @@ def test_assignment_updates_live_station_keeping_thrust():
 
     scenario = _scenario(mission_sequence=[
         Command(kind="assignment", params={"target": "sat-1.station_keeping.thrust_n", "value": 0.5}),
-    ], station_keeping=StationKeepingConfig(
+    ], third_body_perturbers=["sun"], station_keeping=StationKeepingConfig(
+        # station_keeping needs the real eclipse shadow factor (see
+        # engine/service.py's build()), which needs 'sun' SPICE-tracked --
+        # third_body_perturbers=["sun"] above, not just a schema-level
+        # requirement: SimulationServiceError otherwise.
         target_altitude_km=7000.0, deadband_km=1.0, thrust_n=0.1, isp_s=200.0, propellant_kg=1.0,
     ))
     engine = MissionEngine(scenario)

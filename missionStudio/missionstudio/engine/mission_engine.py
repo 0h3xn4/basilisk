@@ -180,6 +180,24 @@ class MissionEngine:
         self.scenario = scenario
         self.service = service or SimulationService(scenario)
         self._event_counter = 0
+        # The cumulative REQUESTED mission time [ns] each propagate command's
+        # absolute ConfigureStopTime() target is built from -- deliberately
+        # NOT read back from scSim.TotalSim.CurrentNanos after each call.
+        # Confirmed directly against sim_model.cpp: CurrentNanos is set to
+        # NextTaskTime, i.e. it snaps DOWN to the last task-grid point <=
+        # the requested stop time (SimBaseClass.CheckStopCondition() keeps
+        # stepping only "while NextTaskTime <= StopTime"), so a requested
+        # duration that isn't an exact multiple of dynamics_task_rate_s
+        # loses up to one tick every time. Basing each new segment's target
+        # on CurrentNanos would silently COMPOUND that loss across segments
+        # (three chained propagate commands ending up short of where one
+        # equivalent-duration propagate would land) -- caught by this
+        # project's own test_multiple_propagate_segments_accumulate_not_restart
+        # once actually run against a real Basilisk build. propagate's
+        # "event" stop condition is the one exception (see
+        # _run_propagate_event): there is no requested target to track, so
+        # it re-syncs this to the ACTUAL (grid-snapped) firing time instead.
+        self._elapsed_ns = 0
 
     def run(self) -> Tuple[ResultSet, CommandSummary]:
         """Builds (if not already built) the underlying
@@ -232,23 +250,23 @@ class MissionEngine:
 
         stop_condition = command.params.get("stop_condition", "duration")
         if stop_condition == "duration":
-            target_ns = self.service.scSim.TotalSim.CurrentNanos + macros.sec2nano(
-                command.params["duration_days"] * 86400.0
-            )
+            target_ns = self._elapsed_ns + macros.sec2nano(command.params["duration_days"] * 86400.0)
             self.service.scSim.ConfigureStopTime(target_ns)
             self.service.scSim.ExecuteSimulation()
+            self._elapsed_ns = target_ns
         elif stop_condition == "epoch":
             stop_epoch_utc = command.params["stop_epoch_utc"]
             stop_epoch = datetime.fromisoformat(stop_epoch_utc)
             start_epoch = datetime.fromisoformat(self.scenario.epoch_utc)
             target_ns = macros.sec2nano((stop_epoch - start_epoch).total_seconds())
-            if target_ns <= self.service.scSim.TotalSim.CurrentNanos:
+            if target_ns <= self._elapsed_ns:
                 raise MissionEngineError(
                     f"{path}: propagate.stop_epoch_utc {stop_epoch_utc!r} is not after the current mission "
                     "time -- stop_epoch_utc is an absolute epoch, not an offset"
                 )
             self.service.scSim.ConfigureStopTime(target_ns)
             self.service.scSim.ExecuteSimulation()
+            self._elapsed_ns = target_ns
         else:  # "event" -- validated by Command.validate()
             self._run_propagate_event(command, path)
 
@@ -308,7 +326,7 @@ class MissionEngine:
         )
 
         cap_days = max(self.scenario.sim_settings.duration_days, 1.0) * _EVENT_PROPAGATE_SAFETY_MULTIPLIER  # [d]
-        cap_ns = self.service.scSim.TotalSim.CurrentNanos + macros.sec2nano(cap_days * 86400.0)
+        cap_ns = self._elapsed_ns + macros.sec2nano(cap_days * 86400.0)
         self.service.scSim.terminate = False
         self.service.scSim.ConfigureStopTime(cap_ns)
         self.service.scSim.ExecuteSimulation()
@@ -319,6 +337,11 @@ class MissionEngine:
                 f"did not occur within the {cap_days:.1f}-day safety cap"
             )
         self.service.scSim.terminate = False  # so a later propagate command's ExecuteSimulation() isn't cut short
+        # Unlike duration/epoch, there is no "requested" target here -- the
+        # event fired at whatever (task-grid-snapped) instant Basilisk
+        # actually detected it, so that IS the new baseline, not something
+        # to track separately.
+        self._elapsed_ns = self.service.scSim.TotalSim.CurrentNanos
 
     # -- maneuver ----------------------------------------------------------
 
