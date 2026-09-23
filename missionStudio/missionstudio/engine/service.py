@@ -175,27 +175,6 @@ _INTEGRATORS = {
     "rkf78": svIntegrators.svIntegratorRKF78,
 }
 
-# "rkf45"/"rkf78" (svIntegratorAdaptiveRungeKutta subclasses -- "euler"/"rk2"
-# are plain fixed-step svIntegratorRungeKutta and have no tolerance to set)
-# ship a Basilisk-wide default relative tolerance of 1e-4
-# (svIntegratorAdaptiveRungeKutta.h's own `relTol = 1e-4` default), which
-# every official Basilisk example also leaves untouched. For an orbit-scale
-# state (~1e6-1e7 m position magnitude), that tolerance allows hundreds of
-# meters of per-step truncation error -- confirmed directly against a real
-# Basilisk build via tests/test_two_body_validation.py, which measured a
-# ~202 m position error / ~1e-6 relative energy drift over a 0.2-day,
-# ~3-orbit LEO run at the default tolerance (matching this scale of
-# tolerance, not a propagation bug -- see that fix's commit message).
-# Tightened here for BOTH adaptive integrators to what the schema's own
-# selection of "a high-order adaptive integrator" implies users actually
-# want (sub-mm-scale accuracy, matching this project's own two-body
-# validation test's documented expectation) -- 6 orders of magnitude
-# tighter than the default, scaling the same empirically-observed ~200 m
-# error down to sub-millimeter. ``absTol`` is left at Basilisk's own
-# default (1e-8): already negligible next to orbit-scale state magnitudes,
-# so only ``relTol`` (which multiplies the state's own norm) is the lever
-# that matters here.
-_ADAPTIVE_INTEGRATOR_RELATIVE_TOLERANCE = 1e-10  # [-]
 
 # SimulationService.run_live()'s default chunk count when live_step_s isn't
 # given -- about this many on_progress callbacks over the whole run,
@@ -400,6 +379,26 @@ class SimulationService:
                 f"(known: {sorted(_INTEGRATORS)})"
             )
 
+        # sim_settings.dynamics_task_rate_s is not just a logging/output
+        # cadence -- it also bounds how often the SPICE-derived central-body
+        # state (position AND rotation, used directly in the gravity force
+        # computation) gets refreshed, since self.spice_object below runs on
+        # this SAME task. Basilisk only linearly (Euler-step) extrapolates
+        # that state BETWEEN refreshes (see GravBodyData::computeGravityInertial()
+        # and getEulerSteppedGravBodyPosition() in gravityEffector.cpp), so a
+        # coarse rate here introduces a real force-accuracy error even though
+        # the integrator itself (see _INTEGRATORS below) may be far more
+        # accurate than that. Confirmed empirically, not guessed: holding
+        # everything else fixed and only varying this rate on
+        # scenarios/two_body_validation.json made its analytical-comparison
+        # position error scale roughly with the SQUARE of this value (~202 m
+        # at 30 s, ~22 m at 10 s, ~2 m at 3 s, ~0.22 m at 1 s) -- exactly the
+        # signature of a first-order truncation error, and completely
+        # insensitive to the RKF78 integrator's own relative tolerance
+        # (tested directly at both 1e-4 and 1e-14 with no change whatsoever).
+        # That two-body validation scenario uses 1.0 s for exactly this
+        # reason; scenarios that need tighter absolute accuracy than a 30 s
+        # rate provides should do the same.
         self.scSim = SimulationBaseClass.SimBaseClass()
         dyn_process = self.scSim.CreateNewProcess("dynProcess", priority=100)
         dyn_task_name = "dynTask"
@@ -599,10 +598,7 @@ class SimulationService:
             sc_object.hub.r_CN_NInit = r_N
             sc_object.hub.v_CN_NInit = v_N
 
-            integrator = integrator_cls(sc_object)
-            if sim_settings.integrator in ("rkf45", "rkf78"):
-                integrator.setRelativeTolerance(_ADAPTIVE_INTEGRATOR_RELATIVE_TOLERANCE)
-            sc_object.setIntegrator(integrator)
+            sc_object.setIntegrator(integrator_cls(sc_object))
             grav_factory.addBodiesTo(sc_object)
             self.scSim.AddModelToTask(dyn_task_name, sc_object, 10)
 
