@@ -56,9 +56,12 @@ def test_empty_mission_sequence_executes_nothing():
 
     assert summary.commands_executed == 0
     assert summary.reports == []
-    # InitializeSimulation() itself records exactly one (t=0) sample --
-    # ExecuteSimulation() was never called, so time never advances.
-    assert len(result.series["sat-1.position_N"].time_s) == 1
+    # A recorder's first sample only exists once ExecuteSimulation() has
+    # actually ticked at least once -- InitializeSimulation() alone (which
+    # is all build() does here, since no propagate command ever runs)
+    # produces zero samples, confirmed directly against a real Basilisk
+    # build (this assertion originally, wrongly, expected 1).
+    assert len(result.series["sat-1.position_N"].time_s) == 0
 
 
 def test_single_propagate_duration_matches_plain_run():
@@ -348,13 +351,17 @@ def test_report_unknown_series_raises():
 def test_if_true_branch_runs_children():
     from missionstudio.engine.mission_engine import MissionEngine
 
+    # A script_block marker, not a report command: this test is about
+    # if's own branching, not about report's recorder-snapshot semantics
+    # (a report has nothing to snapshot until a propagate command has
+    # actually run at least once -- see _run_report's own guard).
     scenario = _scenario(mission_sequence=[
         Command(kind="if", params={"condition": "t_s == 0.0"}, children=[
-            Command(kind="report", params={"series": []}, label="ran"),
+            Command(kind="script_block", params={"code": "summary.reports.append('ran')"}),
         ]),
     ])
     _, summary = MissionEngine(scenario).run()
-    assert [r.label for r in summary.reports] == ["ran"]
+    assert summary.reports == ["ran"]
 
 
 def test_if_false_branch_skips_children():
@@ -377,11 +384,11 @@ def test_if_condition_can_read_spacecraft_state():
 
     scenario = _scenario(mission_sequence=[
         Command(kind="if", params={"condition": "spacecraft['sat-1']['altitude_m'] > 0"}, children=[
-            Command(kind="report", params={"series": []}, label="above surface"),
+            Command(kind="script_block", params={"code": "summary.reports.append('above surface')"}),
         ]),
     ])
     _, summary = MissionEngine(scenario).run()
-    assert [r.label for r in summary.reports] == ["above surface"]
+    assert summary.reports == ["above surface"]
 
 
 def test_while_loop_runs_expected_iterations_and_terminates():

@@ -451,6 +451,21 @@ class MissionEngine:
         if missing:
             raise MissionEngineError(f"{path}: report.series names not found in the result set: {missing}")
 
+        # A recorder only gets its first sample once ExecuteSimulation() has
+        # actually ticked at least once (InitializeSimulation() alone does
+        # NOT produce one -- confirmed directly, not assumed: see the
+        # ResultSet-construction fix in engine/results.py's TimeSeries), so
+        # a report command placed before any propagate command has ever run
+        # has nothing to snapshot yet. A clear, specific error beats a bare
+        # IndexError from indexing an empty array.
+        empty = [name for name in names if len(result.series[name].time_s) == 0]
+        if empty:
+            raise MissionEngineError(
+                f"{path}: report.series {empty} have no recorded samples yet -- add a propagate command before "
+                "this report (a recorder's first sample only exists once the simulation has actually run, not "
+                "just been built)"
+            )
+
         snapshot = {name: np.array(result.series[name].data[-1]) for name in names}
         t_s = self.service.scSim.TotalSim.CurrentNanos * macros.NANO2SEC
         summary.reports.append(ReportEntry(label=command.label, t_s=t_s, values=snapshot))
