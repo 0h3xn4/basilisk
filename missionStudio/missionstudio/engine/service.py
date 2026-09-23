@@ -411,6 +411,29 @@ class SimulationService:
 
         spice_time_string = time_system.utc_iso_to_spice_string(scenario.epoch_utc)
         self.spice_object = kernels.build_spice_interface(grav_factory, spice_time_string, epoch_in_msg=True)
+        # Re-zero every SPICE ephemeris output on the central body (SPICE's
+        # own observer/"zeroBase" concept -- see spiceInterface.cpp's
+        # spkezr_c call, which queries each body's state relative to
+        # `zeroBase`, defaulting to the solar system barycenter "SSB").
+        # Without this, GravityEffector::updateInertialPosAndVel() (see
+        # gravityEffector.cpp) computes r_BN_N/v_BN_N as the CENTRAL BODY'S
+        # OWN (SSB-relative, heliocentric-scale) position/velocity PLUS the
+        # true central-body-relative integrated state, because it adds
+        # r_CN_N (the central body's own SPICE position) on top of the
+        # propagated r_BF_N whenever a central body is set -- every
+        # consumer of r_BN_N/v_BN_N in this codebase (osculating-element
+        # computation below, engine/orbit_maintenance.py's controllers,
+        # engine/fsw.py's hillPoint/velocityPoint) assumes r_BN_N is
+        # purely central-body-relative, which is only true when the
+        # central body's own SPICE position is zero. Setting zeroBase to
+        # the central body makes exactly that true (the central body's own
+        # planetStateOutMsg reports (0, 0, 0) relative to itself), the
+        # same fix Basilisk's own official example applies for the same
+        # reason -- see examples/scenarioHohmann.py's
+        # `gravFactory.spiceObject.zeroBase = 'Earth'` (SPICE body-name
+        # lookup is case-insensitive, so the lowercase
+        # gravity.central_body value used here resolves the same way).
+        self.spice_object.zeroBase = gravity.central_body
         self.scSim.AddModelToTask(dyn_task_name, self.spice_object, 500)
 
         # -- Phase 2 shared (scenario-level) infrastructure, built once before

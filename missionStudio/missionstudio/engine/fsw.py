@@ -56,10 +56,19 @@ docstring for the full list):
   orbit IC in this app is already given relative to ``gravity.central_body``
   (``central_body.isCentralBody = True``, matching every example scenario
   in this checkout), so the spacecraft's own ``r_BN_N``/``v_BN_N`` from
-  ``simpleNav.transOutMsg`` is already central-body-relative -- leaving
+  ``simpleNav.transOutMsg`` is central-body-relative -- leaving
   ``celBodyInMsg`` unlinked is correct here, not a missing feature (see
   ``hillPoint.h``'s ``planetMsgIsLinked`` flag, which exists precisely to
-  make this optional).
+  make this optional). This DEPENDS on ``engine/service.py`` setting
+  ``spice_object.zeroBase = gravity.central_body`` (see that module's
+  ``build()``): without it, the central body's own SPICE-linked position
+  gets added into every spacecraft's ``r_BN_N``/``v_BN_N``
+  (``GravityEffector::updateInertialPosAndVel()`` in
+  ``gravityEffector.cpp`` always adds the central body's own position on
+  top of the propagated central-body-relative state), which would make
+  this assumption false again -- a real bug this project shipped and only
+  caught once Basilisk actually ran end-to-end (see ``engine/service.py``'s
+  ``zeroBase`` comment for the full explanation).
 * ``locationPointing``'s ``fsw_params["target_body"]`` (point at a
   celestial body directly, vs. a ground station) is schema-valid but NOT
   built here yet -- it needs an ``EphemerisMsg`` (``celBodyInMsg``), which

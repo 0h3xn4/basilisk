@@ -139,7 +139,16 @@ def test_resolve_celestrak_falls_back_when_unreachable_or_insufficient(tmp_path)
     start, end = datetime(2030, 1, 1), datetime(2030, 1, 5)
     resolved = sw.resolve("celestrak", start, end, cache_dir=tmp_path)
     assert resolved.path.exists()
-    assert resolved.warnings, "expected at least one warning explaining what happened"
+    # A clean, real CelesTrak fetch (is_synthetic False, no warnings) is a
+    # perfectly good outcome -- see the docstring above, "either outcome is
+    # a pass". A warning is only expected on the FALLBACK path
+    # (is_synthetic True or a warning-carrying local_file_path substitution);
+    # requiring one unconditionally was a real bug in this test, caught on a
+    # machine where CelesTrak is actually reachable (this project's own
+    # development sandbox never exercised the "success" branch, only the
+    # "blocked" one, so this was never caught until now).
+    if resolved.is_synthetic:
+        assert resolved.warnings, "expected at least one warning explaining the fallback to synthetic data"
     # Whatever happened, the file it points to must itself be valid.
     result = sw.validate_file(resolved.path, start, end)
     assert result.ok, f"resolve() returned an unusable file: {result.message}"
