@@ -55,6 +55,25 @@ discarding whatever this dispersion had just set. See
 those controllers now read ``hub.mHub`` back and only subtract what they
 themselves burn, so a dispersion applied here is preserved correctly.
 
+A second, DIFFERENT ``dry_mass_kg`` bug (also found by audit, also fixed):
+Basilisk's dispersion classes write their generated value ABSOLUTELY to
+the target path, with no way to add anything on top -- but
+``schema.scenario.SpacecraftConfig.dry_mass_kg`` is documented as the
+mass WITHOUT station-keeping/constant-thrust propellant, while
+``hub.mHub`` (this dispersion's actual target) is ``dry_mass_kg +
+propellant`` (see ``service.py``'s own ``initial_mass_kg`` computation).
+Applying a plain ``UniformDispersion``/``NormalDispersion`` straight to
+``hub.mHub`` under the name "dry_mass_kg" would therefore silently
+disperse the TOTAL mass under that name for any spacecraft with
+``station_keeping``/``constant_thrust`` configured -- bounds the user
+picked to disperse just the dry mass would actually disperse dry mass +
+propellant, quietly shrinking the effective dry-mass spread by exactly
+the propellant amount. Fixed with
+:class:`_DryMassPlusPropellantUniformDispersion`/
+:class:`_DryMassPlusPropellantNormalDispersion`, which add that
+spacecraft's configured propellant back on top of the generated
+dry-mass value before it's written to ``hub.mHub``.
+
 Dispersion path resolution
 ---------------------------
 Basilisk's dispersion path strings resolve via attribute access, integer
@@ -161,16 +180,86 @@ def _accessor_name(spacecraft_name: str) -> str:
     return f"get_spacecraft_{safe}"
 
 
-def _build_dispersion(dispersion: DispersionConfig):
+def _propellant_offset_kg(sc_config) -> float:
+    """How much MORE than ``dry_mass_kg`` ``engine.service.build()`` itself
+    puts in ``hub.mHub`` for this spacecraft at t=0 -- see
+    ``schema.scenario.SpacecraftConfig.dry_mass_kg``'s docstring
+    (station-keeping/constant-thrust propellant is additional mass on top
+    of the dry mass, both added if both are configured, mirroring
+    ``service.py``'s own ``initial_mass_kg`` computation exactly).
+    """
+    offset = 0.0
+    if sc_config.station_keeping is not None:
+        offset += sc_config.station_keeping.propellant_kg
+    if sc_config.constant_thrust is not None:
+        offset += sc_config.constant_thrust.propellant_kg
+    return offset
+
+
+class _DryMassPlusPropellantUniformDispersion(UniformDispersion):
+    """A ``dry_mass_kg`` dispersion writes its generated value ABSOLUTELY
+    to ``hub.mHub`` (Basilisk's dispersion framework has no notion of
+    "add this on top of whatever's already there" -- see
+    ``Controller.applyModification``/``setNestedAttr``). But
+    ``hub.mHub`` is not the dry mass for a spacecraft with
+    ``station_keeping``/``constant_thrust`` configured -- it's
+    ``dry_mass_kg + propellant`` (``service.py``'s own
+    ``initial_mass_kg``). Without this adjustment, a
+    ``dry_mass_kg`` dispersion on such a spacecraft would silently
+    disperse the TOTAL mass under that name instead: bounds the user
+    picked to disperse just the dry mass would actually disperse dry
+    mass + propellant, quietly shrinking the effective dry-mass spread
+    by exactly the propellant amount on every run. ``generate()``'s
+    ``self.magnitude``/percent-of-bounds bookkeeping (from the base
+    class) still reflects the DRY-mass draw, since only the final
+    returned value gets the offset added.
+    """
+
+    def __init__(self, varName, bounds, propellant_offset_kg: float):
+        super().__init__(varName, bounds=bounds)
+        self._propellant_offset_kg = propellant_offset_kg
+
+    def generate(self, sim):
+        return super().generate(sim) + self._propellant_offset_kg
+
+
+class _DryMassPlusPropellantNormalDispersion(NormalDispersion):
+    """Same adjustment as :class:`_DryMassPlusPropellantUniformDispersion`,
+    for ``kind="normal"`` dispersions."""
+
+    def __init__(self, varName, mean, stdDeviation, bounds, propellant_offset_kg: float):
+        super().__init__(varName, mean=mean, stdDeviation=stdDeviation, bounds=bounds)
+        self._propellant_offset_kg = propellant_offset_kg
+
+    def generate(self, sim):
+        return super().generate(sim) + self._propellant_offset_kg
+
+
+def _build_dispersion(dispersion: DispersionConfig, scenario: Scenario):
     accessor = _accessor_name(dispersion.spacecraft)
     path = f"{accessor}().{_QUANTITY_PATHS[dispersion.quantity]}"
 
     if dispersion.quantity == "dry_mass_kg":
+        # scenario.validate() (the caller's responsibility -- see
+        # run_monte_carlo()'s docstring) already requires
+        # dispersion.spacecraft to name a real spacecraft in this
+        # scenario, so this lookup cannot fail in practice; the
+        # MonteCarloError below is defensive, matching this module's own
+        # "always a specific, actionable message" discipline rather than
+        # a bare StopIteration/IndexError if that contract is ever violated.
+        sc_config = next((sc for sc in scenario.spacecraft if sc.name == dispersion.spacecraft), None)
+        if sc_config is None:
+            raise MonteCarloError(
+                f"dispersion.spacecraft {dispersion.spacecraft!r} is not one of this scenario's spacecraft"
+            )
+        propellant_offset_kg = _propellant_offset_kg(sc_config)
         if dispersion.kind == "uniform":
-            return UniformDispersion(path, bounds=dispersion.bounds)
+            return _DryMassPlusPropellantUniformDispersion(
+                path, bounds=dispersion.bounds, propellant_offset_kg=propellant_offset_kg)
         if dispersion.kind == "normal":
-            return NormalDispersion(path, mean=dispersion.mean, stdDeviation=dispersion.std_deviation,
-                                     bounds=dispersion.bounds)
+            return _DryMassPlusPropellantNormalDispersion(
+                path, mean=dispersion.mean, stdDeviation=dispersion.std_deviation, bounds=dispersion.bounds,
+                propellant_offset_kg=propellant_offset_kg)
     if dispersion.quantity == "attitude_sigma_bn" and dispersion.kind == "uniform_euler_mrp":
         return UniformEulerAngleMRPDispersion(path, bounds=dispersion.bounds)
 
@@ -257,7 +346,7 @@ def run_monte_carlo(scenario: Scenario, mc_config: MonteCarloConfig, archive_dir
     controller.setArchiveDir(str(archive_dir))
 
     for dispersion in mc_config.dispersions:
-        controller.addDispersion(_build_dispersion(dispersion))
+        controller.addDispersion(_build_dispersion(dispersion, scenario))
 
     controller.addRetentionPolicy(_default_retention_policy(scenario))
 

@@ -892,6 +892,41 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
     reports the width needed to lay its text out on ONE line unless
     something else constrains it -- without a cap, the dialog's intro
     label alone stretched the whole window to ~1360px wide.
+* **Another audit round, two more real bugs found and fixed.** A
+  fan-out re-sweep after the Propagation Setup work landed:
+  * `schema.scenario.GravityConfig.validate()` never checked that
+    spherical-harmonics gravity (`central_body_degree > 0`) is only wired
+    up for Earth -- `engine.service.SimulationService.build()` already
+    rejects any other central body with that combination, but only at
+    simulation time. Without a matching schema-layer check,
+    `missionstudio validate`/`Scenario.save()` (both deliberately
+    Basilisk-independent, meant as an early correctness check) gave a
+    clean bill of health to a scenario guaranteed to fail the moment it
+    was actually run. Now rejected at the schema layer too.
+  * `engine.monte_carlo`'s `dry_mass_kg` dispersion wrote its generated
+    value ABSOLUTELY to `hub.mHub` (Basilisk's dispersion framework has
+    no notion of "add this on top of what's already there") -- but
+    `hub.mHub` is `dry_mass_kg + propellant` for any spacecraft with
+    `station_keeping`/`constant_thrust` configured, not just
+    `dry_mass_kg` (see `SpacecraftConfig.dry_mass_kg`'s own documented
+    contract). A `dry_mass_kg` dispersion on such a spacecraft was
+    therefore silently dispersing the TOTAL mass under that name --
+    bounds picked to disperse just the dry mass actually dispersed dry
+    mass + propellant, quietly shrinking the effective dry-mass spread by
+    exactly the propellant amount on every run, with the station-keeping
+    controller's own (unaffected, independently-tracked) propellant
+    belief silently inconsistent with the result from tick zero. Fixed
+    with two small dispersion subclasses
+    (`_DryMassPlusPropellantUniformDispersion`/
+    `_DryMassPlusPropellantNormalDispersion`) that add the target
+    spacecraft's configured propellant back on top of the generated
+    dry-mass value before it's written to `hub.mHub`, matching
+    `service.py`'s own `initial_mass_kg` computation exactly. Also fixed,
+    same audit: `migrations.migrate()`'s `schema_version` type check used
+    `isinstance(version, int)`, but `bool` is a subclass of `int` in
+    Python, so a malformed `"schema_version": true` silently passed
+    through instead of raising the same clear error every other malformed
+    `schema_version` value gets.
 
 ## Repository layout
 
