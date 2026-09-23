@@ -75,7 +75,6 @@ narrowly as the Phase 6 part 1 schema module's own docstring describes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -84,7 +83,7 @@ import numpy as np
 from ..schema.command import Command
 from ..schema.scenario import Scenario
 from .orbit_maintenance import _rtn_basis, _vnb_basis
-from .results import ResultSet
+from .results import CommandSummary, ReportEntry, ResultSet
 from .service import SimulationService
 
 # A `while` command's condition is user-authored and can easily be wrong
@@ -137,35 +136,6 @@ class MissionEngineError(Exception):
     """
 
 
-@dataclass
-class ReportEntry:
-    """One ``report`` command's result: a snapshot (not a time history --
-    see :class:`MissionEngine`'s ``_run_report`` docstring) of the
-    requested series' most recent values at the mission time this report
-    command ran.
-    """
-
-    label: Optional[str]
-    t_s: float  # [s] elapsed mission time when this report ran
-    values: Dict[str, np.ndarray]
-
-
-@dataclass
-class CommandSummary:
-    """Everything a mission_sequence run produced beyond the raw
-    :class:`~missionstudio.engine.results.ResultSet`: one
-    :class:`ReportEntry` per executed ``report`` command, in execution
-    order (so a ``report`` inside an ``if``/``while`` only appears when
-    that branch/iteration actually ran), plus a count of every command
-    actually executed (a ``while`` body run 5 times counts each of those
-    5 runs separately, matching how many times each command really
-    affected the simulation).
-    """
-
-    reports: List[ReportEntry] = field(default_factory=list)
-    commands_executed: int = 0
-
-
 class MissionEngine:
     """Walks ``scenario.mission_sequence`` against a
     :class:`~missionstudio.engine.service.SimulationService`, one
@@ -211,9 +181,12 @@ class MissionEngine:
         in order, returning ``(result, summary)``. An empty
         ``mission_sequence`` (the default -- see ``schema/command.py``'s
         own docstring on why this is additive/backward-compatible)
-        executes zero commands, so the returned :class:`ResultSet` only
-        has whatever ``InitializeSimulation()`` itself records at t=0 --
-        callers that want the pre-Phase-6 "just propagate for
+        executes zero commands, so ``ExecuteSimulation()`` is never called
+        and the returned :class:`ResultSet`'s series are all EMPTY --
+        confirmed directly (not assumed): ``InitializeSimulation()`` alone
+        produces zero recorded samples, not one, since a recorder only
+        gets its first sample once the simulation has actually ticked.
+        Callers that want the pre-Phase-6 "just propagate for
         ``sim_settings.duration_days``" behavior should keep using
         :meth:`SimulationService.run` directly, not this class.
         """

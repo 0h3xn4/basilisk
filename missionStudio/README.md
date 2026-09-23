@@ -1132,10 +1132,51 @@ iteration-cap safety net), `script_block` (including exception
 wrapping), and clear-error cases for every "names something that doesn't
 exist" case.
 
-**Not yet landed (this phase's remaining stages):** file-format/GUI-sync
-work, then the GUI itself (Resources/Mission/Output dock panels, script
-editor, debug console) -- see this file's own design-discussion notes for
-the detailed staged plan.
+**File-format/CLI sync (`cli.py`, `engine/results.py`) -- landed:**
+
+The mission-sequence JSON round-trip itself was already complete as of
+the data-model stage (`Command` is a plain dataclass, so it falls out of
+`Scenario.to_dict()`/`from_dict()` for free -- see that stage's own
+notes). What was still missing was a way to actually RUN a
+`mission_sequence` outside of a Python script calling `MissionEngine`
+directly (the tests, in other words) -- there was no CLI or GUI path to
+it at all. Since the GUI doesn't exist yet (Phase 6's last stage), this
+stage closes that gap on the CLI side, the same "headless-first" order
+the rest of this project has followed:
+
+* `missionstudio run` now dispatches on `scenario.mission_sequence`: a
+  non-empty one is executed via `MissionEngine` instead of a single
+  `SimulationService.run()` call. An empty one (still the default)
+  behaves exactly as before -- zero change for every existing scenario
+  file, matching this whole phase's additive design.
+* `engine.results.CommandSummary.export_csv()`: a Command Summary needs a
+  file-format story too, not just an in-memory dataclass -- writes one
+  CSV per run, long format (`report_index, t_s, label, series, component,
+  value`) rather than one column per series, since different `report`
+  commands can request series with different shapes (a position 3-vector
+  alongside a scalar mass, say) and there is no single fixed column set a
+  wide table could use across every row. `missionstudio run` writes it
+  to `<out-dir>/command_summary.csv` alongside the existing per-series
+  CSVs, only when at least one `report` command actually ran.
+* `ReportEntry`/`CommandSummary` moved from `engine/mission_engine.py`
+  (which imports `engine.service` -> Basilisk at module level) to
+  `engine/results.py` (deliberately Basilisk-free, exactly like
+  `TimeSeries`/`ResultSet` already are) -- a design-consistency fix
+  more than new functionality: these are plain data containers with no
+  Basilisk dependency of their own, and belonged with this project's
+  other Basilisk-independent, synthetic-data-testable result types.
+
+**Verification:** 3 new tests in `tests/test_results.py` (Basilisk-free,
+covers the CSV's long-format shape, nested-directory creation, and the
+zero-reports/header-only case). `cli.py`'s actual `run` dispatch logic
+itself is not independently unit-tested (same as its pre-existing
+`SimulationService`-calling code -- this file's tests only cover argument
+parsing and Basilisk-free helper functions, see `tests/test_cli.py`'s own
+scope).
+
+**Not yet landed (this phase's final stage):** the GUI itself
+(Resources/Mission/Output dock panels, script editor, debug console) --
+see this file's own design-discussion notes for the detailed staged plan.
 
 ## Repository layout
 

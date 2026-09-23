@@ -18,12 +18,14 @@
 
 r"""
 Typed simulation result containers, independent of how the data was
-produced -- :class:`engine.service.SimulationService` builds these from
-Basilisk recorders, but nothing in this module imports Basilisk, so it is
-fully unit-testable here with synthetic arrays (see
-``tests/test_results.py``) and reusable by both the future GUI (for
-plotting) and headless/batch runs (for CSV export) without either one
-depending on the other.
+produced -- :class:`engine.service.SimulationService` builds :class:`TimeSeries`/
+:class:`ResultSet` from Basilisk recorders, and
+:class:`engine.mission_engine.MissionEngine` builds :class:`ReportEntry`/
+:class:`CommandSummary` from executing a scenario's ``mission_sequence``
+-- but nothing in this module imports Basilisk, so it is fully
+unit-testable here with synthetic arrays (see ``tests/test_results.py``)
+and reusable by both the future GUI (for plotting/tables) and headless/
+batch runs (for CSV export) without either one depending on the other.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -118,3 +120,63 @@ class ResultSet:
         """
         out_dir = Path(out_dir)
         return {name: ts.to_csv(out_dir / f"{name}.csv") for name, ts in self.series.items()}
+
+
+@dataclass
+class ReportEntry:
+    """One ``engine.mission_engine.Command(kind="report")``'s result: a
+    snapshot (not a time history -- see ``MissionEngine._run_report``'s
+    own docstring) of the requested series' most recent values at the
+    mission time this report command ran. Defined here (Basilisk-free),
+    not in ``engine.mission_engine`` (which imports ``engine.service`` ->
+    Basilisk at module level), so it and :class:`CommandSummary` stay
+    unit-testable with synthetic data the same way :class:`TimeSeries`/
+    :class:`ResultSet` already are.
+    """
+
+    label: Optional[str]
+    t_s: float  # [s] elapsed mission time when this report ran
+    values: Dict[str, np.ndarray]
+
+
+@dataclass
+class CommandSummary:
+    """Everything a ``mission_sequence`` run produced beyond the raw
+    :class:`ResultSet`: one :class:`ReportEntry` per executed ``report``
+    command, in execution order (so a ``report`` inside an ``if``/
+    ``while`` only appears when that branch/iteration actually ran), plus
+    a count of every command actually executed (a ``while`` body run 5
+    times counts each of those 5 runs separately, matching how many times
+    each command really affected the simulation). Built by
+    ``engine.mission_engine.MissionEngine.run()``.
+    """
+
+    reports: List[ReportEntry] = field(default_factory=list)
+    commands_executed: int = 0
+
+    def export_csv(self, path: "str | Path") -> Path:
+        """Writes every :class:`ReportEntry` to one CSV at ``path``, long
+        format (one row per scalar component of every requested series in
+        every report -- ``report_index, t_s, label, series, component,
+        value``) rather than one column per series: different ``report``
+        commands can request different series with different shapes (a
+        3-vector position alongside a scalar mass, say), so there is no
+        single fixed set of columns a wide-format table could use across
+        every row. Matches :meth:`TimeSeries.to_csv`'s own formatting
+        convention (``%.9g``) for consistency with the per-series CSVs
+        :meth:`ResultSet.export_csv` already writes.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["report_index", "t_s", "label", "series", "component", "value"])
+            for report_index, report in enumerate(self.reports):
+                for series_name, values in report.values.items():
+                    flat = np.asarray(values).reshape(-1)
+                    for component_index, value in enumerate(flat):
+                        writer.writerow([
+                            report_index, f"{report.t_s:.9g}", report.label or "", series_name,
+                            component_index, f"{float(value):.9g}",
+                        ])
+        return path

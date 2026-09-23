@@ -25,6 +25,15 @@ command below is a thin wrapper over ``schema.load_scenario()``,
 ``engine.spaceweather`` -- the exact same calls
 ``gui.main_window.MainWindow`` makes.
 
+``run`` dispatches on ``scenario.mission_sequence``: a non-empty one is
+executed via ``engine.mission_engine.MissionEngine`` (propagate/maneuver/
+.../script_block commands drive the simulation, and a Command Summary CSV
+is written alongside the usual per-series ones if any ``report`` commands
+ran) instead of a single ``SimulationService.run()`` call -- the only
+place this CLI (and, once it exists, the GUI) needs to know that
+distinction exists; a scenario with no mission_sequence behaves exactly
+as it always has.
+
 Commands that don't need Basilisk (``validate``) work without a Basilisk
 build; commands that do (``run``, ``kernels-status``) import it lazily and
 report a clear, specific error instead of an ``ImportError`` traceback if
@@ -92,8 +101,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Running {scenario.name!r} ({len(scenario.spacecraft)} spacecraft, "
           f"{scenario.sim_settings.duration_days} day(s), {scenario.sim_settings.integrator})...")
     service = SimulationService(scenario, vizard_request=vizard_request)
+    command_summary = None
     try:
-        result = service.run()
+        if scenario.mission_sequence:
+            # A non-empty mission_sequence takes over how far/how the sim
+            # actually runs (propagate/maneuver/... commands drive
+            # ConfigureStopTime()/ExecuteSimulation(), not a single
+            # duration_days-long run()) -- see engine/mission_engine.py.
+            # An empty mission_sequence (still the default -- see
+            # schema/command.py) keeps the exact pre-Phase-6 behavior
+            # below, unchanged.
+            from .engine.mission_engine import MissionEngine
+
+            print(f"Executing mission_sequence ({len(scenario.mission_sequence)} top-level command(s))...")
+            result, command_summary = MissionEngine(scenario, service=service).run()
+        else:
+            result = service.run()
     except Exception as exc:  # noqa: BLE001 -- report ANY run failure with a specific message, not a bare traceback
         print(f"ERROR: run failed: {exc}", file=sys.stderr)
         return 3
@@ -102,6 +125,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Wrote {len(paths)} CSV file(s) to {args.out_dir}:")
     for name, path in sorted(paths.items()):
         print(f"  {name}: {path}")
+
+    if command_summary is not None:
+        print(f"Mission sequence: executed {command_summary.commands_executed} command(s), "
+              f"{len(command_summary.reports)} report(s).")
+        if command_summary.reports:
+            summary_path = command_summary.export_csv(args.out_dir / "command_summary.csv")
+            print(f"  command_summary: {summary_path}")
 
     if any(sc.station_keeping is not None for sc in scenario.spacecraft):
         print("Station-keeping summary:")
