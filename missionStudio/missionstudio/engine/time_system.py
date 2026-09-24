@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from Basilisk.utilities.supportDataTools.dataFetcher import DataFile, get_path
 
@@ -94,6 +94,16 @@ def utc_iso_to_spice_string(epoch_utc: str) -> str:
     literal ``.000`` that would silently discard it.
     """
     dt = datetime.fromisoformat(epoch_utc)
+    if dt.tzinfo is not None:
+        # Scenario.validate() only requires epoch_utc to parse via
+        # datetime.fromisoformat() -- it does not reject a timezone-aware
+        # string (e.g. "...+05:00" or "...Z"). Every other representation
+        # this module derives treats epoch_utc as already being UTC, so a
+        # tz-aware value must be CONVERTED to UTC here, not have its offset
+        # silently dropped -- doing the latter would format the original
+        # (non-UTC) wall-clock time and still label it "(UTC)", silently
+        # off by the offset amount.
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     millis = dt.microsecond // 1000
     return (dt.strftime("%Y %b %d %H:%M:%S") + f".{millis:03d} (UTC)").upper()
 
