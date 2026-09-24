@@ -95,12 +95,22 @@ def test_propagate_translates_execute_simulation_runtime_error(monkeypatch):
     unchunked branch here) -- a bare RuntimeError out of Basilisk's own
     stepping (e.g. std::bad_alloc from the adaptive-integrator bug
     documented on engine.service.raise_clear_execution_error) must become
-    a clear SimulationServiceError, not an opaque native exception string,
-    regardless of which of missionStudio's two ExecuteSimulation() callers
-    (SimulationService.run/run_live, or MissionEngine here) hits it.
+    a clear, actionable message instead of an opaque native exception
+    string, regardless of which of missionStudio's two ExecuteSimulation()
+    callers (SimulationService.run/run_live, or MissionEngine here) hits
+    it.
+
+    _advance_to() raises SimulationServiceError, same as
+    SimulationService.run()/run_live() do -- but _run_command()'s own
+    generic `except Exception` handler (see test_script_block_exception_
+    is_wrapped_in_mission_engine_error for the same behavior on an
+    unrelated exception type) wraps anything that isn't already a
+    MissionEngineError/MissionEngineCancelled into a path-qualified
+    MissionEngineError, so what actually reaches engine.run()'s caller is
+    a MissionEngineError whose message CONTAINS the clear explanation --
+    not the SimulationServiceError itself.
     """
-    from missionstudio.engine.mission_engine import MissionEngine
-    from missionstudio.engine.service import SimulationServiceError
+    from missionstudio.engine.mission_engine import MissionEngine, MissionEngineError
 
     duration_days = 0.1
     mission_scenario = _scenario(duration_days=duration_days, mission_sequence=[
@@ -114,7 +124,7 @@ def test_propagate_translates_execute_simulation_runtime_error(monkeypatch):
 
     monkeypatch.setattr(engine.service.scSim, "ExecuteSimulation", _boom)
 
-    with pytest.raises(SimulationServiceError, match="non-physical"):
+    with pytest.raises(MissionEngineError, match="non-physical"):
         engine.run()
 
 

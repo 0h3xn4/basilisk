@@ -2067,8 +2067,23 @@ injected failure -- reproducing the actual integrator bug isn't a
 reliable thing to build a fast unit test around), and confirm a
 `SimulationServiceError` mentioning "non-physical" is raised with the
 original exception preserved as `__cause__`. 600 passed, 64 skipped in
-this sandbox (4 more skipped, matching the 4 new tests). Not yet
-confirmed against a real Basilisk build.
+this sandbox (4 more skipped, matching the 4 new tests).
+
+**Confirmed for real** on the user's own Basilisk build: 655 passed, 1
+failed, 8 skipped. The one failure was a bug in the new MissionEngine
+test, not in the production fix --
+`test_propagate_translates_execute_simulation_runtime_error` asserted
+that `SimulationServiceError` propagates out of `engine.run()`
+unwrapped, but `MissionEngine._run_command()`'s existing generic
+`except Exception` handler (the same one that already wraps, say, a
+script-block exception -- see
+`test_script_block_exception_is_wrapped_in_mission_engine_error`) wraps
+ANY non-`MissionEngineError`/`MissionEngineCancelled` exception into a
+path-qualified `MissionEngineError` -- correct, existing behavior the
+test just modeled wrong. Fixed by asserting `MissionEngineError`
+instead (whose message still contains the clear "non-physical"
+explanation). `SimulationService.run()`/`run_live()`'s own two tests,
+which are not wrapped by anything, passed as written the first time.
 
 ## Repository layout
 
