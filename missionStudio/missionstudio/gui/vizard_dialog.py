@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QVBoxLayout,
@@ -105,6 +106,14 @@ class VizardDialog(QDialog):
 
     def _on_accept(self) -> None:
         if self.save_file_radio.isChecked() and not self.save_file_edit.text().strip():
+            # Every other validation-on-accept in this app (dispersion/
+            # ground-station/propagation-setup/constellation dialogs) tells
+            # the user WHY OK didn't do anything via QMessageBox.critical --
+            # this used to just move focus back to the empty field with no
+            # explanation, which looks like a broken OK button rather than a
+            # rejected, fixable input.
+            QMessageBox.critical(self, "Playback file required",
+                                  "Enter (or Browse... to) a .bin playback file path, or pick a different mode.")
             self.save_file_edit.setFocus()
             return
         self.accept()

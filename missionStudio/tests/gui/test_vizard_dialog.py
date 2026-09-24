@@ -83,10 +83,13 @@ def test_preselects_from_current_request(qtbot):
     assert dialog2.save_file_edit.text() == "/tmp/existing.bin"
 
 
-def test_accept_blocked_when_save_file_mode_has_no_path(qtbot):
-    from PySide6.QtWidgets import QDialog
+def test_accept_blocked_when_save_file_mode_has_no_path(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialog, QMessageBox
 
     from missionstudio.gui.vizard_dialog import VizardDialog
+
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
 
     dialog = VizardDialog()
     qtbot.addWidget(dialog)
@@ -94,3 +97,9 @@ def test_accept_blocked_when_save_file_mode_has_no_path(qtbot):
     dialog.save_file_edit.setText("")
     dialog._on_accept()
     assert dialog.result() != QDialog.DialogCode.Accepted
+    # Regression guard: this used to silently move focus back to the empty
+    # field with no explanation at all -- every sibling dialog in this app
+    # (dispersion/ground-station/propagation-setup/constellation) tells the
+    # user why OK didn't do anything via QMessageBox.critical; this dialog
+    # must too.
+    assert len(critical_calls) == 1

@@ -215,10 +215,6 @@ class SpacecraftEditorDialog(QDialog):
         # already has these set still round-trips correctly if the mode is
         # later switched back to "full_attitude".
         self._orbit_only = simulation_mode == "orbit_only"
-        # Kept only to round-trip fields this dialog has no editor for yet
-        # (drag/SRP -- see to_dataclass()) so editing a spacecraft doesn't
-        # silently reset them to SpacecraftConfig's defaults.
-        self._config = config
 
         outer_layout = QVBoxLayout(self)
         tabs = QTabWidget()

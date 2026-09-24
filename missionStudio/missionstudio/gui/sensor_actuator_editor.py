@@ -188,8 +188,13 @@ class _ItemEditorDialog(QDialog):
     def __init__(self, item_cls, kind_choices, item=None, parent: QWidget | None = None):
         super().__init__(parent)
         self._item_cls = item_cls
-        self._item_params = item.params if item is not None else {}
-        self._original_kind = item.kind if item is not None else None
+        # A defensive copy, not the original item's own dict: _rebuild_vector_rows
+        # below writes the live spin-box values back into this cache on every
+        # Kind change so switching away and back never loses an edit (see that
+        # method's docstring) -- aliasing item.params directly would let that
+        # write-back mutate the caller's SpacecraftConfig/SensorConfig in place
+        # even if this dialog is ultimately cancelled.
+        self._item_params = dict(item.params) if item is not None else {}
         label = "sensor" if item_cls.__name__ == "SensorConfig" else "actuator"
         self.setWindowTitle(f"Edit {label}" if item is not None else f"New {label}")
 
@@ -252,12 +257,28 @@ class _ItemEditorDialog(QDialog):
         layout.addWidget(buttons)
 
     def _rebuild_vector_rows(self, kind: str) -> None:
+        # Regression fix: this used to only re-use self._item_params (the
+        # ORIGINAL item's saved values) when switching back to the exact
+        # kind this dialog opened on, and fell back to the kind's static
+        # template example for every other kind -- including a kind the
+        # user had already edited earlier in this same dialog session.
+        # Switching Kind away and back (even via a third, unrelated kind)
+        # silently reverted any in-session edit to whatever the dialog
+        # originally opened with, contradicting this module's own "Kind
+        # changes must not clobber user edits, only Reset to template may"
+        # rule that the non-vector JSON params box already follows (see
+        # test_switching_kind_does_not_clobber_params_until_reset_clicked).
+        # Snapshotting the live spin-box values into the cache before
+        # tearing the rows down -- instead of only ever reading the
+        # original item -- makes the cache track the user's latest edit
+        # for whichever kind(s) they've actually visited.
+        for key, (x, y, z) in self._vector_boxes.items():
+            self._item_params[key] = [x.value(), y.value(), z.value()]
         while self._vector_form.rowCount():
             self._vector_form.removeRow(0)
         self._vector_boxes.clear()
-        use_item_params = kind == self._original_kind
         for spec in _vector_specs(kind):
-            value = self._item_params.get(spec.key, spec.example) if use_item_params else spec.example
+            value = self._item_params.get(spec.key, spec.example)
             x, y, z = (_spin_component(v) for v in value)
             row = QHBoxLayout()
             row.addWidget(x)
