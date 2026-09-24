@@ -1775,6 +1775,73 @@ the diagnostic works as designed. The underlying divergence itself is
 still open; that sample index/count is the concrete lead needed to
 chase it further, next.
 
+## Template '05' crashing with heap corruption, root-caused
+
+Direct follow-up from the "template '06' crashed with a confusing
+internal error" entry above: the user then hit template '05' (formation
+flying, `station_keeping` + `phasing_keeping`) crashing too -- but with
+TWO DIFFERENT native crash signatures on different runs of the exact
+same scenario (`basic_string::_M_create`, then `std::bad_alloc`). That
+variability is the signature of genuine memory corruption, not a
+deterministic bug -- exactly like the very first Vizard crash earlier in
+this project (a Python object garbage-collected while Basilisk's C++
+side still held a live callback into it).
+
+Root cause, this time: `PhasingKeepingController.UpdateState()` (called
+every dynamics tick, directly by Basilisk's C++ scheduler through a SWIG
+director override) calls `orbitalMotion.rv2elem()` via its own
+`_mean_anomaly()` helper, to compute the chief/follower's current mean
+anomaly for the phasing control law. That's the exact same buggy
+Basilisk function `engine.service._osculating_elements` was already
+fixed to avoid (see above) -- but `_osculating_elements` is ordinary
+Python code with an ordinary `try`/`except` around it; `UpdateState()`
+is not. A Python exception escaping a SWIG director-overridden virtual
+method is undefined behavior, not a clean propagated exception -- which
+is exactly consistent with two different native crashes from the same
+root cause on different runs.
+
+The state fed into `rv2elem()` there comes straight from
+`scStateInMsgA()`/`scStateInMsgB()` with no validity check at all --
+either genuinely non-physical (the simulation having already diverged)
+or simply not written yet (read before either spacecraft's own dynamics
+has published a first sample this run, an ordering question this
+function has no control over). Either way, calling `rv2elem()` with it
+was never safe.
+
+Fixed in `engine/orbit_maintenance.py`: both `PhasingKeepingController.
+UpdateState()` and `StationKeepingController.UpdateState()` (the same
+class of risk -- a non-finite or exactly-zero velocity would otherwise
+divide-by-zero computing a thrust direction) now check the spacecraft
+state for finiteness (and, for station-keeping, non-zero velocity)
+*before* doing anything with it. On a non-finite/degenerate tick, both
+command zero thrust and log a placeholder (NaN error/altitude, matching
+every other tick's log-once-per-call invariant) rather than ever
+reaching the buggy call -- there is no safe way to raise from inside a
+director callback either, so "degrade gracefully, never crash" is the
+only sound option here regardless of why the state went bad.
+
+**This does not, by itself, explain why the state went non-physical (or
+unwritten) in the first place** -- same honesty as the '06' entry above.
+But it does mean template '05' can no longer crash the whole process
+over it: if the underlying cause is "read before write" (an ordering
+question), the controller will now simply no-op for a tick or two until
+real data arrives; if the underlying cause is a genuine divergence, the
+run will still fail, but cleanly -- most likely via
+`_osculating_elements`'s own clear `SimulationServiceError` during
+result extraction, exactly like '06' now does, rather than a crash with
+no useful message at all.
+
+**Verification:** four new tests in `tests/test_orbit_maintenance.py`
+(`requires_basilisk`, auto-skipped in this sandbox) construct each
+controller directly, write a `SCStatesMsg` with NaN (or, for
+station-keeping, zero-velocity) state, call `UpdateState()` directly,
+and confirm it returns cleanly with zero commanded thrust instead of
+reaching `rv2elem()` -- plus one confirming the guard doesn't change
+behavior for the ordinary finite-state path. 590 passed, 60 skipped in
+this sandbox (four more skipped, matching the four new tests). Not
+independently confirmed against the user's own real Basilisk build yet
+-- next step is asking them to retry template '05'.
+
 ## A toolbar action invisible on one real platform
 
 Direct user report, with a screenshot: the "Launch Vizard" toolbar
