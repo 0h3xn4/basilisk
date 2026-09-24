@@ -2328,6 +2328,59 @@ guard doesn't change behavior for the ordinary case). 600 passed, 71
 skipped in this sandbox (5 more skipped, matching the 5 new tests). Not
 yet confirmed against a real Basilisk build.
 
+## Template '05' crash persists after the eccentricity fix -- isolating the cause
+
+The eccentricity fix's OWN target bug is confirmed fixed: the user's next
+crash log shows `phasing_keeping` reporting `error=-0.9125 deg` -- almost
+exactly the true physical separation (hand-computed: -0.9135 deg), not
+the wildly wrong `-0.0882 deg` from before. But **the crash still
+happens, at the exact same point** (t=30 s to t=60 s, the first real
+dynamics tick). That rules out the phasing-error noise as the (sole)
+trigger -- it was a real, separate, worth-fixing bug, but not the reason
+this scenario crashes.
+
+One side effect of the fix, visible in this same log, that hadn't been
+exercised before: `station_keeping` is now ACTIVELY BURNING
+(`burn_on=True`) at t=30 s, where it previously was not. Both spacecraft
+start at `true_anomaly_deg=0` -- with the new `eccentricity=0.001`,
+that's PERIAPSIS, the lowest point of the orbit, about 7 km below the
+mean/target altitude. `StationKeepingController`'s altitude smoothing
+only has ONE sample on the very first tick, so it immediately sees
+"6.9 km below deadband" and fires -- a real, if minor, side effect of the
+eccentricity fix worth knowing about even independent of the crash
+investigation.
+
+That the crash persists with an entirely DIFFERENT controller now doing
+the (small, bounded, ordinary) commanded burning is itself informative:
+it suggests the trigger may have nothing to do with WHICH
+`engine.orbit_maintenance` controller fires, or possibly nothing to do
+with `engine.orbit_maintenance` at all. To find out directly rather than
+keep guessing from either side, this repository now also includes
+`missionstudio/scenarios/diagnostic_05_no_orbit_maintenance.json` -- NOT
+a bundled template (it does not appear in the GUI's Load Scenario tab;
+open it via Open/Browse, or `missionstudio run
+missionstudio/scenarios/diagnostic_05_no_orbit_maintenance.json` from
+the CLI). It is otherwise IDENTICAL to `05_formation_flying_phasing.json`
+(same two near-circular, 45-degree-inclination, sun-perturbed orbits,
+same 7-day/30-second-tick/rkf78 settings) with `station_keeping` and
+`phasing_keeping` removed entirely from `follower-1` -- plain two-body
+-plus-sun-third-body dynamics for both spacecraft, no custom force
+effector active on either one at all.
+
+**If this diagnostic scenario ALSO crashes** around the same t=30-60 s
+window, that proves the crash has nothing to do with
+`engine.orbit_maintenance` -- something in the core gravity/integrator
+setup for two co-located, sun-perturbed, `orbit_only`-mode spacecraft is
+the actual trigger, and the investigation moves to `engine.service.build()`
+and Basilisk's own dynamics/gravity wiring instead. **If it does NOT
+crash**, that rules core dynamics out and points the investigation back
+at the force-effector wiring itself -- e.g. `StationKeepingController`'s
+own burn, or two controllers sharing one `ExtForceTorque` object.
+
+Not yet confirmed either way -- this depends entirely on the user running
+this diagnostic scenario and sharing the result (crash or no crash, plus
+the log either way).
+
 ## Repository layout
 
 ```
