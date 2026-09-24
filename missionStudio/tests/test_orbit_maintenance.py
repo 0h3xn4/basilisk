@@ -96,6 +96,16 @@ def _write_sc_state(msg, r_bn_n, v_bn_n, time_ns=0):
     msg.write(payload, time_ns, -1)
 
 
+def _flat(vec3) -> list:
+    """extForce_N read back from a real ExtForceTorque as a nested
+    [[x], [y], [z]] column-vector shape (confirmed against a real
+    Basilisk build -- not the flat [x, y, z] list it's assigned as, via
+    forceVec.tolist()), rather than guess at exactly which SWIG
+    Eigen-vector property shapes do this and which don't.
+    """
+    return list(np.asarray(vec3).flatten())
+
+
 def test_station_keeping_skips_thrust_on_nan_state():
     from Basilisk.architecture import messaging
     from Basilisk.simulation import extForceTorque
@@ -114,7 +124,7 @@ def test_station_keeping_skips_thrust_on_nan_state():
 
     controller.UpdateState(0)  # must not raise
 
-    assert controller.extForceEffector.extForce_N == [0.0, 0.0, 0.0]
+    assert _flat(controller.extForceEffector.extForce_N) == [0.0, 0.0, 0.0]
     assert controller.burnLog[-1] == 0
     assert np.isnan(controller.altLog[-1])
 
@@ -140,7 +150,7 @@ def test_station_keeping_skips_thrust_on_zero_velocity():
 
     controller.UpdateState(0)  # must not raise
 
-    assert controller.extForceEffector.extForce_N == [0.0, 0.0, 0.0]
+    assert _flat(controller.extForceEffector.extForce_N) == [0.0, 0.0, 0.0]
 
 
 def test_phasing_keeping_skips_thrust_on_nan_state():
@@ -166,7 +176,7 @@ def test_phasing_keeping_skips_thrust_on_nan_state():
 
     controller.UpdateState(0)  # must not raise -- would crash inside orbitalMotion.rv2elem() otherwise
 
-    assert controller.extForceEffectorB.extForce_N == [0.0, 0.0, 0.0]
+    assert _flat(controller.extForceEffectorB.extForce_N) == [0.0, 0.0, 0.0]
     assert np.isnan(controller.errorDegLog[-1])
 
 
