@@ -104,6 +104,60 @@ def test_open_missing_file_shows_error(window, tmp_path, monkeypatch):
     assert window._current_path is None
 
 
+def test_window_starts_on_load_scenario_tab(window):
+    assert window.left_tabs.currentWidget() is window.load_scenario_widget
+
+
+def test_choosing_a_template_opens_it_and_switches_to_editor_tab(window):
+    from missionstudio.gui.load_scenario_widget import TEMPLATES_DIR
+
+    template_path = sorted(TEMPLATES_DIR.glob("*.json"))[0]
+
+    window.load_scenario_widget.path_chosen.emit(template_path)
+
+    assert window._current_path == template_path
+    assert window.left_tabs.currentWidget() is window.scenario_editor
+    assert len(window.scenario_editor.spacecraft_list.to_list()) >= 1
+
+
+def test_choosing_a_template_with_unsaved_changes_prompts_first(window, monkeypatch):
+    from missionstudio.gui.load_scenario_widget import TEMPLATES_DIR
+    from PySide6.QtWidgets import QMessageBox
+
+    _add_valid_spacecraft(window)
+    question_calls = []
+    monkeypatch.setattr(QMessageBox, "question",
+                         staticmethod(lambda *a, **k: question_calls.append(1) or QMessageBox.StandardButton.Cancel))
+
+    template_path = sorted(TEMPLATES_DIR.glob("*.json"))[0]
+    window.load_scenario_widget.path_chosen.emit(template_path)
+
+    assert len(question_calls) == 1
+    # Cancelled -- the original (dirty) scenario must still be showing,
+    # not the template that was about to replace it.
+    assert window._current_path is None
+    assert window.left_tabs.currentWidget() is window.load_scenario_widget
+
+
+def test_on_new_switches_to_editor_tab(window):
+    window.left_tabs.setCurrentWidget(window.load_scenario_widget)
+    window.on_new()
+    assert window.left_tabs.currentWidget() is window.scenario_editor
+
+
+def test_open_path_returns_true_on_success_false_on_failure(window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from missionstudio.gui.load_scenario_widget import TEMPLATES_DIR
+
+    template_path = sorted(TEMPLATES_DIR.glob("*.json"))[0]
+    assert window.open_path(template_path) is True
+
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+    missing = tmp_path / "does_not_exist.json"
+    assert window.open_path(missing) is False
+
+
 @pytest.mark.skipif(_BASILISK_AVAILABLE, reason="this test's premise is specifically that Basilisk is unavailable")
 def test_run_without_basilisk_shows_error_and_reenables_action(window, qtbot, monkeypatch):
     from PySide6.QtWidgets import QMessageBox

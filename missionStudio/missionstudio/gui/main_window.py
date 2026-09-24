@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
 from .kernel_status_widget import KernelStatusWidget
+from .load_scenario_widget import LoadScenarioWidget
 from .mission_output_widget import MissionOutputWidget
 from .results_widget import ResultsWidget
 from .run_worker import MonteCarloWorker, RunWorker
@@ -76,6 +77,9 @@ class MainWindow(QMainWindow):
         self.scenario_editor.reset_to_default()
         self.scenario_editor.changed.connect(self._mark_dirty)
 
+        self.load_scenario_widget = LoadScenarioWidget()
+        self.load_scenario_widget.path_chosen.connect(self._on_load_scenario_path_chosen)
+
         self.results_widget = ResultsWidget()
         self.mission_output_widget = MissionOutputWidget()
         self.kernel_status_widget = KernelStatusWidget()
@@ -85,8 +89,19 @@ class MainWindow(QMainWindow):
         self.right_tabs.addTab(self.mission_output_widget, "Mission Output")
         self.right_tabs.addTab(self.kernel_status_widget, "Kernel Status")
 
+        # "Load Scenario" first (index 0, so it's what a freshly launched
+        # window shows) -- a new user's first move is picking a built-in
+        # template or browsing for a file, not editing the blank default
+        # scenario reset_to_default() just set up. open_path() (below)
+        # switches to "Scenario Editor" the moment anything actually
+        # loads, whichever of the two ways (this tab, or File > Open) got
+        # it there.
+        self.left_tabs = QTabWidget()
+        self.left_tabs.addTab(self.load_scenario_widget, "Load Scenario")
+        self.left_tabs.addTab(self.scenario_editor, "Scenario Editor")
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self.scenario_editor)
+        splitter.addWidget(self.left_tabs)
         splitter.addWidget(self.right_tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
@@ -277,6 +292,7 @@ class MainWindow(QMainWindow):
         self.mission_output_widget.clear()
         self._mark_clean()
         self.statusBar().showMessage("New scenario.")
+        self.left_tabs.setCurrentWidget(self.scenario_editor)
 
     def on_open(self) -> None:
         if not self._confirm_discard_unsaved():
@@ -286,18 +302,31 @@ class MainWindow(QMainWindow):
             return
         self.open_path(Path(path_str))
 
-    def open_path(self, path: Path) -> None:
+    def _on_load_scenario_path_chosen(self, path) -> None:
+        """Handles LoadScenarioWidget.path_chosen -- a template picked
+        from its built-in list, or a file picked via its own "Browse for
+        a file..." button. Gated by the same unsaved-changes confirmation
+        as File > New/Open, since it replaces the scenario currently
+        being edited exactly like those do.
+        """
+        if not self._confirm_discard_unsaved():
+            return
+        self.open_path(Path(path))
+
+    def open_path(self, path: Path) -> bool:
         try:
             scenario = load_scenario(path)
         except ScenarioValidationError as exc:
             QMessageBox.critical(self, "Could not open scenario", str(exc))
-            return
+            return False
         self.scenario_editor.from_scenario(scenario)
         self._current_path = path
         self.results_widget.set_result(None)
         self.mission_output_widget.clear()
         self._mark_clean()
         self.statusBar().showMessage(f"Opened {path}")
+        self.left_tabs.setCurrentWidget(self.scenario_editor)
+        return True
 
     def on_save(self) -> None:
         if self._current_path is None:

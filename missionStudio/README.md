@@ -1356,6 +1356,7 @@ missionStudio/
       theme.py                       -- Phase 5: app-wide QSS stylesheet + palette
       icons.py                       -- Phase 5: procedurally-drawn app icon
       main_window.py                 -- MainWindow: File/Run menus + toolbar, ties everything together
+      load_scenario_widget.py        -- "Load Scenario" tab: built-in template picker + browse-for-a-file
       scenario_editor.py             -- the full scenario form + live validation
       mission_sequence_editor.py     -- Phase 6: mission_sequence tree editor (Command Add/Edit/Remove/nesting)
       mission_output_widget.py       -- Phase 6: "Mission Output" debug-console tab (CommandSummary/ReportEntry display)
@@ -1420,6 +1421,7 @@ missionStudio/
       test_main_window.py
       test_mission_sequence_editor.py -- Phase 6
       test_mission_output_widget.py  -- Phase 6
+      test_load_scenario_widget.py   -- "Load Scenario" tab: built-in template picker + browse
 ```
 
 ## Running the tests
@@ -1553,13 +1555,18 @@ missionstudio gui
 # or: python3 -m missionstudio.gui.app
 ```
 
-The GUI opens with a blank scenario. File > New/Open/Save/Save As work
-against the same `schema.Scenario`/`load_scenario()`/`.save()` the CLI
-uses; the scenario form's validation status label updates live as you
-type, including its Monte Carlo section (enable/num_runs/thread_count +
-a dispersion list, referencing spacecraft by name). Run > Run Simulation
-runs `SimulationService` on a background thread (the UI stays responsive)
-and switches to the Results tab when
+The GUI opens on its **Load Scenario** tab (left pane) -- pick one of the
+nine built-in template missions (see "Template missions" below) or
+browse for any other scenario file; either one switches you to the
+**Scenario Editor** tab next to it with that scenario loaded and ready to
+edit. File > New/Open/Save/Save As work against the same
+`schema.Scenario`/`load_scenario()`/`.save()` the CLI uses (File > Open
+and the Load Scenario tab's own "Browse for a file..." button are two
+paths to the same `open_path()`); the scenario form's validation status
+label updates live as you type, including its Monte Carlo section
+(enable/num_runs/thread_count + a dispersion list, referencing spacecraft
+by name). Run > Run Simulation runs `SimulationService` on a background
+thread (the UI stays responsive) and switches to the Results tab when
 done, with a plot per result series and a CSV export button. Run > Check
 Kernels shows SPICE kernel fetch/cache status. Both Run actions report a
 clear error (not a crash) if Basilisk isn't installed/built.
@@ -1582,18 +1589,26 @@ They're built through `schema.scenario`'s own dataclasses and
 `Scenario.validate()` (via `scripts/_generate_templates.py`, kept in the
 repository as the regeneration source of truth), not hand-written JSON,
 and every one is covered by `tests/test_scenario_templates.py`
-(schema-level load/validate/round-trip, Basilisk-free) and
+(schema-level load/validate/round-trip, Basilisk-free),
 `tests/gui/test_scenario_templates_gui.py` (confirms each one also
-round-trips through the actual `ScenarioEditorWidget` form, the File >
-Open path a user actually takes) -- 50 tests total, all passing before
-this was committed. What's NOT yet verified: an actual Basilisk run of
-any of them (this sandbox has none), so treat the physical numbers
-(propellant use, drift rates, orbital periods) as reasonable
-back-of-the-envelope choices, not independently confirmed results, the
-same caveat every Basilisk-dependent module in this project carries
-until it's been run for real -- see the "Environment honesty note" above.
+round-trips through the actual `ScenarioEditorWidget` form), and
+`tests/gui/test_load_scenario_widget.py` (the in-GUI picker described
+below) -- 59 tests total, all passing before this was committed. What's
+NOT yet verified: an actual Basilisk run of any of them (this sandbox has
+none), so treat the physical numbers (propellant use, drift rates,
+orbital periods) as reasonable back-of-the-envelope choices, not
+independently confirmed results, the same caveat every Basilisk
+-dependent module in this project carries until it's been run for real --
+see the "Environment honesty note" above.
 
-Open one via File > Open in the GUI, or from the CLI:
+**Built into the GUI itself** (not just files you'd have to know the path
+to): the GUI's **Load Scenario** tab (`gui/load_scenario_widget.py`,
+see "Running the GUI" above) lists all nine by name with their
+description shown on selection, no file-browsing needed -- "Open
+Template" or a double-click loads one and switches straight to the
+Scenario Editor tab. The same tab's "Browse for a file..." button covers
+everything else, via the same `MainWindow.open_path()` File > Open
+already uses. From the CLI:
 
 ```bash
 missionstudio validate missionstudio/scenarios/templates/01_two_body_circular_orbit.json  # no Basilisk needed
