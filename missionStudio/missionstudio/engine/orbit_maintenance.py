@@ -461,47 +461,19 @@ class PhasingKeepingController(sysModel.SysModel):
         rA, vA = np.array(stateA.r_BN_N), np.array(stateA.v_BN_N)
         rB, vB = np.array(stateB.r_BN_N), np.array(stateB.v_BN_N)
 
-        # Real crash found on an actual run: orbitalMotion.rv2elem() (called
-        # via _mean_anomaly below) has a genuine bug in ITS OWN NaN-input
-        # guard (src/utilities/orbitalMotion.py sets ClassicElements.AN/.AP,
-        # neither of which is a real slot on that class -- see
-        # engine.service._osculating_elements's matching comment) -- it
-        # crashes with AttributeError instead of returning a clean NaN
-        # result.
-        #
-        # An EARLIER version of this comment claimed that AttributeError
-        # would escape UpdateState() (a SWIG director callback) as
-        # undefined behavior -- wrong, corrected after actually reading
-        # Basilisk's own C++ source (architecture/system_model/sim_model.cpp):
-        # SimThreadExecution's worker loop wraps every tick in `catch (...)`
-        # and cleanly re-throws on the parent thread, so a Python exception
-        # raised from here becomes an ordinary, catchable Python
-        # RuntimeError, not UB. The two different native-looking crash
-        # signatures this scenario produced (basic_string::_M_create,
-        # std::bad_alloc) have a different, now-confirmed cause instead:
-        # once ANY dynamics state goes non-finite (from whatever source),
-        # Basilisk's adaptive integrator (rkf45/rkf78 -- see
-        # simulation/dynamics/_GeneralModuleFiles/svIntegratorAdaptiveRungeKutta.h)
-        # computes a NaN error estimate, and every comparison against NaN
-        # is false -- so its "is this step good enough" check never
-        # succeeds and its integration loop never exits, reallocating
-        # temporaries every iteration until the heap is exhausted. See
-        # engine.service.raise_clear_execution_error's own docstring for
-        # the full mechanism and where that's now caught and turned into a
-        # clear error instead of a bare native exception string.
-        #
-        # Guarding this call site never hurts (a non-finite state was
-        # never safe input regardless of what happens after), but it is
-        # NOT sufficient by itself to prevent the crash above -- the state
-        # can go non-finite entirely inside Basilisk's own EOM/integrator,
-        # between one tick's finite read here and the next, with no
-        # Python-level hook in between to catch it. Command no thrust and
-        # hold state this tick instead (the non-finite state read here is
-        # either before either spacecraft's dynamics has published a first
-        # real sample yet, or the simulation has already gone non-physical
-        # -- either way, nothing useful can be computed from it).
-        if not (np.all(np.isfinite(rA)) and np.all(np.isfinite(vA))
-                and np.all(np.isfinite(rB)) and np.all(np.isfinite(vB))):
+        # Same reasoning as StationKeepingController.UpdateState()'s own
+        # matching guard: a non-finite state (from either spacecraft) must
+        # never propagate into a commanded force -- command no thrust and
+        # hold state this tick instead. Also guards vA/vB against being
+        # exactly zero -- a real gap found by audit: this method reads
+        # vB's norm to compute a burn direction further down
+        # (`vHatB = vB / np.linalg.norm(vB)`), and _mean_anomaly() below
+        # feeds vA/vB into orbitalMotion.rv2elem(), which also divides by
+        # velocity-derived quantities internally -- either was previously
+        # only checked for NaN/inf, not for exactly zero, unlike this
+        # class's own StationKeepingController sibling.
+        if not (np.all(np.isfinite(rA)) and np.all(np.isfinite(vA)) and np.linalg.norm(vA) > 0.0
+                and np.all(np.isfinite(rB)) and np.all(np.isfinite(vB)) and np.linalg.norm(vB) > 0.0):
             if self.extForceEffectorB is not None:
                 self.extForceEffectorB.extForce_N = [0.0, 0.0, 0.0]
             self.tLog.append(t)
@@ -773,6 +745,25 @@ class ConstantFrameThrustController(sysModel.SysModel):
         scState = self.scStateInMsg()
         rVec = np.array(scState.r_BN_N)  # [m]
         vVec = np.array(scState.v_BN_N)  # [m/s]
+
+        # Same "never feed a degenerate state into a commanded force"
+        # reasoning as StationKeepingController's/PhasingKeepingController's
+        # own matching guards -- a real gap found by audit: this class had
+        # NO guard at all. _vnb_basis()/_rtn_basis() (called just below)
+        # divide by norm(vVec) (both frames), norm(rVec) (RTN only), and
+        # norm(cross(rVec, vVec)) (both frames, the orbit-normal magnitude
+        # -- zero whenever rVec/vVec happen to be parallel, e.g. a purely
+        # radial trajectory, not just when either one is individually
+        # zero). Command no thrust and hold state this tick instead.
+        if not (np.all(np.isfinite(rVec)) and np.all(np.isfinite(vVec))
+                and np.linalg.norm(rVec) > 0.0 and np.linalg.norm(vVec) > 0.0
+                and np.linalg.norm(np.cross(rVec, vVec)) > 0.0):
+            if self.extForceEffector is not None:
+                self.extForceEffector.extForce_N = [0.0, 0.0, 0.0]
+            self.tLog.append(t)
+            self.propellantLog.append(self.propellant)
+            self.deltaVLog.append(self._cumulativeDv)
+            return
 
         axis1, axis2, axis3 = _vnb_basis(rVec, vVec) if self.frame == "VNB" else _rtn_basis(rVec, vVec)
         dirHat_N = self.direction[0] * axis1 + self.direction[1] * axis2 + self.direction[2] * axis3

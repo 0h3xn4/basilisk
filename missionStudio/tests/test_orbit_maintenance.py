@@ -180,6 +180,137 @@ def test_phasing_keeping_skips_thrust_on_nan_state():
     assert np.isnan(controller.errorDegLog[-1])
 
 
+def test_phasing_keeping_skips_thrust_on_zero_velocity():
+    """Real gap found by audit: unlike StationKeepingController's own
+    matching zero-velocity guard, this class only checked for NaN/inf,
+    not for vA/vB being exactly zero -- `vHatB = vB / np.linalg.norm(vB)`
+    further down would divide by zero, and orbitalMotion.rv2elem() (via
+    _mean_anomaly, called before that) also divides by velocity-derived
+    quantities internally.
+    """
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import PhasingKeepingController, SeparationSchedule
+
+    controller = PhasingKeepingController(
+        name="pk", mu=3.986004418e14, nominal_a_m=6928e3,
+        separation_schedule=SeparationSchedule(distances_km=[50.0], interval_days=0.0, semi_major_axis_m=6928e3),
+        tolerance_fraction=0.1, restore_tolerance_fraction=0.5, correction_window_days=1.0,
+        max_drift_days=5.0, max_delta_a_m=1000.0, thrust_n=0.05, isp_s=1500.0, dry_mass_kg=400.0,
+    )
+    controller.extForceEffectorB = extForceTorque.ExtForceTorque()
+    state_a = messaging.SCStatesMsg()
+    state_b = messaging.SCStatesMsg()
+    _write_sc_state(state_a, [7000e3, 0.0, 0.0], [0.0, 7500.0, 0.0])
+    _write_sc_state(state_b, [0.0, 7000e3, 0.0], [0.0, 0.0, 0.0])  # zero velocity
+    controller.scStateInMsgA.subscribeTo(state_a)
+    controller.scStateInMsgB.subscribeTo(state_b)
+    controller.Reset(0)
+
+    controller.UpdateState(0)  # must not raise
+
+    assert _flat(controller.extForceEffectorB.extForce_N) == [0.0, 0.0, 0.0]
+    assert np.isnan(controller.errorDegLog[-1])
+
+
+def test_constant_thrust_skips_on_nan_state():
+    """ConstantFrameThrustController had NO guard at all before this audit
+    -- _vnb_basis()/_rtn_basis() (called from UpdateState()) would
+    silently propagate NaN into the commanded force.
+    """
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import ConstantFrameThrustController
+
+    controller = ConstantFrameThrustController(
+        name="ct", frame="VNB", direction=[1.0, 0.0, 0.0], thrust_n=0.05, isp_s=1500.0,
+        dry_mass_kg=400.0, propellant_kg=5.0,
+    )
+    controller.extForceEffector = extForceTorque.ExtForceTorque()
+    sc_state_msg = messaging.SCStatesMsg()
+    _write_sc_state(sc_state_msg, [np.nan, 0.0, 0.0], [0.0, 7500.0, 0.0])
+    controller.scStateInMsg.subscribeTo(sc_state_msg)
+    controller.Reset(0)
+
+    controller.UpdateState(0)  # must not raise
+
+    assert _flat(controller.extForceEffector.extForce_N) == [0.0, 0.0, 0.0]
+
+
+def test_constant_thrust_skips_on_zero_velocity():
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import ConstantFrameThrustController
+
+    controller = ConstantFrameThrustController(
+        name="ct", frame="VNB", direction=[1.0, 0.0, 0.0], thrust_n=0.05, isp_s=1500.0,
+        dry_mass_kg=400.0, propellant_kg=5.0,
+    )
+    controller.extForceEffector = extForceTorque.ExtForceTorque()
+    sc_state_msg = messaging.SCStatesMsg()
+    _write_sc_state(sc_state_msg, [7000e3, 0.0, 0.0], [0.0, 0.0, 0.0])
+    controller.scStateInMsg.subscribeTo(sc_state_msg)
+    controller.Reset(0)
+
+    controller.UpdateState(0)  # must not raise
+
+    assert _flat(controller.extForceEffector.extForce_N) == [0.0, 0.0, 0.0]
+
+
+def test_constant_thrust_skips_on_parallel_r_and_v():
+    """A purely radial trajectory (r, v collinear) -- individually
+    nonzero, but their cross product (the orbit normal _vnb_basis()/
+    _rtn_basis() both divide by) is zero. Not caught by a finite check
+    or a zero-velocity check alone.
+    """
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import ConstantFrameThrustController
+
+    controller = ConstantFrameThrustController(
+        name="ct", frame="RTN", direction=[1.0, 0.0, 0.0], thrust_n=0.05, isp_s=1500.0,
+        dry_mass_kg=400.0, propellant_kg=5.0,
+    )
+    controller.extForceEffector = extForceTorque.ExtForceTorque()
+    sc_state_msg = messaging.SCStatesMsg()
+    _write_sc_state(sc_state_msg, [7000e3, 0.0, 0.0], [100.0, 0.0, 0.0])  # v parallel to r
+    controller.scStateInMsg.subscribeTo(sc_state_msg)
+    controller.Reset(0)
+
+    controller.UpdateState(0)  # must not raise
+
+    assert _flat(controller.extForceEffector.extForce_N) == [0.0, 0.0, 0.0]
+
+
+def test_constant_thrust_runs_normally_with_finite_state():
+    """Confirms the new guard doesn't change behavior for the ordinary,
+    finite/non-degenerate case.
+    """
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import ConstantFrameThrustController
+
+    controller = ConstantFrameThrustController(
+        name="ct", frame="VNB", direction=[1.0, 0.0, 0.0], thrust_n=0.05, isp_s=1500.0,
+        dry_mass_kg=400.0, propellant_kg=5.0,
+    )
+    controller.extForceEffector = extForceTorque.ExtForceTorque()
+    sc_state_msg = messaging.SCStatesMsg()
+    _write_sc_state(sc_state_msg, [7000e3, 0.0, 0.0], [0.0, 7500.0, 0.0])
+    controller.scStateInMsg.subscribeTo(sc_state_msg)
+    controller.Reset(0)
+
+    controller.UpdateState(0)
+
+    assert _flat(controller.extForceEffector.extForce_N) != [0.0, 0.0, 0.0]
+    assert len(controller.tLog) == 1
+
+
 def test_phasing_keeping_runs_normally_with_finite_state():
     """Confirms the new guard doesn't change behavior for the ordinary,
     finite-state case -- the state machine still runs its normal IDLE

@@ -2236,6 +2236,98 @@ template '05' no longer crashing, or crashing with a materially
 different error/last-known-state, which only the user's own build can
 confirm).
 
+## Audit: every other place a degenerate/zero state could reach Basilisk
+
+Direct follow-up request after the template '05' investigation: check the
+whole codebase for other places a similar "zero" (or other degenerate)
+input could break something, now that one real instance was found. Two
+more were found, both in `engine/orbit_maintenance.py`, both existing
+gaps in an ALREADY-established defensive pattern (`StationKeepingController.
+UpdateState()`'s own guard checks BOTH non-finite AND exactly-zero
+velocity before dividing by it) rather than new problems introduced by
+anything in this investigation:
+
+1. **`PhasingKeepingController.UpdateState()`** only checked for
+   NaN/inf, not for `vA`/`vB` being exactly zero -- `vHatB = vB /
+   np.linalg.norm(vB)` a few lines later would divide by zero, and
+   `orbitalMotion.rv2elem()` (called just before that, to compute the
+   phasing error) also divides by velocity-derived quantities
+   internally. Its own existing guard comment on `StationKeepingController`
+   even said "Same reasoning as PhasingKeepingController.UpdateState()'s
+   own matching guard" -- which was no longer true once written, since
+   that guard never actually got the zero-velocity check. Fixed by
+   adding it, matching `StationKeepingController`'s exact pattern.
+
+2. **`ConstantFrameThrustController.UpdateState()`** (the `constant_thrust`
+   config -- not currently used by any bundled template, but a fully
+   supported, documented feature a user can configure) had **no guard at
+   all**: neither a finite check nor a zero-velocity one. Its
+   `_vnb_basis()`/`_rtn_basis()` helpers (VNB/RTN frame construction)
+   divide by `norm(vVec)` (both frames), `norm(rVec)` (RTN), and
+   `norm(cross(rVec, vVec))` (both -- the orbit-normal magnitude, zero
+   whenever r and v happen to be parallel, e.g. a purely radial
+   trajectory, which neither an individual finite check nor a
+   zero-velocity check alone would catch). Fixed with a guard covering
+   all three degenerate cases, same "command no thrust, hold state"
+   pattern as the other two controllers.
+
+Also checked and found NOT to need a fix, with the reasoning for each:
+
+* **`engine.service._osculating_elements()`** (the OTHER
+  `orbitalMotion.rv2elem()` call site in this codebase) hits the exact
+  same near-circular/near-equatorial classical-elements singularity, but
+  its output only feeds plots/CSV export, never a commanded force -- a
+  "wrong-looking reported angle" is not a "the simulation crashes"
+  problem, and this was already correctly documented as an inherent,
+  accepted limitation of osculating classical elements (not something a
+  per-sample computation could avoid) rather than a bug, well before this
+  audit.
+* **`mission_engine.py`'s periapsis/apoapsis event detector**
+  (`radial_velocity = dot(r, v) / np.linalg.norm(r)`) divides by
+  `norm(r)`, which is only zero if a spacecraft's position has already
+  reached the central body's exact center -- a state that requires the
+  orbit to have already gone catastrophically non-physical by some OTHER
+  cause first, not an independent trigger the way an ordinary near-circular
+  or radial-trajectory configuration is.
+* **`link_budget.py`'s free-space-path-loss** divides by nothing risky (a
+  physical constant, the speed of light); `np.log10(range_m)` would only
+  misbehave at `range_m == 0` (spacecraft exactly co-located with a
+  ground station -- not a real orbital state), and even then only
+  produces a nonsensical reported number, not a crash, for the same
+  "reporting-only, not fed back into dynamics" reason as
+  `_osculating_elements()`.
+* **`engine.constellation`'s Walker-pattern math**
+  (`raan_spread/num_planes`, `360/sats_per_plane`, etc.) divides by
+  request parameters that `ConstellationRequest.validate()` already
+  requires to be positive (see `test_request_validation_rejects_bad_input`)
+  before any of this math runs -- pure Python arithmetic, not
+  Basilisk-facing, and already schema-guarded.
+* **`engine/fsw.py`** (attitude guidance/control wiring) has no custom
+  vector-normalization math at all -- it only configures Basilisk's own
+  `hillPoint`/`velocityPoint`/`mrpFeedback`/etc. modules directly,
+  consistent with this project's convention of never reimplementing
+  Basilisk's own math.
+
+Also documented (not a code fix): `PhasingKeepingConfig`'s own docstring
+(`schema/scenario.py`) now states the "use a small nonzero eccentricity,
+not exactly 0.0" caveat directly, so a user authoring their own
+phasing-keeping scenario (not just the bundled template) has a chance to
+avoid this landmine before hitting it for real.
+
+**Verification:** 5 new tests in `tests/test_orbit_maintenance.py`
+(`requires_basilisk`, auto-skipped in this sandbox) --
+`test_phasing_keeping_skips_thrust_on_zero_velocity` (the new
+`PhasingKeepingController` guard), and four for
+`ConstantFrameThrustController`:
+`test_constant_thrust_skips_on_nan_state`,
+`test_constant_thrust_skips_on_zero_velocity`,
+`test_constant_thrust_skips_on_parallel_r_and_v` (the case neither a
+finite check nor a zero-velocity check alone would catch), and
+`test_constant_thrust_runs_normally_with_finite_state` (confirms the new
+guard doesn't change behavior for the ordinary case). 600 passed, 71
+skipped in this sandbox (5 more skipped, matching the 5 new tests). Not
+yet confirmed against a real Basilisk build.
+
 ## Repository layout
 
 ```

@@ -416,6 +416,22 @@ class PhasingKeepingConfig:
     fewer, larger corrections, or narrow them for tighter formation
     -keeping at the cost of more frequent burns; there is no single
     "correct" answer, it depends on the mission's own ops concept.
+
+    Caveat found by a real crash investigation: give this spacecraft's
+    (and its ``chief_spacecraft``'s) orbit a small, deliberate, NONZERO
+    ``eccentricity`` (e.g. ``0.001``) rather than exactly ``0.0``.
+    ``engine.orbit_maintenance.PhasingKeepingController`` measures each
+    spacecraft's along-track phase via ``orbitalMotion.rv2elem()``, which
+    only trusts its stable near-circular formula below ``e < 1e-11`` --
+    a genuinely circular scenario's real, propagated eccentricity (from
+    third-body gravity, or this very controller's own commanded thrust)
+    can easily drift just above that extremely tight threshold, at which
+    point ``rv2elem()`` silently falls back to a formula that is
+    numerically meaningless that close to zero eccentricity, feeding a
+    garbage phasing error into this controller. See
+    ``missionStudio/README.md``'s "Template '05' crash" writeup for the
+    full investigation (bundled template ``05_formation_flying_phasing``
+    hit exactly this and was fixed the same way).
     """
 
     chief_spacecraft: str
