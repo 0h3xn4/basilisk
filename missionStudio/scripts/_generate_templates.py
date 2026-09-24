@@ -244,13 +244,31 @@ def build_05_formation_flying_phasing() -> Scenario:
         spacecraft=[
             SpacecraftConfig(
                 name="chief-1",
-                orbit=OrbitIC(type="classical_elements", semi_major_axis_km=6928.0, eccentricity=0.0,
+                # eccentricity=0.001, not 0.0 -- both orbits used to be exactly
+                # circular, which crashed on a real run: orbitalMotion.rv2elem()
+                # (used by engine.orbit_maintenance.PhasingKeepingController to
+                # measure each spacecraft's along-track phase) only trusts its
+                # stable near-circular formula below e=1e-11, and this
+                # template's own sun third-body perturbation and commanded
+                # thrust are enough to push a nominally-circular orbit's real,
+                # propagated eccentricity above that -- at which point rv2elem()
+                # silently falls back to measuring phase from the eccentricity
+                # VECTOR's direction, which is numerically meaningless (noise
+                # -dominated) once eccentricity is that close to zero, and fed
+                # a garbage phasing error into the controller. A small,
+                # deliberate eccentricity (0.001, ~7 km of altitude variation --
+                # well inside station_keeping's 2 km deadband once smoothed over
+                # one orbital period, see StationKeepingController.UpdateState())
+                # keeps rv2elem() safely on its normal, stable branch instead,
+                # using Basilisk's own orbit-element math the way it's designed
+                # to be used rather than routing around it.
+                orbit=OrbitIC(type="classical_elements", semi_major_axis_km=6928.0, eccentricity=0.001,
                                inclination_deg=45.0, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=0.0),
                 dry_mass_kg=400.0,
             ),
             SpacecraftConfig(
                 name="follower-1",
-                orbit=OrbitIC(type="classical_elements", semi_major_axis_km=6928.0, eccentricity=0.0,
+                orbit=OrbitIC(type="classical_elements", semi_major_axis_km=6928.0, eccentricity=0.001,
                                inclination_deg=45.0, raan_deg=0.0, arg_periapsis_deg=0.0, true_anomaly_deg=-0.5),
                 dry_mass_kg=400.0,
                 station_keeping=StationKeepingConfig(

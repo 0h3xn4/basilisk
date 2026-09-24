@@ -2155,6 +2155,87 @@ confirmation depends on the user reproducing the crash again and sharing
 the new log, which will finally show the exact last-good state rather
 than just which chunk failed.
 
+## Template '05' crash -- root cause found and fixed at the template level
+
+The last-known-state diagnostic paid off immediately -- the user's next
+crash log showed:
+
+```
+follower-1: last recorded state before failure -- t=30.000 s, r_BN_N=[...] m, v_BN_N=[...] m/s
+follower-1: phasing_keeping last tick -- t=30.000 s, error=-0.0882 deg, state=BURN_OUT, ...
+```
+
+The state at t=30 s (the very FIRST dynamics tick) is completely sane --
+hand-verified against a from-scratch two-body propagation in plain numpy
+(no Basilisk needed) that matched the logged r/v to 6+ significant
+digits. The failure happens between t=30 s and t=60 s -- the SECOND
+tick, as early as this scenario's finest possible resolution can show.
+
+That ruled out slow drift/depletion explanations and pointed at the
+`phasing_keeping` error value itself: -0.0882 degrees, when the actual
+along-track separation between these two near-identical orbits (0.5
+degrees apart by construction) plus the 50 km/6928 km target works out to
+-0.9135 degrees by hand -- a ~10x, suspiciously specific discrepancy.
+Root cause, found by reading `orbitalMotion.rv2elem()`'s real algorithm
+(`src/utilities/orbitalMotion.py`): this template's two orbits were
+defined with `eccentricity=0.0` EXACTLY. `rv2elem()` has a dedicated
+branch for a genuinely circular orbit (`e < 1e-11`) that measures the
+along-track phase from the ascending node -- numerically stable. But this
+scenario's real, propagated eccentricity (perturbed by the sun
+third-body gravity this project added earlier to fix a different bug,
+and by the phasing controller's own commanded thrust) only needs to
+drift a hair above that extremely tight threshold to fall onto a
+DIFFERENT branch, which measures the same angle from the eccentricity
+vector's direction instead -- numerically meaningless once eccentricity
+is that close to zero, since that direction becomes dominated by
+floating-point noise rather than physics. Reproducing the real crash's
+logged state through that unstable branch by hand gave
+argument-of-periapsis values 160 vs 184 degrees apart for two spacecraft
+that are physically 0.5 degrees apart -- a ~24 degree spurious
+"separation," matching the instability's fingerprint exactly.
+
+**A first attempt at this fix was wrong and has been reverted:**
+replacing `PhasingKeepingController`'s call into `rv2elem()` with a
+custom, hand-written along-track-angle computation. That is exactly the
+kind of change this project does not make -- orbit mechanics goes through
+Basilisk, not a parallel implementation of it, however numerically
+well-reasoned. The actually-correct fix is at the TEMPLATE level: this
+scenario asked for an EXACTLY circular orbit, which is itself an edge
+case Basilisk's own `rv2elem()` only handles safely below an extremely
+tight, real-perturbation-sensitive eccentricity threshold. Both orbits
+now use `eccentricity=0.001` (about 7 km of altitude variation, well
+inside `station_keeping`'s 2 km deadband once smoothed over one orbital
+period -- see `StationKeepingController.UpdateState()`'s own boxcar
+average, which exists for exactly this kind of periodic, non-decay
+variation) instead of `0.0` -- large enough to keep `rv2elem()` reliably
+on its normal, stable branch for the whole run (comfortably above any
+perturbation-induced noise), small enough not to meaningfully change the
+scenario's own "near-identical orbits" story. `scripts/_generate_templates.py`
+is the source of truth (see that script's own comment on
+`build_05_formation_flying_phasing()`'s chief-1 orbit for the full
+reasoning); `05_formation_flying_phasing.json` was regenerated from it,
+not hand-edited.
+
+**This does not, by itself, prove the crash is fully resolved** -- there
+may be a second contributing factor this investigation hasn't isolated.
+But it is a definite, real, well-evidenced bug in how this ONE template
+was configured (an exactly-circular orbit is a genuine Basilisk edge
+case, not something Basilisk itself is wrong about), fixed the way this
+project fixes that class of problem: by giving Basilisk's own,
+unmodified math a configuration it handles well, not by working around
+it.
+
+**Verification:** `tests/test_scenario_templates.py`/
+`tests/gui/test_scenario_templates_gui.py`'s existing template
+round-trip tests cover `05_formation_flying_phasing.json` structurally
+(schema-valid, round-trips through the GUI editor) and pass unchanged --
+this is a numeric-value-only change, not a structural one. 600 passed,
+66 skipped in this sandbox (matching the count before this fix -- no new
+tests needed; the actual regression check is a real Basilisk run of
+template '05' no longer crashing, or crashing with a materially
+different error/last-known-state, which only the user's own build can
+confirm).
+
 ## Repository layout
 
 ```
