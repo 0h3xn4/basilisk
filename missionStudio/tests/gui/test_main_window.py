@@ -559,12 +559,25 @@ class _FakeVizardProcess:
     def __init__(self, pid=999):
         self.pid = pid
         self._alive = True
+        self.terminate_calls = 0
+        self.kill_calls = 0
 
     def poll(self):
         return None if self._alive else 0
 
     def kill_for_test(self):
         self._alive = False
+
+    def terminate(self):
+        self.terminate_calls += 1
+        self._alive = False
+
+    def kill(self):
+        self.kill_calls += 1
+        self._alive = False
+
+    def wait(self, timeout=None):
+        return 0
 
 
 def test_launch_vizard_starts_it_when_not_running(window, monkeypatch):
@@ -721,6 +734,97 @@ def test_launch_vizard_passes_no_direct_comm_address_without_live_stream(window,
     window.on_launch_vizard()
 
     assert calls == [None]
+
+
+def test_launch_vizard_relaunches_a_mismatched_already_running_instance(window, monkeypatch):
+    """The known residual gap this closes: Vizard was already launched
+    (by this same session's "Launch Vizard" button) before live-stream
+    was ever configured -- e.g. for a save-file run, or before Vizard
+    Configuration was set at all -- so the running instance has no
+    -directComm connection. Simply trusting "already running" here would
+    reproduce the exact original bug one launch later; it must be
+    terminated and replaced with a live-stream-ready one instead.
+    """
+    from pathlib import Path
+
+    from missionstudio.engine.vizard import VizardRequest
+    from missionstudio.gui import main_window
+    from missionstudio.gui.vizard_launcher import DEFAULT_LIVE_STREAM_ADDRESS
+
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    launch_calls = []
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: launch_calls.append(direct_comm_address)
+                         or _FakeVizardProcess())
+
+    # First launch: no live-stream configured yet.
+    window.on_launch_vizard()
+    first_process = window._vizard_process
+    assert launch_calls == [None]
+
+    # Now live-stream gets configured, and Vizard is asked for again.
+    window._vizard_request = VizardRequest(live_stream=True)
+    window.on_launch_vizard()
+
+    assert first_process.terminate_calls == 1
+    assert launch_calls == [None, DEFAULT_LIVE_STREAM_ADDRESS]
+    assert window._vizard_process is not first_process
+    assert window._vizard_direct_comm_address == DEFAULT_LIVE_STREAM_ADDRESS
+
+
+def test_launch_vizard_keeps_a_live_stream_ready_instance_for_a_later_save_file_launch(window, monkeypatch):
+    """The opposite direction is NOT a mismatch worth relaunching over --
+    a -directComm connection doesn't stop Vizard from also being used to
+    open a save file, so an already-live-stream-ready instance is kept.
+    """
+    from pathlib import Path
+
+    from missionstudio.engine.vizard import VizardRequest
+    from missionstudio.gui import main_window
+
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    launch_calls = []
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: launch_calls.append(direct_comm_address)
+                         or _FakeVizardProcess())
+
+    window._vizard_request = VizardRequest(live_stream=True)
+    window.on_launch_vizard()
+    first_process = window._vizard_process
+
+    window._vizard_request = None  # switch to save-file/no request
+    window.on_launch_vizard()
+
+    assert first_process.terminate_calls == 0
+    assert len(launch_calls) == 1  # never relaunched
+    assert window._vizard_process is first_process
+
+
+def test_launch_vizard_never_touches_an_instance_it_did_not_itself_launch(window, monkeypatch):
+    """self._vizard_process is None (this session never launched Vizard
+    itself) even though Vizard may well already be running externally --
+    there is no reliable way to ask it whether it's connected, so a
+    fresh, correctly-configured instance is launched alongside it rather
+    than guessing about (or worse, killing) a process this app doesn't
+    own.
+    """
+    from pathlib import Path
+
+    from missionstudio.engine.vizard import VizardRequest
+    from missionstudio.gui import main_window
+    from missionstudio.gui.vizard_launcher import DEFAULT_LIVE_STREAM_ADDRESS
+
+    assert window._vizard_process is None
+    window._vizard_request = VizardRequest(live_stream=True)
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    launch_calls = []
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: launch_calls.append(direct_comm_address)
+                         or _FakeVizardProcess())
+
+    window.on_launch_vizard()
+
+    assert launch_calls == [DEFAULT_LIVE_STREAM_ADDRESS]
 
 
 def test_run_ensures_vizard_is_running_before_a_live_stream_run(window, monkeypatch):

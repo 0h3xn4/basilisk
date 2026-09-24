@@ -31,6 +31,7 @@ with a different UI toolkit entirely without touching
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, Qt, QTimer
@@ -84,6 +85,13 @@ class MainWindow(QMainWindow):
         self._mc_worker: MonteCarloWorker | None = None
         self._vizard_request = None  # engine.vizard.VizardRequest, or None -- set via the Run menu's "Vizard Configuration..." action
         self._vizard_process = None  # subprocess.Popen, or None -- set via the Run menu's "Launch Vizard" action
+        # The direct_comm_address self._vizard_process was actually launched
+        # with (None if it was launched with no -directComm flag at all) --
+        # lets on_launch_vizard() tell a live-stream-ready instance apart
+        # from one that isn't, instead of trusting ANY already-running
+        # process regardless of how it was started. See on_launch_vizard()'s
+        # own docstring.
+        self._vizard_direct_comm_address = None
         self._last_run_epoch_utc: str | None = None  # set in on_run(); see its own comment
 
         self.scenario_editor = ScenarioEditorWidget()
@@ -448,12 +456,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Vizard enabled for the next run.")
 
     def on_launch_vizard(self) -> bool:
-        """Starts the external Vizard application -- a no-op if it's
-        already running (checked via ``Popen.poll() is None``, since
-        ``subprocess`` gives no other way to ask). Distinct from
-        :meth:`on_configure_vizard`, which never touches a process at
-        all: it only decides how the NEXT run feeds an instance of
-        Vizard, wherever/however that instance got started.
+        """Starts the external Vizard application -- a no-op if an
+        instance already running is already suitable (see below).
+        Distinct from :meth:`on_configure_vizard`, which never touches a
+        process at all: it only decides how the NEXT run feeds an
+        instance of Vizard, wherever/however that instance got started.
 
         When the current Vizard Configuration is set to live-stream,
         Vizard is launched with its own ``-directComm`` command-line
@@ -464,6 +471,29 @@ class MainWindow(QMainWindow):
         nothing, because nobody had typed the socket address in and
         clicked "Start Visualization" by hand.
 
+        A previously-tracked ``self._vizard_process`` (one THIS method
+        itself launched earlier, in this same session -- see
+        ``self._vizard_direct_comm_address``) is only trusted as-is if it
+        already matches what's needed now: still running, and either no
+        ``-directComm`` is needed this time, or it already has the one
+        needed. A live-stream run needing one that the tracked instance
+        doesn't have is a real, reachable case -- e.g. Vizard was
+        launched earlier for a save-file run, or before Vizard
+        Configuration was ever set to live-stream -- and trusting it
+        anyway would reproduce the exact original bug, just one launch
+        later. That mismatched instance is terminated and a fresh one
+        relaunched with the correct flag instead. The reverse (a
+        live-stream-ready instance already running, but a save-file/no
+        -request launch is what's needed now) is left alone -- having
+        ``-directComm`` active doesn't stop Vizard from also opening a
+        save file, so there is nothing broken to fix there. An instance
+        this session never itself launched (``self._vizard_process`` is
+        still ``None`` -- started by the user outside missionStudio, or
+        in an earlier session) is left completely alone; a second,
+        correctly-configured instance is launched alongside it instead,
+        since there is no reliable way to ask an arbitrary already
+        -running Vizard process "are you already connected".
+
         Returns True once Vizard is confirmed running (already was, or
         was just started) by the end of this call, False if the user
         cancelled a browse prompt or launching genuinely failed (an
@@ -471,9 +501,17 @@ class MainWindow(QMainWindow):
         this to decide whether it's safe to start a live-stream run at
         all.
         """
+        direct_comm_address = (
+            DEFAULT_LIVE_STREAM_ADDRESS
+            if self._vizard_request is not None and self._vizard_request.live_stream
+            else None
+        )
         if self._vizard_process is not None and self._vizard_process.poll() is None:
-            self.statusBar().showMessage("Vizard is already running.")
-            return True
+            if not direct_comm_address or self._vizard_direct_comm_address == direct_comm_address:
+                self.statusBar().showMessage("Vizard is already running.")
+                return True
+            self._terminate_vizard_process()
+
         executable = find_vizard_executable()
         if executable is None:
             path_str, _selected_filter = QFileDialog.getOpenFileName(self, "Locate the Vizard application")
@@ -481,18 +519,33 @@ class MainWindow(QMainWindow):
                 return False
             executable = Path(path_str)
             remember_vizard_executable(executable)
-        direct_comm_address = (
-            DEFAULT_LIVE_STREAM_ADDRESS
-            if self._vizard_request is not None and self._vizard_request.live_stream
-            else None
-        )
         try:
             self._vizard_process = launch_vizard(executable, direct_comm_address=direct_comm_address)
         except OSError as exc:
             QMessageBox.critical(self, "Could not launch Vizard", f"{executable}: {exc}")
             return False
+        self._vizard_direct_comm_address = direct_comm_address
         self.statusBar().showMessage(f"Launched Vizard ({executable}).")
         return True
+
+    def _terminate_vizard_process(self) -> None:
+        """Stops ``self._vizard_process`` (a mismatched instance
+        :meth:`on_launch_vizard` is about to replace -- see its own
+        docstring) and waits (bounded, so a Vizard that refuses to exit
+        can't hang the GUI thread forever) for it to actually stop before
+        returning, so the port it may have bound is free for the
+        replacement instance. ``terminate()`` first (a clean exit, in
+        case Vizard has anything to flush/save), ``kill()`` only if that
+        doesn't work within the timeout.
+        """
+        self._vizard_process.terminate()
+        try:
+            self._vizard_process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self._vizard_process.kill()
+            self._vizard_process.wait(timeout=5.0)
+        self._vizard_process = None
+        self._vizard_direct_comm_address = None
 
     def on_run(self) -> None:
         try:

@@ -1576,27 +1576,48 @@ launch, with nothing to type or click.
   an ordinary (non-live-stream) run never touches Vizard at all, so this
   adds no new behavior there.
 
-**Known residual gap, by design, not fully closed:** if Vizard is
-already running (from an earlier, non-`-directComm` launch, or started
-by the user outside missionStudio entirely) when a live-stream run
-starts, `on_launch_vizard()` -- matching its pre-existing "never
-relaunch while already running" behavior -- trusts it and does not
-relaunch it with `-directComm`, so the same hang can still happen if
-that existing instance was never told to connect. There is no reliable
-way to ask Vizard "are you actually connected" from outside it, so this
-edge case is accepted rather than guessed around.
+**A residual gap, since closed:** the first version of this fix only
+covered the case where `on_launch_vizard()` was actually starting a new
+Vizard instance -- an ALREADY-running one (e.g. launched earlier in the
+same session for a save-file run, or before Vizard Configuration was
+ever set to live-stream) was still trusted as-is, matching the
+pre-existing "never relaunch while already running" behavior, so the
+same hang could still happen one launch later. Closed by tracking which
+`-directComm` address (if any) `self._vizard_process` was actually
+launched with (`self._vizard_direct_comm_address`): `on_launch_vizard()`
+now only trusts an already-running instance if it already matches what
+this call needs -- a mismatch (specifically, live-stream needed but the
+tracked instance has no live-stream connection) terminates it
+(`_terminate_vizard_process()`: `terminate()`, then `kill()` only if it
+doesn't exit within a bounded 5 s wait) and relaunches a correct one in
+its place. The other direction (a live-stream-ready instance already
+running, but a save-file/no-request launch is what's needed now) is
+deliberately left alone -- `-directComm` being active doesn't stop
+Vizard from also opening a save file. An instance this session never
+itself launched (`self._vizard_process` is still `None` -- started by
+the user outside missionStudio entirely, or in an earlier session) is
+still left completely alone rather than killed -- there is no reliable
+way to ask an arbitrary already-running Vizard process "are you actually
+connected" from outside it, so a second, correctly-configured instance
+is launched alongside it instead of guessing about (or killing) a
+process this app doesn't own. That specific case -- an untracked,
+already-running, not-actually-connected Vizard instance -- is the one
+genuinely irreducible gap left: there is nothing missionStudio can
+inspect from outside to detect it.
 
 **Verification:** `tests/gui/test_vizard_launcher.py` gained two new
 `launch_vizard()` tests (the flag is appended when given, omitted when
-not); `tests/gui/test_main_window.py` gained five new tests covering
-`on_launch_vizard()`'s address selection and `on_run()`'s new
-Vizard-confirmation gate (including that an ordinary run never calls
-`on_launch_vizard()` at all). All pass in this sandbox (577 passed, 53
-skipped). Like the Vizard crash fix earlier in this document, there is
-no way to exercise a real Vizard connection handshake without an actual
-Vizard binary and display, so the `-directComm` flag's effect on Vizard
-itself (as opposed to the argument list missionStudio constructs) is
-unverified here -- report back if a live-stream run still doesn't
+not); `tests/gui/test_main_window.py` gained eight new tests covering
+`on_launch_vizard()`'s address selection, the mismatch-relaunch/
+matching-instance-kept/untracked-instance-left-alone cases above, and
+`on_run()`'s new Vizard-confirmation gate (including that an ordinary
+run never calls `on_launch_vizard()` at all). All pass in this sandbox
+(580 passed, 53 skipped). Like the Vizard crash fix earlier in this
+document, there is no way to exercise a real Vizard connection handshake
+without an actual Vizard binary and display, so the `-directComm` flag's
+effect on Vizard itself (as opposed to the argument list missionStudio
+constructs, and the process-tracking logic around it) is unverified
+here -- report back if a live-stream run still doesn't
 connect after this.
 
 ## Repository layout
