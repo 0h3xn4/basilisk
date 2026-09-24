@@ -75,6 +75,7 @@ narrowly as the Phase 6 part 1 schema module's own docstring describes.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -84,7 +85,9 @@ from ..schema.command import Command
 from ..schema.scenario import Scenario
 from .orbit_maintenance import _rtn_basis, _vnb_basis
 from .results import CommandSummary, ReportEntry, ResultSet
-from .service import SimulationService
+from .service import SimulationService, raise_clear_execution_error
+
+_logger = logging.getLogger(__name__)
 
 # A `while` command's condition is user-authored and can easily be wrong
 # (e.g. a condition that never becomes false because the mission never
@@ -319,7 +322,10 @@ class MissionEngine:
         """
         if self._should_cancel is None:
             self.service.scSim.ConfigureStopTime(target_ns)
-            self.service.scSim.ExecuteSimulation()
+            try:
+                self.service.scSim.ExecuteSimulation()
+            except RuntimeError as exc:
+                raise_clear_execution_error(exc)
             self._elapsed_ns = target_ns
             return
 
@@ -337,7 +343,17 @@ class MissionEngine:
         next_stop_ns = min(self._elapsed_ns + step_ns, target_ns)
         while True:
             self.service.scSim.ConfigureStopTime(next_stop_ns)
-            self.service.scSim.ExecuteSimulation()
+            try:
+                self.service.scSim.ExecuteSimulation()
+            except RuntimeError as exc:
+                # See raise_clear_execution_error's own docstring: how far
+                # the mission clock actually got before this narrows down
+                # which command/tick triggered the divergence.
+                _logger.error(
+                    "_advance_to: ExecuteSimulation failed at t=%.1f s (target %.1f s)",
+                    next_stop_ns * macros.NANO2SEC, target_ns * macros.NANO2SEC,
+                )
+                raise_clear_execution_error(exc)
             self._elapsed_ns = next_stop_ns
             if self._should_cancel():
                 raise MissionEngineCancelled(self.service._extract_results(), summary)
@@ -404,7 +420,10 @@ class MissionEngine:
         cap_ns = self._elapsed_ns + macros.sec2nano(cap_days * 86400.0)
         if self._should_cancel is None:
             self.service.scSim.ConfigureStopTime(cap_ns)
-            self.service.scSim.ExecuteSimulation()
+            try:
+                self.service.scSim.ExecuteSimulation()
+            except RuntimeError as exc:
+                raise_clear_execution_error(exc)
         else:
             # Same reasoning as _advance_to() -- the safety cap above can
             # be many days of simulated (and possibly minutes of real
@@ -434,7 +453,14 @@ class MissionEngine:
             next_stop_ns = min(self._elapsed_ns + step_ns, cap_ns)
             while True:
                 self.service.scSim.ConfigureStopTime(next_stop_ns)
-                self.service.scSim.ExecuteSimulation()
+                try:
+                    self.service.scSim.ExecuteSimulation()
+                except RuntimeError as exc:
+                    _logger.error(
+                        "_run_propagate_event: ExecuteSimulation failed at t=%.1f s (cap %.1f s)",
+                        next_stop_ns * macros.NANO2SEC, cap_ns * macros.NANO2SEC,
+                    )
+                    raise_clear_execution_error(exc)
                 if self.service.scSim.eventMap[event_name].occurCounter > 0:
                     break
                 if self._should_cancel():

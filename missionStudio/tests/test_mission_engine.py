@@ -89,6 +89,35 @@ def test_single_propagate_duration_matches_plain_run():
     assert np.array_equal(mission_pos.data, plain_pos.data)
 
 
+def test_propagate_translates_execute_simulation_runtime_error(monkeypatch):
+    """Same fix as tests/test_service_execution_errors.py, applied to
+    MissionEngine's own ExecuteSimulation() call sites (_advance_to's
+    unchunked branch here) -- a bare RuntimeError out of Basilisk's own
+    stepping (e.g. std::bad_alloc from the adaptive-integrator bug
+    documented on engine.service.raise_clear_execution_error) must become
+    a clear SimulationServiceError, not an opaque native exception string,
+    regardless of which of missionStudio's two ExecuteSimulation() callers
+    (SimulationService.run/run_live, or MissionEngine here) hits it.
+    """
+    from missionstudio.engine.mission_engine import MissionEngine
+    from missionstudio.engine.service import SimulationServiceError
+
+    duration_days = 0.1
+    mission_scenario = _scenario(duration_days=duration_days, mission_sequence=[
+        Command(kind="propagate", params={"stop_condition": "duration", "duration_days": duration_days}),
+    ])
+    engine = MissionEngine(mission_scenario)
+    engine.service.build()
+
+    def _boom():
+        raise RuntimeError("std::bad_alloc")
+
+    monkeypatch.setattr(engine.service.scSim, "ExecuteSimulation", _boom)
+
+    with pytest.raises(SimulationServiceError, match="non-physical"):
+        engine.run()
+
+
 def test_multiple_propagate_segments_accumulate_not_restart():
     """The core Phase 6 execution-engine requirement: repeated
     ConfigureStopTime()/ExecuteSimulation() calls (one per propagate

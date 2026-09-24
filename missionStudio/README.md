@@ -1967,6 +1967,109 @@ failed"/"Monte Carlo failed" dialog. Check
 one) for a full traceback before reporting a crash -- it will have far
 more detail than whatever the dialog or terminal showed on their own.
 
+## Template '05' crash, actually root-caused this time
+
+The logging mode above paid off immediately: the user reproduced the
+crash and the new log file's traceback showed something genuinely
+different from every earlier assumption in this project's history --
+
+```
+RuntimeError: std::bad_alloc
+  File ".../missionstudio/engine/service.py", line 1023, in run_live
+    self.scSim.ExecuteSimulation()
+  File ".../Basilisk/utilities/SimulationBaseClass.py", line 2006, in ExecuteSimulation
+    self.TotalSim.StepUntilStop(...)
+  File ".../Basilisk/architecture/sim_model.py", line 1524, in StepUntilStop
+    return _sim_model.SimModel_StepUntilStop(self, SimStopTime, stopPri)
+```
+
+A clean, catchable Python `RuntimeError` -- not a raw native crash with no
+Python frame at all. That directly contradicts this project's own earlier
+theory (written into `orbit_maintenance.py`'s guard comments): that a
+Python exception escaping `UpdateState()` (a SWIG director callback) is
+undefined behavior, and that's what produced the two different crash
+signatures. Reading Basilisk's actual C++ source
+(`src/architecture/system_model/sim_model.cpp`) shows that theory was
+wrong -- `SimThreadExecution`'s worker-thread loop wraps every tick in
+`catch (...) { threadException = std::current_exception(); }`, and the
+parent thread cleanly `std::rethrow_exception`s it, which SWIG surfaces
+as an ordinary Python exception. No UB; this project's Basilisk version
+has real cross-thread exception safety.
+
+The ACTUAL mechanism, found by then reading
+`src/simulation/dynamics/_GeneralModuleFiles/svIntegratorAdaptiveRungeKutta.h`
+(the code behind `rkf45`/`rkf78`, the integrators this project's
+templates use): once the integrated state goes non-finite (NaN/inf, from
+any cause), `computeMaxRelativeError()` returns NaN. The step-acceptance
+check `maxRelError <= 1.` is then always false (every comparison against
+NaN is false in IEEE 754), so `integrate()`'s `while (time < startingTime
++ desiredTimeStep)` loop never advances `time` and never exits. Worse,
+the "shrink the step and retry" fallback that would normally recover from
+a rejected step can't either: `std::min`/`std::max` called with a NaN
+first argument return that same NaN argument (both are implemented as
+`(b < a) ? b : a`, and any `< NaN` comparison is false), so the computed
+`newTimeStep` stays NaN forever too. The result is a genuine infinite
+C++ loop, re-evaluating the same NaN state and allocating fresh `Eigen`
+temporaries every iteration, until the process's heap is exhausted --
+`std::bad_alloc` (a clean allocation failure) on one run, heap corruption
+(`basic_string::_M_create`, an unrelated allocation tripping over an
+already-exhausted/corrupted heap) on another: same root cause, whichever
+allocation happens to be the one that finally fails. This also explains
+the near-instant crash timing (the whole thing happens inside one C++
+call, a tight allocate-and-retry loop with no artificial delay) regardless
+of how much simulated time had already completed successfully before it.
+
+**What is NOT the cause, now confirmed:** the `orbit_maintenance.py`
+finiteness guards (the earlier fix) were never wrong to add -- a
+non-finite spacecraft state was never safe input to `rv2elem()` -- but
+they were never going to be *sufficient* either. The state can go
+non-finite entirely inside Basilisk's own equations-of-motion/integrator,
+strictly between one tick's guarded read and the next, with no Python
+-level hook in between to catch it. `orbit_maintenance.py`'s own comments
+are corrected to reflect this (and to drop the wrong "UB" claim).
+
+**What this project CAN fix**, since the underlying integrator bug lives
+in Basilisk's own C++ (not something this app controls, and not
+something a from-source rebuild is practical to depend on here -- see
+this README's own "Environment honesty note" on why a from-source build
+has historically been avoided): turn the resulting crash into an
+immediately actionable message instead of a bare native exception string.
+New `engine.service.raise_clear_execution_error()` wraps every
+`scSim.ExecuteSimulation()` call in this codebase (`SimulationService.run()`/
+`run_live()`, and all three call sites in `MissionEngine._advance_to()`/
+`_run_propagate_event()`) in `try`/`except RuntimeError`, re-raising as a
+`SimulationServiceError` that explains the actual mechanism above and
+points at the concrete things that commonly cause a state to go
+non-physical in the first place (a runaway commanded force/torque -- check
+station-keeping/phasing-keeping/constant-thrust configuration for a sign
+or magnitude error -- or an orbit decaying into the central body).
+`SimulationService.run_live()` also now logs progress (`INFO`, sim time
+and percent complete) after every chunk, and logs an `ERROR` with exactly
+how far the mission clock got before a failure -- so a future crash's log
+file will show precisely which portion of the run diverged, rather than
+leaving that as a guess.
+
+This still doesn't identify *why* template '05' specifically ends up with
+a non-finite state in the first place -- that remains open, and would
+need either a reproducible local Basilisk build (not available in this
+sandbox) or the user narrowing down which of the two spacecraft's
+controllers (or plain two-body dynamics) is responsible from a future,
+now-far-more-informative log file. But "Run failed: std::bad_alloc" with
+nothing else to go on is no longer where this ends.
+
+**Verification:** `tests/test_service_execution_errors.py` (3 tests) and
+one new test in `tests/test_mission_engine.py`
+(`test_propagate_translates_execute_simulation_runtime_error`), all
+`requires_basilisk` (auto-skipped in this sandbox): construct a real
+`SimulationService`/`MissionEngine`, monkeypatch the real, already-built
+`scSim.ExecuteSimulation` to raise `RuntimeError("std::bad_alloc")` (an
+injected failure -- reproducing the actual integrator bug isn't a
+reliable thing to build a fast unit test around), and confirm a
+`SimulationServiceError` mentioning "non-physical" is raised with the
+original exception preserved as `__cause__`. 600 passed, 64 skipped in
+this sandbox (4 more skipped, matching the 4 new tests). Not yet
+confirmed against a real Basilisk build.
+
 ## Repository layout
 
 ```

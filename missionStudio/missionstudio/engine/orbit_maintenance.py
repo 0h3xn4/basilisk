@@ -467,19 +467,39 @@ class PhasingKeepingController(sysModel.SysModel):
         # neither of which is a real slot on that class -- see
         # engine.service._osculating_elements's matching comment) -- it
         # crashes with AttributeError instead of returning a clean NaN
-        # result. Reached from here, that AttributeError would escape a
-        # SWIG director callback (UpdateState() itself), which is
-        # undefined behavior, not a clean Python exception -- confirmed by
-        # two DIFFERENT native crash signatures (basic_string::_M_create,
-        # std::bad_alloc) from the exact same scenario on different runs,
-        # the classic symptom of memory corruption rather than a
-        # deterministic failure. Never call it with non-finite input:
-        # command no thrust and hold state this tick instead (the
-        # non-finite state is either read before either spacecraft's
-        # dynamics has published a first real sample yet, or the
-        # simulation has already gone non-physical -- either way, nothing
-        # useful can be computed from it, but there is no safe way to
-        # raise from inside a director callback either).
+        # result.
+        #
+        # An EARLIER version of this comment claimed that AttributeError
+        # would escape UpdateState() (a SWIG director callback) as
+        # undefined behavior -- wrong, corrected after actually reading
+        # Basilisk's own C++ source (architecture/system_model/sim_model.cpp):
+        # SimThreadExecution's worker loop wraps every tick in `catch (...)`
+        # and cleanly re-throws on the parent thread, so a Python exception
+        # raised from here becomes an ordinary, catchable Python
+        # RuntimeError, not UB. The two different native-looking crash
+        # signatures this scenario produced (basic_string::_M_create,
+        # std::bad_alloc) have a different, now-confirmed cause instead:
+        # once ANY dynamics state goes non-finite (from whatever source),
+        # Basilisk's adaptive integrator (rkf45/rkf78 -- see
+        # simulation/dynamics/_GeneralModuleFiles/svIntegratorAdaptiveRungeKutta.h)
+        # computes a NaN error estimate, and every comparison against NaN
+        # is false -- so its "is this step good enough" check never
+        # succeeds and its integration loop never exits, reallocating
+        # temporaries every iteration until the heap is exhausted. See
+        # engine.service.raise_clear_execution_error's own docstring for
+        # the full mechanism and where that's now caught and turned into a
+        # clear error instead of a bare native exception string.
+        #
+        # Guarding this call site never hurts (a non-finite state was
+        # never safe input regardless of what happens after), but it is
+        # NOT sufficient by itself to prevent the crash above -- the state
+        # can go non-finite entirely inside Basilisk's own EOM/integrator,
+        # between one tick's finite read here and the next, with no
+        # Python-level hook in between to catch it. Command no thrust and
+        # hold state this tick instead (the non-finite state read here is
+        # either before either spacecraft's dynamics has published a first
+        # real sample yet, or the simulation has already gone non-physical
+        # -- either way, nothing useful can be computed from it).
         if not (np.all(np.isfinite(rA)) and np.all(np.isfinite(vA))
                 and np.all(np.isfinite(rB)) and np.all(np.isfinite(vB))):
             if self.extForceEffectorB is not None:

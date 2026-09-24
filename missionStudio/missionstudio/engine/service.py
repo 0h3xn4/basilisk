@@ -147,6 +147,7 @@ installed version happens to add.
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -192,6 +193,8 @@ _INTEGRATORS = {
 # non-live run() call.
 _LIVE_DEFAULT_FRAMES = 60
 
+_logger = logging.getLogger(__name__)
+
 
 class SimulationServiceError(Exception):
     """Raised on anything that prevents building or running the
@@ -200,6 +203,61 @@ class SimulationServiceError(Exception):
     a specific, actionable message; this service never silently skips a
     requested feature.
     """
+
+
+def raise_clear_execution_error(exc: Exception) -> None:
+    """Re-raises a ``RuntimeError`` out of ``scSim.ExecuteSimulation()`` as
+    a :class:`SimulationServiceError` with an actual explanation, instead
+    of letting Basilisk's own bare exception message (e.g. ``std::bad_alloc``
+    or ``basic_string::_M_create``) be the only thing the user ever sees.
+
+    Real crash, root-caused by reading Basilisk's own C++ source after a
+    user hit this twice on the same template scenario: a Python exception
+    escaping a SWIG director-overridden ``UpdateState()`` is NOT undefined
+    behavior in this Basilisk version, contrary to what an earlier revision
+    of this comment (and ``engine.orbit_maintenance``'s matching one)
+    assumed -- ``SimThreadExecution``'s worker-thread loop
+    (``architecture/system_model/sim_model.cpp``) wraps every tick in
+    ``catch (...) { threadException = std::current_exception(); }`` and
+    the parent thread re-throws it cleanly via ``std::rethrow_exception``,
+    which SWIG surfaces to Python as an ordinary, catchable ``RuntimeError``
+    -- exactly what reached here.
+
+    The ACTUAL mechanism (also confirmed by reading
+    ``simulation/dynamics/_GeneralModuleFiles/svIntegratorAdaptiveRungeKutta.h``):
+    once the integrated state goes non-finite (NaN/inf) partway through a
+    dynamics tick, ``computeMaxRelativeError()`` returns NaN; the
+    step-acceptance check ``maxRelError <= 1.`` is then always false (every
+    comparison against NaN is false), so ``integrate()``'s ``while (time <
+    startingTime + desiredTimeStep)`` loop never advances `time` and never
+    exits -- ``std::min``/``std::max`` on a NaN argument in that same
+    function also always return the NaN side, so the "shrink the step and
+    retry" fallback can't recover either. The result is a genuine infinite
+    loop, re-evaluating the (still-NaN) state and allocating fresh
+    ``Eigen`` temporaries every iteration, until the process's heap is
+    exhausted -- which is why this surfaces as ``std::bad_alloc`` (a clean
+    allocation failure) on some runs and heap corruption
+    (``basic_string::_M_create``, some unrelated allocation elsewhere
+    tripping over an already-exhausted/corrupted heap) on others: same
+    root cause, whichever allocation happens to be the one that finally
+    fails.
+
+    This can't be prevented from Python -- it happens entirely inside one
+    C++ call with no hook back into Basilisk's own EOM/integrator -- so
+    the best this service can do is turn the resulting crash into a clear,
+    actionable message instead of a bare native exception string.
+    """
+    raise SimulationServiceError(
+        f"Basilisk's own simulation stepping failed ({type(exc).__name__}: {exc}). This is almost "
+        f"always caused by the simulated state going non-physical (NaN/inf) partway through a "
+        f"dynamics tick -- e.g. an orbit decaying into the central body, or a runaway commanded "
+        f"force/torque (check any station-keeping/phasing-keeping/constant-thrust configuration, "
+        f"and any Mission Sequence attitude-control block, for a sign error or an unrealistic "
+        f"magnitude). Basilisk's adaptive integrator (rkf45/rkf78) has no way to detect a "
+        f"non-finite local error estimate, so instead of failing cleanly it can spin indefinitely "
+        f"trying to shrink its step size below tolerance, exhausting memory rather than raising a "
+        f"clear error itself."
+    ) from exc
 
 
 class SimulationCancelled(Exception):
@@ -935,7 +993,10 @@ class SimulationService:
         """
         if self.scSim is None:
             self.build()
-        self.scSim.ExecuteSimulation()
+        try:
+            self.scSim.ExecuteSimulation()
+        except RuntimeError as exc:
+            raise_clear_execution_error(exc)
         return self._extract_results()
 
     def run_live(self, on_progress: Callable[[ResultSet, float], None],
@@ -1020,8 +1081,26 @@ class SimulationService:
         next_stop_ns = min(step_ns, stop_time_ns)
         while True:
             self.scSim.ConfigureStopTime(next_stop_ns)
-            self.scSim.ExecuteSimulation()
+            try:
+                self.scSim.ExecuteSimulation()
+            except RuntimeError as exc:
+                # Log how far the run actually got before this -- see
+                # raise_clear_execution_error's own docstring for why this
+                # can otherwise look like an immediate, unexplained crash:
+                # the failure is a genuine infinite loop inside Basilisk's
+                # own C++ integrator once triggered, so it always dies
+                # quickly in wall-clock time regardless of how much SIM
+                # time (visible here) had already completed cleanly.
+                _logger.error(
+                    "run_live: ExecuteSimulation failed at t=%.1f s of %.1f s (%.1f%% complete)",
+                    next_stop_ns * macros.NANO2SEC, stop_time_s, 100.0 * next_stop_ns / stop_time_ns,
+                )
+                raise_clear_execution_error(exc)
             fraction_complete = min(1.0, next_stop_ns / stop_time_ns)
+            _logger.info(
+                "run_live: %.1f%% complete (t=%.1f s of %.1f s)",
+                100.0 * fraction_complete, next_stop_ns * macros.NANO2SEC, stop_time_s,
+            )
             partial_result = self._extract_results()
             on_progress(partial_result, fraction_complete)
             if should_cancel is not None and should_cancel():
