@@ -32,10 +32,38 @@ like ``cli.py``'s ``cmd_run()`` does: a non-empty sequence runs through
 always carries both the :class:`engine.results.ResultSet` and (when a
 ``mission_sequence`` ran) its :class:`engine.results.CommandSummary`, or
 ``None`` for the summary otherwise.
+
+**Abort a running simulation** (direct user feedback: "there should be
+an option to abort a running simulation, if needed, without breaking
+the tool"): :meth:`RunWorker.request_cancel` sets a
+:class:`threading.Event`, checked cooperatively between simulation
+chunks (``SimulationService.run_live``'s ``should_cancel``) or between
+mission_sequence commands (``MissionEngine``'s ``should_cancel``) --
+never via ``QThread.terminate()`` or any other forced kill, which could
+leave Basilisk's C++ simulation state mid-mutation and is exactly the
+kind of "breaking the tool" this was asked to avoid. Cancellation
+therefore always takes effect at the next such checkpoint, not
+instantly (there is no hook into the middle of a single
+``ExecuteSimulation()`` call -- see both ``should_cancel`` docstrings),
+and a cancelled run reports the ``cancelled`` signal with whatever
+partial ``ResultSet``/``CommandSummary`` had been produced so far,
+rather than silently discarding it.
+
+The non-mission_sequence path now ALWAYS runs through
+``SimulationService.run_live()`` (never the plain, non-chunked
+``run()``), specifically so it's always cancellable regardless of the
+"Live Plot" toggle -- ``self.live`` now only controls whether
+``progress`` is actually emitted (i.e. whether the plot redraws as it
+goes), not whether the run is chunked at all. ``run_live()``'s own
+docstring already notes ``_LIVE_DEFAULT_FRAMES`` (60) bounds this to a
+small, fixed number of extra ``ExecuteSimulation()`` calls regardless
+of run length -- negligible next to the actual simulated work, so this
+applies with no live plot watching just as safely as with one.
 """
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -48,28 +76,37 @@ class RunWorker(QThread):
     finished_ok = Signal(object, object)  # engine.results.ResultSet, Optional[engine.results.CommandSummary]
     failed = Signal(str)
     progress = Signal(object, float)  # engine.results.ResultSet (partial), fraction_complete in [0, 1]
+    cancelled = Signal(object, object)  # engine.results.ResultSet (partial), Optional[engine.results.CommandSummary]
 
     def __init__(self, scenario: Scenario, vizard_request: Optional[object] = None, live: bool = False, parent=None):
         super().__init__(parent)
         self.scenario = scenario
         self.vizard_request = vizard_request  # engine.vizard.VizardRequest, or None
-        # When True, runs via SimulationService.run_live() instead of
-        # run(), emitting `progress` after each chunk so a connected
-        # ResultsWidget can redraw as the simulation goes -- see
-        # MainWindow.on_run()/the "Live plot" toggle. Ignored when
-        # scenario.mission_sequence is non-empty: engine.mission_engine.
-        # MissionEngine.run() has no run_live() equivalent (it has no
-        # per-command progress callback to drive one), same as cli.py's
-        # cmd_run() dispatch never offers a live mode for a mission
-        # sequence either. Qt signals emitted from a QThread are queued to
-        # the receiver's own thread automatically (the default
-        # AutoConnection), so this is safe to connect straight to
-        # GUI-thread slots without extra locking.
+        # Whether `progress` is actually emitted as the run goes (driving
+        # a live-updating plot -- see MainWindow.on_run()/the "Live plot"
+        # toggle). No longer decides HOW the run executes -- see this
+        # module's own docstring on why the non-mission_sequence path is
+        # always chunked via run_live() now, live or not. Qt signals
+        # emitted from a QThread are queued to the receiver's own thread
+        # automatically (the default AutoConnection), so this is safe to
+        # connect straight to GUI-thread slots without extra locking.
         self.live = live
+        self._cancel_requested = threading.Event()
+
+    def request_cancel(self) -> None:
+        """Thread-safe -- called from the GUI thread while this worker's
+        run() is executing on its own thread (see this module's own
+        docstring for the cooperative-cancellation design and why a
+        forced kill was never an option here).
+        """
+        self._cancel_requested.set()
+
+    def _should_cancel(self) -> bool:
+        return self._cancel_requested.is_set()
 
     def run(self) -> None:
         try:
-            from ..engine.service import SimulationService
+            from ..engine.service import SimulationCancelled, SimulationService
         except ImportError as exc:
             self.failed.emit(
                 f"Basilisk is not installed/built ({exc}) -- cannot run a simulation until it is. "
@@ -80,13 +117,25 @@ class RunWorker(QThread):
             service = SimulationService(self.scenario, vizard_request=self.vizard_request)
             command_summary = None
             if self.scenario.mission_sequence:
-                from ..engine.mission_engine import MissionEngine
+                from ..engine.mission_engine import MissionEngine, MissionEngineCancelled
 
-                result, command_summary = MissionEngine(self.scenario, service=service).run()
-            elif self.live:
-                result = service.run_live(lambda partial, fraction: self.progress.emit(partial, fraction))
+                try:
+                    result, command_summary = MissionEngine(
+                        self.scenario, service=service, should_cancel=self._should_cancel
+                    ).run()
+                except MissionEngineCancelled as exc:
+                    self.cancelled.emit(exc.partial_result, exc.summary)
+                    return
             else:
-                result = service.run()
+                def on_progress(partial, fraction):
+                    if self.live:
+                        self.progress.emit(partial, fraction)
+
+                try:
+                    result = service.run_live(on_progress, should_cancel=self._should_cancel)
+                except SimulationCancelled as exc:
+                    self.cancelled.emit(exc.partial_result, None)
+                    return
         except Exception as exc:  # noqa: BLE001 -- surface ANY failure to the GUI, never crash the worker silently
             self.failed.emit(str(exc))
             return

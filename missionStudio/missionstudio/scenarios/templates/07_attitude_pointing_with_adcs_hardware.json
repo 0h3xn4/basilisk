@@ -1,0 +1,178 @@
+{
+  "name": "07 - Attitude pointing with real ADCS hardware",
+  "epoch_utc": "2030-01-01T00:00:00",
+  "simulation_mode": "full_attitude",
+  "gravity": {
+    "central_body": "earth",
+    "central_body_degree": 0,
+    "third_body_perturbers": [
+      "sun"
+    ]
+  },
+  "spacecraft": [
+    {
+      "name": "sat-1",
+      "orbit": {
+        "type": "classical_elements",
+        "semi_major_axis_km": 6928.0,
+        "eccentricity": 0.0,
+        "inclination_deg": 45.0,
+        "raan_deg": 0.0,
+        "arg_periapsis_deg": 0.0,
+        "anomaly_type": "true",
+        "true_anomaly_deg": 0.0,
+        "mean_anomaly_deg": null,
+        "position_km": null,
+        "velocity_km_s": null,
+        "tle_line1": null,
+        "tle_line2": null
+      },
+      "dry_mass_kg": 50.0,
+      "inertia_kg_m2": [
+        5.0,
+        0.0,
+        0.0,
+        0.0,
+        5.0,
+        0.0,
+        0.0,
+        0.0,
+        5.0
+      ],
+      "sigma_bn_init": [
+        0.1,
+        0.2,
+        -0.15
+      ],
+      "omega_bn_b_init_rad_s": [
+        0.001,
+        -0.001,
+        0.0005
+      ],
+      "enable_drag": false,
+      "drag_coeff": 2.2,
+      "drag_area_m2": 1.0,
+      "enable_srp": false,
+      "srp_coeff": 1.3,
+      "srp_area_m2": 1.0,
+      "sensors": [
+        {
+          "kind": "star_tracker",
+          "name": "st-1",
+          "params": {
+            "noise_arcsec": 5.0
+          }
+        },
+        {
+          "kind": "imu",
+          "name": "imu-1",
+          "params": {
+            "gyro_noise_rad_s": 1e-05
+          }
+        },
+        {
+          "kind": "coarse_sun_sensor",
+          "name": "css-1",
+          "params": {
+            "nHat_B": [
+              1.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      "actuators": [
+        {
+          "kind": "reaction_wheel",
+          "name": "rw-1",
+          "params": {
+            "gsHat_B": [
+              1.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "kind": "reaction_wheel",
+          "name": "rw-2",
+          "params": {
+            "gsHat_B": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "kind": "reaction_wheel",
+          "name": "rw-3",
+          "params": {
+            "gsHat_B": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          }
+        }
+      ],
+      "fsw_mode": "sunSafePoint",
+      "fsw_params": {},
+      "control_params": {},
+      "power": {
+        "panel_area_m2": 0.3,
+        "panel_efficiency": 0.28,
+        "panel_normal_b": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "bus_idle_power_w": 0.0,
+        "battery_capacity_wh": 80.0,
+        "battery_initial_soc": 1.0
+      },
+      "rf_link": null,
+      "station_keeping": null,
+      "phasing_keeping": null,
+      "constant_thrust": null,
+      "vizard_model_path": null,
+      "vizard_model_offset_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_rotation_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ],
+  "ground_stations": [],
+  "space_weather": {
+    "source": "celestrak",
+    "local_file_path": null,
+    "cache_dir": null
+  },
+  "sim_settings": {
+    "duration_days": 0.05,
+    "dynamics_task_rate_s": 1.0,
+    "integrator": "rkf78"
+  },
+  "monte_carlo": {
+    "enabled": false,
+    "num_runs": 10,
+    "thread_count": 1,
+    "verbose": false,
+    "dispersions": []
+  },
+  "mission_sequence": [],
+  "description": "The realistic counterpart to '06': the same pointing problem, but with an actual ADCS hardware suite modeled -- a star tracker and IMU for attitude/rate sensing, a coarse sun sensor, and three reaction wheels (orthogonal spin axes) providing the real control torque instead of an idealized effector, plus a solar array + battery power budget (power draw from the sensors/wheels isn't modeled per-component here, but this shows how a full spacecraft config -- attitude AND power -- fits together). fsw_mode 'sunSafePoint' is a safe-mode-style controller that points a body axis at the Sun using simpleNav's own Sun-direction output (see engine/fsw.py's docstring for why no separate sensor message is strictly required even though a coarse_sun_sensor is configured here for realism).\n\nWhat to look at: this is the shape a real small-sat's SpacecraftConfig looks like in practice -- compare it side-by-side with '06' to see exactly what real hardware adds (sensors/actuators/power blocks) on top of the bare pointing-mode concept.\n\nTry changing: the reaction wheels' Js/u_max/maxMomentum (see the GUI's sensor/actuator editor for the full per-kind parameter list and units), or swap fsw_mode to 'locationPointing' with fsw_params={'target_ground_station': '<name>'} once a ground_stations entry exists in this scenario.",
+  "schema_version": 1
+}

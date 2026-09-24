@@ -76,7 +76,7 @@ narrowly as the Phase 6 part 1 schema module's own docstring describes.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -104,6 +104,18 @@ _WHILE_MAX_ITERATIONS = 10_000
 # MissionEngineError is raised (not a silent partial result) if the event
 # never fires within it.
 _EVENT_PROPAGATE_SAFETY_MULTIPLIER = 10.0  # [-]
+
+# A single propagate command's ExecuteSimulation() call used to run
+# straight through to its target time in one shot -- fine with no
+# should_cancel callback, but with one (the "abort a running simulation"
+# GUI feature), it meant Abort had no effect for as long as that ONE
+# command took, which could be minutes of real wall-clock time for a
+# multi-day/multi-week propagate segment (a real user report: clicking
+# Abort froze with no effect for minutes). Mirrors
+# engine.service._LIVE_DEFAULT_FRAMES's reasoning: chunk a should_cancel
+# -bearing propagate into roughly this many ExecuteSimulation() calls
+# instead, checking should_cancel() after each one -- see _advance_to().
+_PROPAGATE_CANCEL_CHECK_FRAMES = 60
 
 # assignment.target's second dotted segment (the "controller" a mission
 # sequence can vary mid-run) -> the live engine.orbit_maintenance
@@ -136,6 +148,23 @@ class MissionEngineError(Exception):
     """
 
 
+class MissionEngineCancelled(Exception):
+    """Raised by :meth:`MissionEngine.run` when the ``should_cancel``
+    callback it was given starts returning ``True`` between commands (see
+    ``gui.run_worker.RunWorker.request_cancel`` -- the "abort a running
+    simulation" GUI feature; mirrors ``engine.service.SimulationCancelled``,
+    the same idea for a plain (non-mission_sequence) run). Carries
+    ``partial_result``/``summary``, whatever the mission sequence had
+    produced by the time it was cancelled, so the caller can keep/show
+    that instead of losing it.
+    """
+
+    def __init__(self, partial_result: ResultSet, summary: CommandSummary):
+        super().__init__("Mission sequence cancelled by the user")
+        self.partial_result = partial_result
+        self.summary = summary
+
+
 class MissionEngine:
     """Walks ``scenario.mission_sequence`` against a
     :class:`~missionstudio.engine.service.SimulationService`, one
@@ -152,9 +181,11 @@ class MissionEngine:
     :meth:`run`.
     """
 
-    def __init__(self, scenario: Scenario, service: Optional[SimulationService] = None):
+    def __init__(self, scenario: Scenario, service: Optional[SimulationService] = None,
+                 should_cancel: Optional[Callable[[], bool]] = None):
         self.scenario = scenario
         self.service = service or SimulationService(scenario)
+        self._should_cancel = should_cancel
         self._event_counter = 0
         # The cumulative REQUESTED mission time [ns] each propagate command's
         # absolute ConfigureStopTime() target is built from -- deliberately
@@ -189,6 +220,22 @@ class MissionEngine:
         Callers that want the pre-Phase-6 "just propagate for
         ``sim_settings.duration_days``" behavior should keep using
         :meth:`SimulationService.run` directly, not this class.
+
+        Raises :class:`MissionEngineCancelled` (carrying whatever partial
+        ``ResultSet``/``CommandSummary`` exist so far) if this instance
+        was constructed with a ``should_cancel`` callback that starts
+        returning ``True`` -- checked between top-level commands (and,
+        since a ``while`` body re-enters :meth:`_run_commands` once per
+        iteration, between iterations too), AND, since a single
+        ``propagate`` command can itself take minutes of real wall-clock
+        time (long enough that waiting for it to finish made Abort look
+        broken), during one too: a ``propagate`` command's
+        ``ExecuteSimulation()`` call is chunked into roughly
+        ``_PROPAGATE_CANCEL_CHECK_FRAMES`` pieces (see :meth:`_advance_to`)
+        with a ``should_cancel()`` check between each, the same
+        chunk-boundary granularity ``engine.service.SimulationService.
+        run_live``'s own ``should_cancel`` already has for the
+        non-mission_sequence path.
         """
         if self.service.scSim is None:
             self.service.build()
@@ -200,6 +247,8 @@ class MissionEngine:
 
     def _run_commands(self, commands: List[Command], summary: CommandSummary, path: str) -> None:
         for i, command in enumerate(commands):
+            if self._should_cancel is not None and self._should_cancel():
+                raise MissionEngineCancelled(self.service._extract_results(), summary)
             self._run_command(command, summary, f"{path}[{i}]")
 
     def _run_command(self, command: Command, summary: CommandSummary, path: str) -> None:
@@ -219,6 +268,16 @@ class MissionEngine:
             handler(command, summary, path)
         except MissionEngineError:
             raise
+        except MissionEngineCancelled:
+            # Raised by a should_cancel() checkpoint possibly several
+            # levels down the command tree (e.g. inside a `while` loop's
+            # children -- see _run_commands()) -- must propagate to run()
+            # unchanged, not get wrapped into a MissionEngineError by the
+            # generic handler below, or RunWorker's
+            # `except MissionEngineCancelled` would never see it and a
+            # user-requested abort would be reported as a simulation
+            # failure instead of a clean cancellation.
+            raise
         except Exception as exc:
             raise MissionEngineError(f"{path} ({command.kind}): {exc}") from exc
 
@@ -230,9 +289,7 @@ class MissionEngine:
         stop_condition = command.params.get("stop_condition", "duration")
         if stop_condition == "duration":
             target_ns = self._elapsed_ns + macros.sec2nano(command.params["duration_days"] * 86400.0)
-            self.service.scSim.ConfigureStopTime(target_ns)
-            self.service.scSim.ExecuteSimulation()
-            self._elapsed_ns = target_ns
+            self._advance_to(target_ns, summary)
         elif stop_condition == "epoch":
             stop_epoch_utc = command.params["stop_epoch_utc"]
             stop_epoch = datetime.fromisoformat(stop_epoch_utc)
@@ -243,13 +300,52 @@ class MissionEngine:
                     f"{path}: propagate.stop_epoch_utc {stop_epoch_utc!r} is not after the current mission "
                     "time -- stop_epoch_utc is an absolute epoch, not an offset"
                 )
+            self._advance_to(target_ns, summary)
+        else:  # "event" -- validated by Command.validate()
+            self._run_propagate_event(command, summary, path)
+
+    def _advance_to(self, target_ns: int, summary: CommandSummary) -> None:
+        """Runs the simulation from ``self._elapsed_ns`` up to
+        ``target_ns``. With no ``should_cancel`` callback (the default),
+        this is exactly the previous behavior -- one
+        ``ConfigureStopTime()``/``ExecuteSimulation()`` pair, no extra
+        overhead. With one, the call is chunked into roughly
+        ``_PROPAGATE_CANCEL_CHECK_FRAMES`` pieces instead (its own
+        comment explains why), raising :class:`MissionEngineCancelled`
+        between chunks exactly like :meth:`_run_commands` does between
+        commands -- ``self._elapsed_ns`` is kept in sync with whatever
+        was actually simulated so far either way, so a cancelled (or
+        completed) chunk never loses track of the mission clock.
+        """
+        if self._should_cancel is None:
             self.service.scSim.ConfigureStopTime(target_ns)
             self.service.scSim.ExecuteSimulation()
             self._elapsed_ns = target_ns
-        else:  # "event" -- validated by Command.validate()
-            self._run_propagate_event(command, path)
+            return
 
-    def _run_propagate_event(self, command: Command, path: str) -> None:
+        from Basilisk.utilities import macros
+
+        remaining_ns = target_ns - self._elapsed_ns
+        if remaining_ns <= 0:
+            self._elapsed_ns = target_ns
+            return
+        step_ns = max(
+            1,
+            max(macros.sec2nano(self.scenario.sim_settings.dynamics_task_rate_s),
+                remaining_ns // _PROPAGATE_CANCEL_CHECK_FRAMES),
+        )
+        next_stop_ns = min(self._elapsed_ns + step_ns, target_ns)
+        while True:
+            self.service.scSim.ConfigureStopTime(next_stop_ns)
+            self.service.scSim.ExecuteSimulation()
+            self._elapsed_ns = next_stop_ns
+            if self._should_cancel():
+                raise MissionEngineCancelled(self.service._extract_results(), summary)
+            if next_stop_ns >= target_ns:
+                break
+            next_stop_ns = min(next_stop_ns + step_ns, target_ns)
+
+    def _run_propagate_event(self, command: Command, summary: CommandSummary, path: str) -> None:
         """``propagate.stop_condition == "event"``: runs until the named
         spacecraft crosses periapsis or apoapsis, detected as a sign
         change in radial velocity (``dot(r, v) / |r|``) -- exactly zero at
@@ -306,8 +402,46 @@ class MissionEngine:
 
         cap_days = max(self.scenario.sim_settings.duration_days, 1.0) * _EVENT_PROPAGATE_SAFETY_MULTIPLIER  # [d]
         cap_ns = self._elapsed_ns + macros.sec2nano(cap_days * 86400.0)
-        self.service.scSim.ConfigureStopTime(cap_ns)
-        self.service.scSim.ExecuteSimulation()
+        if self._should_cancel is None:
+            self.service.scSim.ConfigureStopTime(cap_ns)
+            self.service.scSim.ExecuteSimulation()
+        else:
+            # Same reasoning as _advance_to() -- the safety cap above can
+            # be many days of simulated (and possibly minutes of real
+            # wall-clock) time, so a single unchunked ExecuteSimulation()
+            # call up to it would be just as unresponsive to Abort as a
+            # long duration/epoch propagate was. The registered event
+            # (createNewEvent() above) stays active across chunk
+            # boundaries -- it can still fire mid-chunk and end this
+            # ExecuteSimulation() call early exactly as it would in one
+            # unchunked call -- so chunking never delays detecting it,
+            # only adds a should_cancel() checkpoint between chunks.
+            #
+            # Deliberately sized off the SCENARIO's own duration_days,
+            # not cap_days (which is that same duration multiplied by
+            # _EVENT_PROPAGATE_SAFETY_MULTIPLIER=10 -- a rarely-hit upper
+            # bound on the search, not a meaningful step size): sizing
+            # off cap_days would make each chunk ~10x too coarse relative
+            # to how far into a real mission this event realistically
+            # fires, right back to the same "Abort does nothing for a
+            # long time" problem this whole fix exists for.
+            typical_days = max(self.scenario.sim_settings.duration_days, 1.0)  # [d]
+            step_ns = max(
+                1,
+                max(macros.sec2nano(self.scenario.sim_settings.dynamics_task_rate_s),
+                    macros.sec2nano(typical_days * 86400.0) // _PROPAGATE_CANCEL_CHECK_FRAMES),
+            )
+            next_stop_ns = min(self._elapsed_ns + step_ns, cap_ns)
+            while True:
+                self.service.scSim.ConfigureStopTime(next_stop_ns)
+                self.service.scSim.ExecuteSimulation()
+                if self.service.scSim.eventMap[event_name].occurCounter > 0:
+                    break
+                if self._should_cancel():
+                    raise MissionEngineCancelled(self.service._extract_results(), summary)
+                if next_stop_ns >= cap_ns:
+                    break
+                next_stop_ns = min(next_stop_ns + step_ns, cap_ns)
 
         # NOT scSim.terminate: confirmed directly against SimulationBaseClass.py
         # that ExecuteSimulation() unconditionally resets it to False as its

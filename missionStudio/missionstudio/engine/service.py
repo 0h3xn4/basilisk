@@ -202,6 +202,22 @@ class SimulationServiceError(Exception):
     """
 
 
+class SimulationCancelled(Exception):
+    """Raised by :meth:`SimulationService.run_live` when the
+    ``should_cancel`` callback it was given starts returning ``True``
+    mid-run (see ``gui.run_worker.RunWorker.request_cancel`` -- the "abort
+    a running simulation" GUI feature). Carries ``partial_result``, the
+    :class:`~missionstudio.engine.results.ResultSet` extracted at the
+    point of cancellation, so the caller can keep/show whatever was
+    simulated before the user aborted instead of losing it -- an aborted
+    run is meant to end cleanly with partial data, not act like a crash.
+    """
+
+    def __init__(self, partial_result: ResultSet):
+        super().__init__("Simulation cancelled by the user")
+        self.partial_result = partial_result
+
+
 def _orbit_ic_to_rv(mu: float, orbit: OrbitIC):
     """(r_N, v_N) [m], [m/s] from a schema.OrbitIC, for any of its three
     forms. ``orbit.validate()`` is assumed to have already been called
@@ -268,6 +284,20 @@ def _osculating_elements(mu: float, r_bn_n: np.ndarray, v_bn_n: np.ndarray) -> D
     (flat at 0, or a discontinuity) for a near-circular/near-equatorial
     scenario. This is inherent to osculating classical elements, not
     something a per-sample computation could avoid.
+
+    A genuinely non-physical (NaN/inf) recorded sample -- the propagated
+    dynamics itself having gone numerically unstable, not anything about
+    this function -- is checked for explicitly and reported with a clear,
+    actionable :class:`SimulationServiceError` instead of being handed to
+    ``rv2elem``. Real bug found on an actual run: ``rv2elem``'s own
+    NaN-input guard (``src/utilities/orbitalMotion.py``) sets
+    ``elements.AN``/``elements.AP``, but ``ClassicElements.__slots__``
+    only defines ``Omega``/``omega`` (no ``AN``/``AP`` at all) -- so
+    instead of returning a clean all-NaN element set, it crashes with
+    ``AttributeError: 'ClassicElements' object has no attribute 'AN'``,
+    which is what a spacecraft whose translational state actually
+    diverged used to surface as (an upstream Basilisk bug, not fixed
+    here, but worked around so it never gets reached).
     """
     n = r_bn_n.shape[0]
     a = np.empty(n)
@@ -277,6 +307,15 @@ def _osculating_elements(mu: float, r_bn_n: np.ndarray, v_bn_n: np.ndarray) -> D
     argp = np.empty(n)
     true_anomaly = np.empty(n)
     for k in range(n):
+        if not (np.all(np.isfinite(r_bn_n[k])) and np.all(np.isfinite(v_bn_n[k]))):
+            raise SimulationServiceError(
+                f"the simulated position/velocity became non-physical (NaN/inf) at recorded sample "
+                f"{k} of {n} -- the propagated dynamics went numerically unstable partway through this "
+                f"run. Common causes: attitude control gains too aggressive for the spacecraft's "
+                f"inertia/initial body rates, an actuator commanding excessive torque/thrust, or "
+                f"sim_settings.dynamics_task_rate_s too coarse for how fast the dynamics involved "
+                f"actually evolve -- not a bug in osculating-element extraction itself."
+            )
         oe = orbitalMotion.rv2elem(mu, r_bn_n[k], v_bn_n[k])
         a[k] = oe.a
         e[k] = oe.e
@@ -325,15 +364,16 @@ class SimulationService:
         self._access_recorders: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> recorder
         self._access_out_msgs: Dict[tuple, object] = {}  # (ground_station_name, spacecraft_name) -> accessOutMsg, for engine.vizard
         self._eclipse_object = None  # Phase 4: only built if some spacecraft has power or station_keeping configured
-        # Phase 4: retains the vizInterface module enable_vizard() returns
-        # (and, via it, every custom bridge SysModel that module registers
-        # on the task -- see engine.vizard's own comment on why those need
-        # a persistent Python reference beyond just being task-registered).
-        # Previously this return value was discarded entirely, which let
-        # those bridges be garbage-collected while still C++-task
-        # -registered -- undefined behavior that could (and did) surface
-        # as an unrelated-looking crash much later.
+        # Phase 4: retains the vizInterface module enable_vizard() returns,
+        # and (separately -- see that function's own docstring for why a
+        # SWIG VizInterface proxy can't just carry this as one of its own
+        # attributes) every custom bridge SysModel it registered on the
+        # task. Previously enable_vizard()'s return value was discarded
+        # entirely, which let those bridges be garbage-collected while
+        # still C++-task-registered -- undefined behavior that could (and
+        # did) surface as an unrelated-looking crash much later.
         self._viz = None
+        self._viz_access_indicator_bridges = None
 
     @property
     def spacecraft_handles(self) -> Dict[str, "_SpacecraftHandle"]:
@@ -860,7 +900,7 @@ class SimulationService:
                 for sc_config in scenario.spacecraft if sc_config.vizard_model_path is not None
             }
             try:
-                self._viz = vizard.enable_vizard(
+                self._viz, self._viz_access_indicator_bridges = vizard.enable_vizard(
                     self.scSim, dyn_task_name, sc_objects_in_order, self.vizard_request,
                     rw_effectors_by_spacecraft=rw_effectors_in_order,
                     ground_stations=self._ground_locations, central_body_name=gravity.central_body,
@@ -899,7 +939,8 @@ class SimulationService:
         return self._extract_results()
 
     def run_live(self, on_progress: Callable[[ResultSet, float], None],
-                 live_step_s: Optional[float] = None) -> ResultSet:
+                 live_step_s: Optional[float] = None,
+                 should_cancel: Optional[Callable[[], bool]] = None) -> ResultSet:
         """Same as :meth:`run`, except the simulation is executed in small
         time chunks and ``on_progress(partial_result, fraction_complete)``
         is called after each one, so a caller (missionStudio's GUI) can
@@ -938,6 +979,19 @@ class SimulationService:
                 has real per-call overhead, so a sub-tick step would only
                 add Python-loop cost with no extra simulated time to show
                 for it.
+            should_cancel: checked after every chunk (after ``on_progress``
+                runs); if it returns ``True``, raises
+                :class:`SimulationCancelled` (carrying that chunk's
+                ``ResultSet``) instead of continuing to the next one --
+                the "abort a running simulation" GUI feature. There is no
+                way to interrupt ``ExecuteSimulation()`` itself mid-chunk
+                (Basilisk's own C++ loop, no Python-level hook into it),
+                so cancellation always takes effect at the next chunk
+                boundary, not instantly -- this is the same reason
+                ``live_step_s`` matters for responsiveness here as it
+                already does for plot-update smoothness. ``None`` (the
+                default) means never cancel, matching every existing
+                caller's behavior unchanged.
         """
         if self.scSim is None:
             self.build()
@@ -968,7 +1022,10 @@ class SimulationService:
             self.scSim.ConfigureStopTime(next_stop_ns)
             self.scSim.ExecuteSimulation()
             fraction_complete = min(1.0, next_stop_ns / stop_time_ns)
-            on_progress(self._extract_results(), fraction_complete)
+            partial_result = self._extract_results()
+            on_progress(partial_result, fraction_complete)
+            if should_cancel is not None and should_cancel():
+                raise SimulationCancelled(partial_result)
             if next_stop_ns >= stop_time_ns:
                 break
             next_stop_ns = min(next_stop_ns + step_ns, stop_time_ns)

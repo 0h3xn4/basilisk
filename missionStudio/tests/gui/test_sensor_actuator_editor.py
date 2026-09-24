@@ -175,6 +175,46 @@ def test_switching_kind_does_not_clobber_params_until_reset_clicked(qtbot):
         assert [x.value(), y.value(), z.value()] == spec.example
 
 
+def test_switching_kind_away_and_back_preserves_vector_edit(qtbot):
+    """Regression test: _rebuild_vector_rows() used to only re-use the
+    ORIGINAL item's saved vector value when Kind was switched back to the
+    exact kind this dialog opened on, and used the kind's static template
+    example for every other kind -- even one the user had already typed
+    a value into earlier in this same dialog session. So editing
+    reaction_wheel's gsHat_B, switching to star_tracker and back to
+    reaction_wheel silently reverted gsHat_B to whatever the item
+    originally had, discarding the edit with no warning. Only 'Reset to
+    template' is supposed to be able to throw away a typed value (see
+    this module's docstring and
+    test_switching_kind_does_not_clobber_params_until_reset_clicked above,
+    which covers the non-vector JSON params box's side of this same rule).
+    """
+    from missionstudio.gui.sensor_actuator_editor import _ItemEditorDialog
+    from missionstudio.schema.scenario import SUPPORTED_ACTUATOR_KINDS, ActuatorConfig
+
+    item = ActuatorConfig(kind="reaction_wheel", name="rw-1", params={"gsHat_B": [0.0, 0.0, 1.0]})
+    dialog = _ItemEditorDialog(ActuatorConfig, SUPPORTED_ACTUATOR_KINDS, item=item)
+    qtbot.addWidget(dialog)
+
+    x, y, z = dialog._vector_boxes["gsHat_B"]
+    x.setValue(1.0)
+    y.setValue(0.0)
+    z.setValue(0.0)
+
+    other_index = dialog.kind_combo.findText("star_tracker")
+    dialog.kind_combo.setCurrentIndex(other_index)
+    original_index = dialog.kind_combo.findText("reaction_wheel")
+    dialog.kind_combo.setCurrentIndex(original_index)
+
+    x, y, z = dialog._vector_boxes["gsHat_B"]
+    assert [x.value(), y.value(), z.value()] == [1.0, 0.0, 0.0]
+
+    # The item passed in must never be mutated by this dialog -- not even
+    # by the cache write-back that fixes the above -- since the dialog
+    # may yet be cancelled.
+    assert item.params["gsHat_B"] == [0.0, 0.0, 1.0]
+
+
 def test_missing_required_vector_key_is_caught_defensively():
     """The dialog's own spin-box rows make it structurally impossible to
     submit a required vector key (e.g. coarse_sun_sensor's nHat_B) with no

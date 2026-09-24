@@ -395,6 +395,19 @@ def apply_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(_C["text"]))
     palette.setColor(QPalette.ColorRole.ToolTipText, QColor(_C["surface"]))
     palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(_C["text_muted"]))
+    # QPalette.Mid was left at Qt's own computed default (a shading tone
+    # derived from Button, meant for subtle 3D-bevel lines, not body
+    # text) -- several widgets' own inline stylesheets use
+    # "color: palette(mid);" for muted hint/description text (e.g.
+    # LoadScenarioWidget's template description, several "how to use
+    # this field" hints), which is unreadably low-contrast against this
+    # theme's light background (direct user report, with a screenshot:
+    # "the text is absolutely not readable"). Explicitly mapped to the
+    # same text_muted this theme already uses for PlaceholderText, so
+    # every existing "palette(mid)" usage becomes readable at once
+    # instead of hunting down and fixing each widget's own stylesheet
+    # individually.
+    palette.setColor(QPalette.ColorRole.Mid, QColor(_C["text_muted"]))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(_C["text_disabled"]))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(_C["text_disabled"]))
     app.setPalette(palette)

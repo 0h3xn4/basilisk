@@ -1,0 +1,115 @@
+{
+  "name": "03 - GEO station-keeping",
+  "epoch_utc": "2030-01-01T00:00:00",
+  "simulation_mode": "orbit_only",
+  "gravity": {
+    "central_body": "earth",
+    "central_body_degree": 0,
+    "third_body_perturbers": [
+      "sun",
+      "moon"
+    ]
+  },
+  "spacecraft": [
+    {
+      "name": "geo-sat-1",
+      "orbit": {
+        "type": "classical_elements",
+        "semi_major_axis_km": 42164.0,
+        "eccentricity": 0.0,
+        "inclination_deg": 0.0,
+        "raan_deg": 0.0,
+        "arg_periapsis_deg": 0.0,
+        "anomaly_type": "true",
+        "true_anomaly_deg": 0.0,
+        "mean_anomaly_deg": null,
+        "position_km": null,
+        "velocity_km_s": null,
+        "tle_line1": null,
+        "tle_line2": null
+      },
+      "dry_mass_kg": 1200.0,
+      "inertia_kg_m2": [
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0
+      ],
+      "sigma_bn_init": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "omega_bn_b_init_rad_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "enable_drag": false,
+      "drag_coeff": 2.2,
+      "drag_area_m2": 1.0,
+      "enable_srp": true,
+      "srp_coeff": 1.3,
+      "srp_area_m2": 15.0,
+      "sensors": [],
+      "actuators": [],
+      "fsw_mode": null,
+      "fsw_params": {},
+      "control_params": {},
+      "power": null,
+      "rf_link": null,
+      "station_keeping": {
+        "target_altitude_km": 35786.0,
+        "deadband_km": 5.0,
+        "thrust_n": 0.5,
+        "isp_s": 1600.0,
+        "propellant_kg": 50.0,
+        "eclipse_sunlit_threshold": 0.99
+      },
+      "phasing_keeping": null,
+      "constant_thrust": null,
+      "vizard_model_path": null,
+      "vizard_model_offset_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_rotation_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ],
+  "ground_stations": [],
+  "space_weather": {
+    "source": "celestrak",
+    "local_file_path": null,
+    "cache_dir": null
+  },
+  "sim_settings": {
+    "duration_days": 14.0,
+    "dynamics_task_rate_s": 30.0,
+    "integrator": "rkf78"
+  },
+  "monte_carlo": {
+    "enabled": false,
+    "num_runs": 10,
+    "thread_count": 1,
+    "verbose": false,
+    "dispersions": []
+  },
+  "mission_sequence": [],
+  "description": "A geostationary communications satellite that actively maintains its altitude against real perturbations (Sun/Moon third-body gravity and solar radiation pressure -- the actual drivers of GEO longitude/altitude drift in practice) using a simple deadband thrust controller: it fires station_keeping's thruster whenever the propagated altitude drifts more than deadband_km from target_altitude_km, burning propellant tracked in propellant_kg.\n\nWhat to look at: run the CLI ('missionstudio run ... --out-dir out') and check command_summary/results for the propellant used over the 14-day run (see this project's README, 'Running the CLI', for the station-keeping summary output) -- a real budget question a mission designer has to answer: how much propellant does a decade of GEO station-keeping cost?\n\nTry changing: deadband_km (tighter = more frequent, smaller burns), thrust_n/isp_s (a more efficient thruster uses less propellant per correction), or removing third_body_perturbers/enable_srp to see how much slower the drift becomes without them (and how rarely the controller then needs to fire).",
+  "schema_version": 1
+}

@@ -1247,14 +1247,632 @@ calling `MissionEngine` directly.
 **Verification:** every new/changed GUI file above has direct
 `pytest-qt` coverage in `tests/gui/` (`test_mission_sequence_editor.py`,
 `test_mission_output_widget.py`, plus additions to
-`test_scenario_editor.py`/`test_main_window.py`) -- the full suite
-(461 passed, 45 skipped in this Basilisk-free sandbox) only grows,
-matching every earlier Phase 6 stage's own discipline. This stage has
-NOT yet been exercised against a real Basilisk build by actually
-drawing a `mission_sequence` in the GUI and clicking Run -- every prior
-Phase 6 stage (the execution engine especially) turned up real bugs
-that only reproduced against an actual Basilisk install, so treat this
-GUI wiring the same way until it's been run for real.
+`test_scenario_editor.py`/`test_main_window.py`). Confirmed against a
+real Basilisk build (`pytest tests/ -v`): **501 passed, 8 skipped** --
+the 8 skips are exclusively the "Basilisk is not installed" error
+-path tests, which correctly skip once Basilisk *is* installed; every
+other test in the suite ran for real, including all 23
+`test_mission_engine.py` tests and this stage's own GUI tests. One
+thing that pass doesn't cover: `test_main_window.py`'s
+mission-sequence-dispatch tests monkeypatch `RunWorker.start` to avoid
+spinning up a real thread, so no automated test yet drives a genuine
+GUI click-through (build a `mission_sequence` in the running app,
+click Run, watch the "Mission Output" tab populate from a live
+`RunWorker` thread executing `MissionEngine.run()`) -- worth doing
+once, since every prior Phase 6 stage turned up real bugs only
+reachable that way, but no longer the open question this note used to
+flag.
+
+## Launching Vizard from the GUI
+
+A **Launch Vizard** action in the Run menu/toolbar starts the external
+Vizard application, added in response to a direct request. Previously
+the only Vizard-related GUI surface was the Run menu's **Vizard...**
+action -- renamed to **Vizard Configuration...** here to keep the two
+apart -- which only configures how the *next simulation run* feeds an
+already-running Vizard instance (a playback `.bin` file or a live
+stream); nothing anywhere actually started the external application
+itself. (An earlier version of this feature added a whole extra
+"Vizard" status tab next to Results/Mission Output/Kernel Status --
+scrapped after user feedback that a plain menu/toolbar action next to
+the existing Vizard Configuration one, not a new persistent tab, was
+what was actually wanted.)
+
+* `gui/vizard_launcher.py` -- Basilisk-free (launching an external
+  process needs no Basilisk build) module with `find_vizard_executable()`,
+  `remember_vizard_executable()`, and `launch_vizard()`. Vizard ships as
+  a platform `.zip` the user extracts wherever they like (see
+  `docs/source/Vizard/VizardDownload.rst`'s "install in the typical
+  Applications folder or Desktop") -- there is no single guaranteed
+  install path, so finding it is inherently best-effort: a previously
+  remembered path (persisted via `QSettings`, under
+  `vizard/executable_path`) is tried first, then a shallow search of a
+  handful of common per-OS locations (`/Applications`, Desktop,
+  Downloads, `Program Files`, ...), and `None` if neither turns up
+  anything. `launch_vizard()` resolves a macOS `.app` bundle to its real
+  `Contents/MacOS/` binary before calling `subprocess.Popen` (rather
+  than shelling out to `open`, which would hand off and exit
+  immediately, losing any way to track whether Vizard is still running)
+  and returns the live `Popen` handle.
+* `main_window.py` -- a new **Launch Vizard** `QAction`
+  (`self.vizard_launch_action`, distinct from the renamed
+  `self.vizard_action` "Vizard Configuration..."), wired to
+  `on_launch_vizard()`: a no-op while Vizard is already running (checked
+  via `Popen.poll() is None` on `self._vizard_process`, the last handle
+  `launch_vizard()` returned), otherwise looks the executable up via
+  `find_vizard_executable()` and launches it -- falling back to a
+  `QFileDialog` browse prompt (remembered via
+  `remember_vizard_executable()`, so asked at most once) when it can't
+  be found automatically.
+* `app.py` -- gained `app.setOrganizationName("AVSLab")`, needed for
+  `QSettings()` (used above with no explicit org/app name) to resolve to
+  a stable per-platform settings location.
+
+**Verification:** `tests/gui/test_vizard_launcher.py` (path search/
+persistence, all real filesystem/`QSettings` I/O redirected into
+`tmp_path` -- never touches the developer machine's real Vizard
+install or settings), plus `test_main_window.py` additions covering
+`on_launch_vizard()`'s launch/no-relaunch-while-running/relaunch-after
+-exit/browse-fallback/browse-cancelled/launch-failure paths
+(`find_vizard_executable`/`launch_vizard` monkeypatched so nothing
+spawns a real process). This sandbox has no real Vizard binary to
+launch against, so `launch_vizard()`'s actual `subprocess.Popen` call
+itself (as opposed to its argument-construction logic, which the
+macOS-bundle-resolution tests in `test_vizard_launcher.py` do cover) is
+unverified against the real thing -- worth confirming Vizard actually
+opens on a real machine with Vizard installed.
+
+## Second round of GUI feedback
+
+Five pieces of direct feedback from a real run against the actual GUI (a
+"Simulation failed" dialog referencing `VizInterface` came with it):
+
+* **Vizard live-stream crash, fixed.** `engine/vizard.py`'s
+  `enable_vizard()` used to keep every `_AccessIndicatorBridge` alive by
+  attaching them to `viz` as `viz._missionstudio_access_indicator_bridges`.
+  `viz` is a SWIG proxy for a C++ `VizInterface`, and SWIG-generated
+  proxy classes raise on any attribute they don't already know about --
+  confirmed against the reported crash, which failed immediately with
+  "You tried to add this variable: ... To this class: <...VizInterface
+  ...>" before a single simulation step ran, whenever a scenario used
+  the Vizard live-stream option. Fixed by having `enable_vizard()` return
+  `access_indicator_bridges` alongside `viz` instead of bolting it onto
+  `viz`, and having `SimulationService` retain both as plain attributes
+  of itself (an ordinary Python object with no such restriction).
+* **Plots now show km/km-s, not raw meters** (`results_widget.py`).
+  Length/length-rate series (`units in {"m", "m/s"}` -- position,
+  velocity, altitude, slant range, delta-V, ...) are converted for
+  display only; a LEO position plot's y-axis used to be in the millions.
+  Deliberately narrow -- everything else (accelerometer m/s^2, torque
+  N*m, angles, ...) is left alone, since km-scale units would be worse
+  there, not better. CSV export (`ResultSet.export_csv()`) is unaffected
+  -- it keeps writing the raw SI units `TimeSeries` already holds, since
+  a CSV handed to another tool should stay unambiguous.
+* **A new X-axis combo** (Elapsed time / Epoch (UTC)) on the Results
+  plot. `MainWindow.on_run()` captures `scenario.epoch_utc` before
+  starting the run (so it reflects the scenario that was actually run,
+  not whatever the editor holds by the time the run finishes) and passes
+  it through `_on_run_progress()`/`_on_run_finished()` into
+  `ResultsWidget.set_live_result()`. `set_result()`/`set_live_result()`
+  both take an optional `epoch_utc` (default `None`), so every existing
+  caller/test keeps working unchanged; "Epoch (UTC)" with no epoch
+  available (or one that fails to parse) falls back to elapsed time
+  rather than raising.
+* **The Description box in the Scenario Editor is bigger**
+  (`scenario_editor.py`'s `description_edit`, `setFixedHeight(60)` ->
+  `220`) -- it needed constant scrolling to read a template's full
+  description at the old size.
+* **Abort a running simulation, without breaking the tool.** See its own
+  section below.
+
+**Verification:** `tests/gui/test_results_widget.py` (km conversion +
+Epoch axis, including the "no epoch given"/"unparseable epoch" fallback
+paths) and `tests/gui/test_main_window.py` (epoch capture/passthrough).
+The Vizard crash fix has no dedicated regression test -- there is no
+Basilisk-free way to construct a real `VizInterface` SWIG proxy to
+assert against -- but it was confirmed against the exact real run that
+originally hit it.
+
+## Abort Simulation
+
+Direct user feedback: "there should also be the option to abort a
+running simulation, if needed, without breaking the tool." Basilisk's
+`SimBaseClass.ExecuteSimulation()` is a single, blocking C++ call with no
+hook to interrupt it mid-flight, and `QThread.terminate()` was
+deliberately never considered -- it could leave Basilisk's C++
+simulation state mid-mutation, exactly the kind of "breaking the tool"
+this was asked to avoid. The design is cooperative cancellation instead,
+checked between simulation chunks or mission-sequence commands -- never
+a forced kill:
+
+* `engine/service.py` -- a new `SimulationCancelled` exception carrying
+  whatever partial `ResultSet` had been produced so far
+  (`.partial_result`). `run_live()` gained an optional
+  `should_cancel: Optional[Callable[[], bool]] = None` parameter, checked
+  once after each chunk's `ExecuteSimulation()` call; when it returns
+  `True`, `run_live()` raises `SimulationCancelled` with that chunk's
+  results rather than silently discarding them. `should_cancel=None` (the
+  default, matching every pre-existing caller) leaves behavior unchanged.
+* `engine/mission_engine.py` -- the mission-sequence equivalent:
+  `MissionEngineCancelled` (carrying both `.partial_result` and
+  `.summary`), and `MissionEngine.__init__` gained the same
+  `should_cancel` parameter, checked once per top-level command in
+  `_run_commands()` -- which also naturally covers `while`-loop
+  iterations, since `_run_while()` re-enters `_run_commands()` once per
+  iteration -- AND, since then (see "Abort during a single long
+  propagate command, fixed" below), mid-command too: a single
+  `propagate` command's own `ExecuteSimulation()` call is chunked via
+  `_advance_to()`/the chunked branch of `_run_propagate_event()`, not
+  just between top-level commands.
+* `gui/run_worker.py` -- `RunWorker` gained `request_cancel()` (sets a
+  `threading.Event`, safe to call from the GUI thread while `run()` is
+  executing on its own thread) and a new `cancelled` Qt signal
+  (`Signal(object, object)`: partial `ResultSet`, optional
+  `CommandSummary`). The non-`mission_sequence` path now ALWAYS runs
+  through `run_live()` (never the plain, non-chunked `run()`)
+  specifically so it's always cancellable regardless of the Live Plot
+  toggle -- `self.live` now only controls whether the `progress` signal
+  is actually emitted (i.e. whether the plot redraws as the run
+  proceeds), not whether the run is chunked at all;
+  `run_live()`'s own `_LIVE_DEFAULT_FRAMES` (60) bounds this to a small,
+  fixed number of extra `ExecuteSimulation()` calls regardless of run
+  length, negligible next to the actual simulated work either way.
+* `main_window.py` -- a new **Abort Run** `QAction` (Run menu and
+  toolbar, between Run Simulation and Live Plot), disabled except while a
+  single (non-Monte-Carlo) run is actually in flight -- `on_run()`
+  enables it right after starting `RunWorker`, `_stop_busy()` disables it
+  again on any of finished/failed/cancelled. Monte Carlo batches are
+  deliberately out of scope: `engine/monte_carlo.py`'s
+  `Controller.executeSimulations()` uses a different, single-call
+  execution model with no exposed chunking/cancellation hook in this
+  checkout, and adding one would be unverifiable against a real Basilisk
+  build in this development sandbox anyway. `on_abort_run()` calls
+  `RunWorker.request_cancel()` and immediately disables the action (so
+  there's nothing to double-click while waiting for the next
+  checkpoint -- cancellation is cooperative, not instant); a new
+  `_on_run_cancelled()` slot (connected to `RunWorker.cancelled`) shows
+  whatever partial results/command summary had been produced, with
+  "Run cancelled by user." status-bar messaging instead of "Run
+  complete", exactly like a normal finish otherwise.
+
+**Verification:** `tests/test_service_run_live.py` and
+`tests/test_mission_engine.py` gained `should_cancel` tests
+(`requires_basilisk`, auto-skipped in this development sandbox -- see
+the honesty note above); `tests/gui/test_run_worker.py` covers the
+dispatch/cancellation plumbing Basilisk-free by faking
+`engine.service`/`engine.mission_engine` in `sys.modules` (works
+regardless of whether a real Basilisk build is present); and
+`tests/gui/test_main_window.py` covers the `abort_action`
+enable/disable wiring plus an end-to-end real-`QThread` test proving the
+`cancelled` signal is actually connected through to
+`_on_run_cancelled()`. All of it (except the `requires_basilisk`-marked
+engine-level checkpoint tests) was run and confirmed passing in this
+sandbox; the `requires_basilisk` tests were then run for real, on an
+actual Basilisk build, which caught one genuine bug:
+`_run_command()` wrapped every non-`MissionEngineError` exception a
+handler raised into a `MissionEngineError`, including a
+`MissionEngineCancelled` bubbling up from several levels down the
+command tree (e.g. cancelling mid-`while`-loop, where the cancellation
+is raised inside the loop body's own nested `_run_commands()` call,
+inside `_run_while()`, inside the enclosing `_run_command()`'s `try`
+block) -- masking a clean, user-requested abort as a simulation
+failure. Fixed by re-raising `MissionEngineCancelled` unchanged before
+the generic `except Exception` clause runs (see its own comment in
+`mission_engine.py`): `612 passed, 8 skipped, 1 failed` on that real
+build before the fix (only `test_should_cancel_checked_between_while_
+loop_iterations` failing), `613 passed, 8 skipped` on the same real
+build after it -- the whole Abort Simulation feature, cancellation
+inside a `while` loop included, is now confirmed against a real
+Basilisk build, not just this sandbox's Basilisk-free suite.
+
+### Abort during a single long propagate command, fixed
+
+More direct user feedback, on the real build: clicking Abort mid-run
+showed "Aborting... this takes effect at the next checkpoint, not
+instantly" and then simply never finished -- minutes of waiting, no
+effect. Root cause: a single `propagate` command's own
+`ExecuteSimulation()` call ran straight through to its requested target
+in ONE unchunked call, so `should_cancel` (only checked BETWEEN
+top-level commands, per `run()`'s own docstring at the time) had no
+opportunity to fire at all until that one command finished on its own --
+for a mission sequence with one long `propagate` (duration/epoch/event),
+that's the entire run.
+
+Fixed the same way `engine.service.run_live()` already fixes it for the
+non-mission_sequence path: chunk it.
+
+* `_advance_to()` (new) -- runs the simulation from `self._elapsed_ns`
+  to a target time, in one unchunked `ConfigureStopTime()`/
+  `ExecuteSimulation()` pair when `should_cancel is None` (unchanged
+  behavior, zero extra overhead), or in roughly
+  `_PROPAGATE_CANCEL_CHECK_FRAMES` (60, mirroring
+  `engine.service._LIVE_DEFAULT_FRAMES`) pieces otherwise, checking
+  `should_cancel()` after each one and raising `MissionEngineCancelled`
+  if it fires. `_run_propagate`'s `"duration"`/`"epoch"` branches now
+  both call it instead of executing straight to their target.
+* `_run_propagate_event()`'s safety-capped search (periapsis/apoapsis)
+  got the same treatment: chunked when `should_cancel` is set, checking
+  both the registered Basilisk event's own `occurCounter` (so a real
+  periapsis/apoapsis crossing mid-chunk still stops the search exactly
+  as before -- chunking never delays detecting it) and `should_cancel()`
+  after each chunk. Its chunk size is deliberately based on the
+  scenario's own `duration_days`, not `cap_days` (`duration_days *
+  _EVENT_PROPAGATE_SAFETY_MULTIPLIER` -- a rarely-hit upper bound on the
+  search, not a meaningful step size): sizing off `cap_days` would make
+  each chunk roughly `_EVENT_PROPAGATE_SAFETY_MULTIPLIER` (10x) too
+  coarse relative to how soon the event realistically fires in a real
+  mission, right back to the same problem.
+* `run()`'s own docstring updated to describe the new mid-command
+  checkpoint, alongside the existing between-commands one.
+
+**Verification:** two new `tests/test_mission_engine.py` cases
+(`test_should_cancel_checked_mid_single_long_propagate_command`,
+`test_should_cancel_checked_mid_propagate_event_command`) assert a
+cancelled run's partial result is strictly shorter than letting the
+same command finish would have produced -- the actual behavior this bug
+report was about. The existing
+`test_should_cancel_checked_between_while_loop_iterations` and the
+renamed `test_should_cancel_stops_before_the_first_command_and_raises_
+mission_engine_cancelled` (previously named
+"...stops_between_commands..." -- its own duration was short enough
+that it used to complete in a single old-style unchunked call, so
+"between commands" and "before the first command" were the same thing;
+now that a command can itself be chunked, the name says precisely which
+checkpoint it exercises) were reworked to keep testing the
+between-commands/between-iterations checkpoint specifically, now that a
+command can also be interrupted mid-way. **This round has NOT yet been
+re-run against a real Basilisk build** -- only this sandbox's
+Basilisk-free suite (570 passed, 53 skipped, two more than before for
+the two new `requires_basilisk` tests) confirms the plumbing compiles
+and the untouched paths still pass; the chunk-timing arithmetic behind
+the `while`-loop test's exact `commands_executed == 3` expectation, and
+the event test's assumption that its chunk size lands comfortably
+inside one ~90-minute orbital period, are worked out by hand in each
+test's own docstring/comments, not confirmed by actually running them.
+
+### Vizard live-stream: auto-connect instead of a manual launcher step
+
+Direct user feedback, with a screenshot: running a live-stream scenario
+showed Vizard just sitting on its own "Load Data Using One of the
+Following" launcher screen doing nothing, while missionStudio itself sat
+at 0% progress, elapsed time climbing, with Abort having no effect at
+all no matter how long it waited.
+
+Root cause, confirmed against `docs/source/Vizard/vizardAdvanced/
+vizardLiveComm.rst` and `vizInterface.cpp` directly: in live-stream mode,
+`SimBaseClass.InitializeSimulation()`'s very first step is a **blocking**
+ZeroMQ handshake -- Basilisk connects out to `tcp://<vizInterface's
+reqComAddress>:<reqPortNumber>` (defaults `0.0.0.0:5556`, i.e.
+`localhost:5556` locally -- never overridden anywhere in this checkout)
+and sends a PING it waits for Vizard to reply to, before a single
+simulation step ever runs. Vizard only replies once its OWN launcher
+screen has been told what to connect to (typing the address into
+"Socket Address") and "Start Visualization" has actually been clicked --
+skip that manual step (as our own "Launch Vizard" button previously
+did -- it just started the bare app with no arguments) and that PING
+never gets a reply, so `InitializeSimulation()` blocks forever. This is
+native C++ with no Python-level hook at all -- not even the Abort
+feature's own chunk-boundary checkpoints are reachable yet, since this
+happens before the first chunk.
+
+Fixed by never requiring that manual step in the first place: Vizard's
+own `-directComm <address>` command-line flag (`docs/source/Vizard/
+vizardAdvanced/vizardCommandLine.rst`) makes it connect automatically on
+launch, with nothing to type or click.
+
+* `gui/vizard_launcher.py` -- new `DEFAULT_LIVE_STREAM_ADDRESS =
+  "tcp://localhost:5556"` (matching vizInterface's own unmodified
+  defaults). `launch_vizard()` gained an optional `direct_comm_address`
+  parameter, appended as `-directComm <address>` to the launched
+  process's arguments when given.
+* `main_window.py` -- `on_launch_vizard()` now passes
+  `DEFAULT_LIVE_STREAM_ADDRESS` whenever Vizard Configuration is set to
+  live-stream (`None`, i.e. no flag at all, otherwise -- a save-file run
+  still launches Vizard exactly as before), and returns `True`/`False`
+  instead of nothing, so a caller can tell whether Vizard is actually
+  confirmed running. `on_run()` calls it FIRST, before starting a
+  live-stream run's `RunWorker` at all, refusing to start (with a clear
+  explanation, never a silent hang) if Vizard couldn't be confirmed --
+  an ordinary (non-live-stream) run never touches Vizard at all, so this
+  adds no new behavior there.
+
+**A residual gap, since closed:** the first version of this fix only
+covered the case where `on_launch_vizard()` was actually starting a new
+Vizard instance -- an ALREADY-running one (e.g. launched earlier in the
+same session for a save-file run, or before Vizard Configuration was
+ever set to live-stream) was still trusted as-is, matching the
+pre-existing "never relaunch while already running" behavior, so the
+same hang could still happen one launch later. Closed by tracking which
+`-directComm` address (if any) `self._vizard_process` was actually
+launched with (`self._vizard_direct_comm_address`): `on_launch_vizard()`
+now only trusts an already-running instance if it already matches what
+this call needs -- a mismatch (specifically, live-stream needed but the
+tracked instance has no live-stream connection) terminates it
+(`_terminate_vizard_process()`: `terminate()`, then `kill()` only if it
+doesn't exit within a bounded 5 s wait) and relaunches a correct one in
+its place. The other direction (a live-stream-ready instance already
+running, but a save-file/no-request launch is what's needed now) is
+deliberately left alone -- `-directComm` being active doesn't stop
+Vizard from also opening a save file. An instance this session never
+itself launched (`self._vizard_process` is still `None` -- started by
+the user outside missionStudio entirely, or in an earlier session) is
+still left completely alone rather than killed -- there is no reliable
+way to ask an arbitrary already-running Vizard process "are you actually
+connected" from outside it, so a second, correctly-configured instance
+is launched alongside it instead of guessing about (or killing) a
+process this app doesn't own. That specific case -- an untracked,
+already-running, not-actually-connected Vizard instance -- is the one
+genuinely irreducible gap left: there is nothing missionStudio can
+inspect from outside to detect it.
+
+**Verification:** `tests/gui/test_vizard_launcher.py` gained two new
+`launch_vizard()` tests (the flag is appended when given, omitted when
+not); `tests/gui/test_main_window.py` gained eight new tests covering
+`on_launch_vizard()`'s address selection, the mismatch-relaunch/
+matching-instance-kept/untracked-instance-left-alone cases above, and
+`on_run()`'s new Vizard-confirmation gate (including that an ordinary
+run never calls `on_launch_vizard()` at all). All pass in this sandbox
+(580 passed, 53 skipped). Like the Vizard crash fix earlier in this
+document, there is no way to exercise a real Vizard connection handshake
+without an actual Vizard binary and display, so the `-directComm` flag's
+effect on Vizard itself (as opposed to the argument list missionStudio
+constructs, and the process-tracking logic around it) is unverified
+here -- report back if a live-stream run still doesn't
+connect after this.
+
+**One remaining click, made obvious instead of silent** (further direct
+user feedback, after the fix above): `-directComm` pre-fills Vizard's
+socket address field and pre-selects DirectComm/Live Display, but does
+NOT click Vizard's own "Start Visualization" button -- confirmed by
+this same user actually running it, contradicting `vizardLiveComm.rst`'s
+more optimistic-sounding wording. Checked directly against
+`vizardCommandLine.rst` for an alternative: the only documented flag
+combination that skips this click entirely is `-batchmode -noDisplay`,
+which is headless OpNav mode -- it renders nothing to the screen at all,
+which defeats the entire point of a LIVE VISUALIZATION. No flag exists
+(documented, at least) that both skips the click and keeps the visible
+3D view, so this one click could not be eliminated outright.
+
+Made unmissable instead: `MainWindow.__init__` gained
+`self._vizard_live_stream_hint_shown = False`. The first time
+`on_launch_vizard()` actually starts a NEW Vizard process with a
+`-directComm` address in a given session, it shows a one-time
+`QMessageBox.information` explaining exactly this -- that the address is
+already filled in, but "Start Visualization" still needs one click in
+Vizard's own window before the run can proceed -- rather than leaving
+the user to wonder (again) why the run looks stuck. Every launch (not
+just the first) also gets an updated status-bar message saying the same
+thing more briefly, for when the hint dialog isn't shown again. The
+dialog deliberately fires only once per session, not once per
+launch/run, so it doesn't turn into a repeated interruption once the
+user already knows what to do.
+
+**Verification:** `tests/gui/test_main_window.py` gained
+`test_launch_vizard_shows_the_one_click_hint_once_per_session` (fires
+exactly once even across repeated `on_launch_vizard()` calls); the four
+existing tests that trigger a real live-stream launch had
+`QMessageBox.information` mocked so the new dialog doesn't block them.
+581 passed, 53 skipped in this sandbox. As with the fix above, there is
+no way to confirm the dialog's wording matches what a user actually
+needs without a real Vizard binary and display to try it against.
+
+## Three more real-run bugs, caught by the user testing templates
+
+All three were caught by the user actually clicking through the bundled
+templates one by one, with screenshots -- not found by this sandbox's
+own (Basilisk-free) test suite, which had no way to catch any of them.
+
+**1. Templates '05' and '07' failed to run: missing sun ephemeris.**
+`SimulationService.build()` raises a clear `SimulationServiceError` when
+any spacecraft has `power`/`station_keeping`/`enable_srp` configured but
+`'sun'` isn't in `gravity.third_body_perturbers` (`simpleSolarPanel`/the
+eclipse gate/SRP all need a real eclipse shadow factor, which needs a
+sun ephemeris) -- exactly the error the user hit on both '05' (formation
+flying, `station_keeping` required by `phasing_keeping`) and '07'
+(attitude pointing with ADCS hardware, has a `PowerConfig`). Both
+templates' own `scripts/_generate_templates.py` builder functions
+simply never included `third_body_perturbers=["sun"]` in their
+`GravityConfig` -- a real bug in this project's own bundled templates,
+not a user configuration mistake. Fixed at the source (the generator
+functions, each with a comment explaining why) and regenerated both
+JSON files (`python3 scripts/_generate_templates.py`, run from
+`missionStudio/`) -- every other template was already correct, so only
+these two files changed.
+
+Also promoted to a **schema-level check**: `Scenario.validate()` gained
+a mirror of this same engine-layer condition, following the exact
+precedent `GravityConfig.validate()` already set for the
+`central_body_degree`/`central_body` mismatch (see its own comment) --
+without this, `missionstudio validate`/the GUI's live "valid" indicator
+(both Basilisk-independent) would keep reporting a clean bill of health
+for a scenario guaranteed to fail the moment it's actually run, exactly
+as it did here. Now caught immediately in the editor, not after
+clicking Run.
+
+**Verification:** a scan of all 9 bundled templates (any spacecraft with
+`power`/`station_keeping`/`enable_srp` but no `'sun'` third-body
+perturber) confirms only '05'/'07' were affected and both are now
+clean. `tests/test_scenario_schema.py` gained
+`test_power_station_keeping_or_srp_without_sun_third_body_is_rejected`/
+`..._with_sun_third_body_validates`/
+`test_no_power_station_keeping_or_srp_does_not_need_sun_third_body`
+(parametrized over all three triggering fields), plus fixed seven
+existing tests whose own fixtures had exactly this same gap (legitimate
+staleness this new check exposed, not false positives -- those fixtures
+would already have failed at `SimulationService.build()` if ever run
+for real). 588 passed, 53 skipped in this sandbox.
+
+**2. Load Scenario's description text was unreadable.** Screenshot:
+near-invisible light-gray-on-white text. Root cause: several widgets'
+own inline stylesheets use `"color: palette(mid);"` for muted hint/
+description text (`LoadScenarioWidget`'s template description,
+`SpacecraftTemplateDialog`'s description, several "how to use this
+field" hints across the spacecraft/sensor/mission-sequence editors) --
+`QPalette.Mid` was never explicitly set by `gui/theme.py`'s
+`apply_theme()`, so it stayed at Qt's own computed default (a subtle
+3D-bevel shading tone meant for shadow lines, not body text), which
+reads as near-invisible against this theme's light background. Fixed
+with a single one-line change in `theme.py` -- `QPalette.Mid` mapped to
+the same `text_muted` color the theme already uses for
+`PlaceholderText` -- which fixes every `"palette(mid)"` usage across the
+whole app at once, not just `LoadScenarioWidget`. Confirmed visually
+with an offscreen-rendered screenshot of both `LoadScenarioWidget` and
+`SpacecraftTemplateDialog` before considering this done, not just by
+reading the CSS.
+
+**Verification:** `tests/gui/test_theme.py` gained
+`test_mid_palette_role_is_readable_not_left_at_qt_default`. 589 passed,
+53 skipped in this sandbox.
+
+**3. Template '06' crashed with a confusing internal error.**
+`'ClassicElements' object has no attribute 'AN'`. Traced directly (not
+guessed) to a genuine bug in Basilisk's OWN `src/utilities/
+orbitalMotion.py`: `rv2elem()`'s NaN-input guard sets `elements.AN`/
+`elements.AP`, but `ClassicElements.__slots__` only defines `Omega`/
+`omega` (no `AN`/`AP` at all) -- so instead of returning a clean all-NaN
+element set for a non-physical (NaN) position/velocity sample, it
+crashes with that `AttributeError`. `engine.service._osculating_elements`
+calls `rv2elem()` once per recorded sample (to plot how the orbit's
+shape/orientation evolves over the run) -- reaching this crash means the
+spacecraft's OWN propagated position/velocity had already gone
+non-physical partway through the run, an actual numerical instability
+this sandbox has no Basilisk build to reproduce or trace further (inertia
+`_INERTIA_MEDIUM` and `mrpFeedback` gains `K=3.5`/`P=30` both look like
+reasonable, standard-example-scale values on inspection, not an obvious
+mismatch, but that's as far as static inspection alone can go).
+
+Fixed what's actually fixable from here: `_osculating_elements` now
+checks each sample for `NaN`/`inf` itself, before ever calling the
+buggy `rv2elem()`, and raises a clear, actionable
+`SimulationServiceError` naming the sample index and likely causes
+(control gains too aggressive for the inertia/rates involved, excessive
+actuator torque, too coarse a `dynamics_task_rate_s`) instead of that
+confusing `AttributeError` -- turning an inscrutable crash into a
+diagnosable one. The Basilisk-side bug itself is not patched here (out
+of scope for this checkout's own code); this is a defensive workaround
+on the missionStudio side.
+
+**This does NOT fix why template '06' actually diverges** -- only makes
+the failure mode legible instead of cryptic. If it still fails after
+this, the new error message will say which recorded sample first went
+non-physical (and, from `sim_settings.dynamics_task_rate_s`, roughly
+what elapsed time that corresponds to) -- that detail would help narrow
+down the real cause on a real Basilisk build, which this sandbox cannot
+do.
+
+**Verification:** new `tests/test_osculating_elements.py`
+(`requires_basilisk`, auto-skipped in this development sandbox --
+`engine.service` imports Basilisk at module level) directly exercises
+`_osculating_elements` with a synthetic NaN/inf sample, confirming the
+clear error fires instead of the `AttributeError`, alongside a
+finite-input sanity check. 589 passed, 56 skipped in this sandbox
+(three more skipped, matching the three new `requires_basilisk` tests).
+**Confirmed for real** on the user's own real Basilisk build, right
+after this shipped: re-running '06' produced exactly the new message
+("the simulated position/velocity became non-physical (NaN/inf) at
+recorded sample 15 of 73...") instead of the old `AttributeError` --
+the diagnostic works as designed. The underlying divergence itself is
+still open; that sample index/count is the concrete lead needed to
+chase it further, next.
+
+## Template '05' crashing with heap corruption, root-caused
+
+Direct follow-up from the "template '06' crashed with a confusing
+internal error" entry above: the user then hit template '05' (formation
+flying, `station_keeping` + `phasing_keeping`) crashing too -- but with
+TWO DIFFERENT native crash signatures on different runs of the exact
+same scenario (`basic_string::_M_create`, then `std::bad_alloc`). That
+variability is the signature of genuine memory corruption, not a
+deterministic bug -- exactly like the very first Vizard crash earlier in
+this project (a Python object garbage-collected while Basilisk's C++
+side still held a live callback into it).
+
+Root cause, this time: `PhasingKeepingController.UpdateState()` (called
+every dynamics tick, directly by Basilisk's C++ scheduler through a SWIG
+director override) calls `orbitalMotion.rv2elem()` via its own
+`_mean_anomaly()` helper, to compute the chief/follower's current mean
+anomaly for the phasing control law. That's the exact same buggy
+Basilisk function `engine.service._osculating_elements` was already
+fixed to avoid (see above) -- but `_osculating_elements` is ordinary
+Python code with an ordinary `try`/`except` around it; `UpdateState()`
+is not. A Python exception escaping a SWIG director-overridden virtual
+method is undefined behavior, not a clean propagated exception -- which
+is exactly consistent with two different native crashes from the same
+root cause on different runs.
+
+The state fed into `rv2elem()` there comes straight from
+`scStateInMsgA()`/`scStateInMsgB()` with no validity check at all --
+either genuinely non-physical (the simulation having already diverged)
+or simply not written yet (read before either spacecraft's own dynamics
+has published a first sample this run, an ordering question this
+function has no control over). Either way, calling `rv2elem()` with it
+was never safe.
+
+Fixed in `engine/orbit_maintenance.py`: both `PhasingKeepingController.
+UpdateState()` and `StationKeepingController.UpdateState()` (the same
+class of risk -- a non-finite or exactly-zero velocity would otherwise
+divide-by-zero computing a thrust direction) now check the spacecraft
+state for finiteness (and, for station-keeping, non-zero velocity)
+*before* doing anything with it. On a non-finite/degenerate tick, both
+command zero thrust and log a placeholder (NaN error/altitude, matching
+every other tick's log-once-per-call invariant) rather than ever
+reaching the buggy call -- there is no safe way to raise from inside a
+director callback either, so "degrade gracefully, never crash" is the
+only sound option here regardless of why the state went bad.
+
+**This does not, by itself, explain why the state went non-physical (or
+unwritten) in the first place** -- same honesty as the '06' entry above.
+But it does mean template '05' can no longer crash the whole process
+over it: if the underlying cause is "read before write" (an ordering
+question), the controller will now simply no-op for a tick or two until
+real data arrives; if the underlying cause is a genuine divergence, the
+run will still fail, but cleanly -- most likely via
+`_osculating_elements`'s own clear `SimulationServiceError` during
+result extraction, exactly like '06' now does, rather than a crash with
+no useful message at all.
+
+**Verification:** four new tests in `tests/test_orbit_maintenance.py`
+(`requires_basilisk`, auto-skipped in this sandbox) construct each
+controller directly, write a `SCStatesMsg` with NaN (or, for
+station-keeping, zero-velocity) state, call `UpdateState()` directly,
+and confirm it returns cleanly with zero commanded thrust instead of
+reaching `rv2elem()` -- plus one confirming the guard doesn't change
+behavior for the ordinary finite-state path. 590 passed, 60 skipped in
+this sandbox (four more skipped, matching the four new tests). Not
+independently confirmed against the user's own real Basilisk build yet
+-- next step is asking them to retry template '05'.
+
+## A toolbar action invisible on one real platform
+
+Direct user report, with a screenshot: the "Launch Vizard" toolbar
+button was simply not there -- while confirmed present in the **Run**
+menu (built from the exact same `QAction` object as the toolbar button),
+ruling out a construction failure. `_build_toolbar()`'s single,
+un-movable `QToolBar` held 9 text-beside-icon buttons plus 2 separators
+-- wide enough that real-world font/DPI rendering on at least one real
+desktop environment ran out of horizontal room before the window itself
+did, something this sandbox's own offscreen-Fusion-style screenshots
+never reproduced (they consistently rendered narrower). Rather than
+chase the platform-specific overflow behavior itself (Qt's overflow
+handling for a fixed single-row toolbar is not obviously predictable
+across styles/platforms), removed the dependency on window width
+entirely: `_build_toolbar()` now builds two shorter, fixed rows (File
+ops + Run ops; Vizard + Check Kernels) via `addToolBarBreak()`, each
+comfortably narrow enough to never need to overflow at all.
+
+**Verification:** confirmed visually with offscreen screenshots at both
+the default window width and a deliberately narrower one (1000px) --
+every button fully visible at both. `tests/gui/test_main_window.py`
+gained `test_toolbar_actions_are_all_visible`, asserting every one of
+this window's actions is present on one of the (now two)
+`QToolBar`s and actually visible, not just constructed as a `QAction`
+object somewhere. 590 passed, 56 skipped in this sandbox. Not
+independently confirmed against the specific real platform/window size
+that originally lost the button (this sandbox has no way to reproduce
+that environment), but the fix removes the mechanism (window-width
+-dependent single-row overflow) entirely rather than patching around a
+guessed cause, so it should hold regardless of the exact platform
+details.
 
 ## Repository layout
 
@@ -1290,6 +1908,7 @@ missionStudio/
       theme.py                       -- Phase 5: app-wide QSS stylesheet + palette
       icons.py                       -- Phase 5: procedurally-drawn app icon
       main_window.py                 -- MainWindow: File/Run menus + toolbar, ties everything together
+      load_scenario_widget.py        -- "Load Scenario" tab: built-in template picker + browse-for-a-file
       scenario_editor.py             -- the full scenario form + live validation
       mission_sequence_editor.py     -- Phase 6: mission_sequence tree editor (Command Add/Edit/Remove/nesting)
       mission_output_widget.py       -- Phase 6: "Mission Output" debug-console tab (CommandSummary/ReportEntry display)
@@ -1297,6 +1916,7 @@ missionStudio/
       spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW, power/propulsion/link budget)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
       vizard_dialog.py               -- Phase 2: "enable Vizard for the next run" dialog
+      vizard_launcher.py             -- find/launch the external Vizard application (no Basilisk needed)
       monte_carlo_editor.py          -- Phase 3: Monte Carlo settings + dispersion list editor
       ground_station_editor.py       -- ground station list + add/edit/remove dialog
       orbit_ic_widget.py             -- classical-elements (true/mean anomaly)/Cartesian/TLE orbit editor
@@ -1307,6 +1927,19 @@ missionStudio/
       run_worker.py                  -- SimulationService/Monte Carlo on a background QThread
     scenarios/
       two_body_validation.json       -- the Phase 0 validation scenario
+      templates/                     -- education/starter-template scenarios -- see that directory's own README
+        README.md                    -- the template catalog: what each one teaches, how to open/run one
+        01_two_body_circular_orbit.json
+        02_elliptical_orbit_with_perturbations.json
+        03_geo_station_keeping.json
+        04_walker_constellation.json
+        05_formation_flying_phasing.json
+        06_attitude_pointing_basic.json
+        07_attitude_pointing_with_adcs_hardware.json
+        08_mission_sequence_orbit_raise.json
+        09_monte_carlo_dispersion_analysis.json
+  scripts/
+    _generate_templates.py            -- regenerates scenarios/templates/*.json from schema dataclasses (not installed/imported elsewhere)
   packaging/                          -- Phase 3: build_wheel.sh / install.sh / .desktop entry -- see packaging/README.md
   tests/
     conftest.py                      -- requires_basilisk / requires_gui auto-skip markers
@@ -1318,14 +1951,17 @@ missionStudio/
     test_results.py
     test_link_budget.py              -- Phase 4
     test_constellation.py            -- Phase 4
+    test_scenario_templates.py       -- load/validate/round-trip every scenarios/templates/*.json
     test_cli.py
     test_two_body_validation.py      -- requires_basilisk
     test_mission_engine.py           -- Phase 6, requires_basilisk
     gui/
+      test_scenario_templates_gui.py -- every template round-trips through ScenarioEditorWidget too
       test_orbit_ic_widget.py
       test_spacecraft_editor.py
       test_sensor_actuator_editor.py
       test_vizard_dialog.py
+      test_vizard_launcher.py
       test_monte_carlo_editor.py
       test_ground_station_editor.py
       test_constellation_dialog.py   -- Phase 4
@@ -1337,6 +1973,7 @@ missionStudio/
       test_main_window.py
       test_mission_sequence_editor.py -- Phase 6
       test_mission_output_widget.py  -- Phase 6
+      test_load_scenario_widget.py   -- "Load Scenario" tab: built-in template picker + browse
 ```
 
 ## Running the tests
@@ -1470,16 +2107,72 @@ missionstudio gui
 # or: python3 -m missionstudio.gui.app
 ```
 
-The GUI opens with a blank scenario. File > New/Open/Save/Save As work
-against the same `schema.Scenario`/`load_scenario()`/`.save()` the CLI
-uses; the scenario form's validation status label updates live as you
-type, including its Monte Carlo section (enable/num_runs/thread_count +
-a dispersion list, referencing spacecraft by name). Run > Run Simulation
-runs `SimulationService` on a background thread (the UI stays responsive)
-and switches to the Results tab when
+The GUI opens on its **Load Scenario** tab (left pane) -- pick one of the
+nine built-in template missions (see "Template missions" below) or
+browse for any other scenario file; either one switches you to the
+**Scenario Editor** tab next to it with that scenario loaded and ready to
+edit. File > New/Open/Save/Save As work against the same
+`schema.Scenario`/`load_scenario()`/`.save()` the CLI uses (File > Open
+and the Load Scenario tab's own "Browse for a file..." button are two
+paths to the same `open_path()`); the scenario form's validation status
+label updates live as you type, including its Monte Carlo section
+(enable/num_runs/thread_count + a dispersion list, referencing spacecraft
+by name). Run > Run Simulation runs `SimulationService` on a background
+thread (the UI stays responsive) and switches to the Results tab when
 done, with a plot per result series and a CSV export button. Run > Check
 Kernels shows SPICE kernel fetch/cache status. Both Run actions report a
 clear error (not a crash) if Basilisk isn't installed/built.
+
+## Template missions for learning and for starting your own
+
+`missionstudio/scenarios/templates/` has nine ready-to-run scenario
+files, each demonstrating one missionStudio concept in isolation --
+two-body orbits, J2/third-body perturbations, GEO station-keeping,
+a generated Walker constellation, formation-flying phasing control,
+attitude pointing (idealized, then with real ADCS hardware), a Mission
+Sequence-based impulsive orbit raise, and a Monte Carlo dispersion
+analysis. See that directory's own `README.md` for the full catalog and
+what each one teaches -- every file also carries its own extensive
+`description` field (visible in the GUI's scenario form, or by opening
+the `.json` directly) explaining what to look at after running it and
+what to try changing.
+
+They're built through `schema.scenario`'s own dataclasses and
+`Scenario.validate()` (via `scripts/_generate_templates.py`, kept in the
+repository as the regeneration source of truth), not hand-written JSON,
+and every one is covered by `tests/test_scenario_templates.py`
+(schema-level load/validate/round-trip, Basilisk-free),
+`tests/gui/test_scenario_templates_gui.py` (confirms each one also
+round-trips through the actual `ScenarioEditorWidget` form), and
+`tests/gui/test_load_scenario_widget.py` (the in-GUI picker described
+below) -- 59 tests total, all passing before this was committed. What's
+NOT yet verified: an actual Basilisk run of any of them (this sandbox has
+none), so treat the physical numbers (propellant use, drift rates,
+orbital periods) as reasonable back-of-the-envelope choices, not
+independently confirmed results, the same caveat every Basilisk
+-dependent module in this project carries until it's been run for real --
+see the "Environment honesty note" above.
+
+**Built into the GUI itself** (not just files you'd have to know the path
+to): the GUI's **Load Scenario** tab (`gui/load_scenario_widget.py`,
+see "Running the GUI" above) lists all nine by name with their
+description shown on selection, no file-browsing needed -- "Open
+Template" or a double-click loads one and switches straight to the
+Scenario Editor tab. The same tab's "Browse for a file..." button covers
+everything else, via the same `MainWindow.open_path()` File > Open
+already uses. From the CLI:
+
+```bash
+missionstudio validate missionstudio/scenarios/templates/01_two_body_circular_orbit.json  # no Basilisk needed
+missionstudio run missionstudio/scenarios/templates/01_two_body_circular_orbit.json --out-dir out
+```
+
+To use one as a starting point for your own mission: **Save As...** under
+a new name before editing (so the original template stays intact for
+next time), then layer in whatever additional concepts you need --
+templates/README.md's own closing section has concrete suggestions for
+combining them (e.g. a comms-relay constellation might start from '04'
+and add '07''s ADCS hardware plus a ground station and RF link).
 
 ## Vendoring vs. building Basilisk from source
 

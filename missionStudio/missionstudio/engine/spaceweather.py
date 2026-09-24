@@ -78,6 +78,13 @@ CELESTRAK_URLS = {
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "missionStudio" / "spaceweather"
 
+# [bytes] CelesTrak's largest space-weather product (SW-All.csv, the full
+# historical record) is a few MB -- cap well above that so a legitimate
+# fetch never trips this, but refuse to buffer an unbounded response into
+# memory (a redirected/compromised/misbehaving server response should fail
+# loudly here, not hang the process or exhaust memory/disk).
+_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+
 # Synthetic fallback: a smooth ~11-year solar-cycle envelope with correlated
 # day-to-day noise and occasional storm episodes -- shaped like real solar
 # activity, but not tied to any actual cycle forecast. Ported from
@@ -220,9 +227,19 @@ def fetch(dataset: str = "SW-All", cache_dir: Optional[Path] = None, force: bool
     url = CELESTRAK_URLS[dataset]
     try:
         with urllib.request.urlopen(url, timeout=timeout_s) as response:
-            data = response.read()
+            # Read one byte past the cap rather than response.read() with no
+            # bound: an unbounded read would buffer however much data the
+            # server sends (or never sends, tying up memory/the connection)
+            # before the timeout/error handling below ever gets a chance to
+            # apply -- see _MAX_DOWNLOAD_BYTES.
+            data = response.read(_MAX_DOWNLOAD_BYTES + 1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise SpaceWeatherError(f"could not fetch {url}: {exc}") from exc
+
+    if len(data) > _MAX_DOWNLOAD_BYTES:
+        raise SpaceWeatherError(
+            f"{url} response exceeded {_MAX_DOWNLOAD_BYTES} bytes -- refusing to buffer an unbounded download"
+        )
 
     tmp = dest.with_suffix(dest.suffix + ".part")
     tmp.write_bytes(data)

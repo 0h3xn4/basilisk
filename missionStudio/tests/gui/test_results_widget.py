@@ -110,6 +110,97 @@ def test_set_live_result_grows_the_plotted_data(widget):
     assert len(widget.axes.get_lines()[0].get_xdata()) > first_line_length
 
 
+def test_position_series_plots_in_km_not_m(widget):
+    rs = _sample_result_set()
+    raw_x_m = rs.series["sat-1.position_N"].data[:, 0]
+
+    widget.set_result(rs)
+
+    plotted_x = widget.axes.get_lines()[0].get_ydata()
+    np.testing.assert_allclose(plotted_x, raw_x_m / 1000.0)
+    assert "[km]" in widget.axes.get_ylabel()
+
+
+def test_velocity_series_plots_in_km_s_not_m_s(widget):
+    rs = _sample_result_set()
+    raw_vx_m_s = rs.series["sat-1.velocity_N"].data[:, 0]
+
+    widget.set_result(rs)
+    widget.series_combo.setCurrentIndex(1)  # "sat-1.velocity_N"
+
+    plotted_x = widget.axes.get_lines()[0].get_ydata()
+    np.testing.assert_allclose(plotted_x, raw_vx_m_s / 1000.0)
+    assert "[km/s]" in widget.axes.get_ylabel()
+
+
+def test_dimensionless_series_is_not_unit_converted(widget):
+    from missionstudio.engine.results import ResultSet, TimeSeries
+
+    rs = ResultSet(scenario_name="demo")
+    rs.add(TimeSeries("sat-1.eccentricity", np.linspace(0, 100, 5), ("e",), np.full((5, 1), 0.01), units="-"))
+    widget.set_result(rs)
+
+    plotted = widget.axes.get_lines()[0].get_ydata()
+    np.testing.assert_allclose(plotted, 0.01)  # unchanged -- "-" isn't in _DISPLAY_UNIT_CONVERSIONS
+    assert widget.axes.get_ylabel() == "sat-1.eccentricity [-]"
+
+
+def test_default_x_axis_is_elapsed_time_in_hours(widget):
+    rs = _sample_result_set()
+    widget.set_result(rs)
+
+    plotted_x = widget.axes.get_lines()[0].get_xdata()
+    np.testing.assert_allclose(plotted_x, rs.series["sat-1.position_N"].time_s / 3600.0)
+    assert "elapsed time" in widget.axes.get_xlabel()
+
+
+def test_epoch_x_axis_converts_time_s_to_datetimes(widget):
+    from datetime import datetime, timedelta
+
+    rs = _sample_result_set(n=5)
+    widget.set_result(rs, epoch_utc="2030-01-01T00:00:00")
+    widget.x_axis_combo.setCurrentIndex(widget.x_axis_combo.findData("epoch"))
+
+    plotted_x = widget.axes.get_lines()[0].get_xdata()
+    base = datetime.fromisoformat("2030-01-01T00:00:00")
+    expected = [base + timedelta(seconds=float(t)) for t in rs.series["sat-1.position_N"].time_s]
+    assert list(plotted_x) == expected
+    assert widget.axes.get_xlabel() == "epoch (UTC)"
+
+
+def test_epoch_x_axis_falls_back_to_elapsed_time_without_a_known_epoch(widget):
+    rs = _sample_result_set()
+    widget.set_result(rs)  # no epoch_utc given
+    widget.x_axis_combo.setCurrentIndex(widget.x_axis_combo.findData("epoch"))
+
+    assert "elapsed time" in widget.axes.get_xlabel()
+
+
+def test_epoch_x_axis_falls_back_to_elapsed_time_on_unparseable_epoch(widget):
+    rs = _sample_result_set()
+    widget.set_result(rs, epoch_utc="not a real epoch string")
+    widget.x_axis_combo.setCurrentIndex(widget.x_axis_combo.findData("epoch"))
+
+    assert "elapsed time" in widget.axes.get_xlabel()
+
+
+def test_switching_x_axis_back_to_elapsed_time_restores_it(widget):
+    rs = _sample_result_set()
+    widget.set_result(rs, epoch_utc="2030-01-01T00:00:00")
+    widget.x_axis_combo.setCurrentIndex(widget.x_axis_combo.findData("epoch"))
+    widget.x_axis_combo.setCurrentIndex(widget.x_axis_combo.findData("elapsed"))
+
+    assert "elapsed time" in widget.axes.get_xlabel()
+
+
+def test_live_result_carries_epoch_through_to_the_plot(widget):
+    rs = _sample_result_set(n=5)
+    widget.set_live_result(rs, epoch_utc="2030-06-15T00:00:00")
+    widget.x_axis_combo.setCurrentIndex(widget.x_axis_combo.findData("epoch"))
+
+    assert widget.axes.get_xlabel() == "epoch (UTC)"
+
+
 def test_set_live_result_rebuilds_combo_if_series_names_change(widget):
     from missionstudio.engine.results import ResultSet, TimeSeries
 

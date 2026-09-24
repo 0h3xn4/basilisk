@@ -50,8 +50,12 @@ include = ["missionstudio*"]
 # `missionstudio validate missionstudio/scenarios/two_body_validation.json`
 # and the "Running a scenario" README example would 404 the moment
 # missionstudio was installed from a wheel instead of run from a checkout.
+# scenarios/templates/*.json (the education/starter-template scenarios --
+# see that directory's own README) is a separate glob for the same reason:
+# setuptools package-data globs are not recursive, so "scenarios/*.json"
+# alone would silently drop everything one directory deeper.
 [tool.setuptools.package-data]
-missionstudio = ["scenarios/*.json"]
+missionstudio = ["scenarios/*.json", "scenarios/templates/*.json", "scenarios/templates/README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -467,7 +467,13 @@ def attach_sensors(scSim, task_name: str, tag: str, sc_object, sensor_configs: L
             mod = coarseSunSensor.CoarseSunSensor()
             mod.ModelTag = f"{tag}_{sensor.name}"
             mod.nHat_B = [float(v) for v in params["nHat_B"]]  # required, schema-validated
-            mod.fov = np.radians(float(params.get("fov_deg", 90.0)))
+            # params["fov_deg"] is the FULL field of view (see
+            # gui.sensor_actuator_editor's "full field of view [deg]" label),
+            # but CoarseSunSensor.fov is the HALF angle from boresight
+            # (coarseSunSensor.cpp gates on signal >= cos(fov), i.e. fov is
+            # the max off-boresight angle) -- halve it here or every CSS
+            # would silently accept twice the field of view the user asked for.
+            mod.fov = np.radians(float(params.get("fov_deg", 90.0)) / 2.0)
             mod.senNoiseStd = float(params.get("noise_std", 0.0))
             mod.sunInMsg.subscribeTo(sun_state_out_msg)
             mod.stateInMsg.subscribeTo(sc_object.scStateOutMsg)

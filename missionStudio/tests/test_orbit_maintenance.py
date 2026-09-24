@@ -67,3 +67,140 @@ def test_vnb_and_rtn_bases_are_orthonormal_and_right_handed(seed):
         assert np.isclose(np.dot(a2, a3), 0.0, atol=1e-9)
         assert np.isclose(np.dot(a1, a3), 0.0, atol=1e-9)
         assert np.allclose(np.cross(a1, a2), a3, atol=1e-9)
+
+
+# -- Non-finite/degenerate spacecraft state must never reach
+# orbitalMotion.rv2elem() from inside UpdateState() -----------------------
+#
+# Real crash report: a formation-flying scenario (station_keeping +
+# phasing_keeping) crashed with two DIFFERENT native signatures on
+# different runs ("basic_string::_M_create", "std::bad_alloc") -- the
+# classic symptom of memory corruption, not a deterministic failure.
+# Traced to PhasingKeepingController.UpdateState()'s own call to
+# orbitalMotion.rv2elem() (via _mean_anomaly): that function has a real
+# bug in its OWN NaN-input guard (src/utilities/orbitalMotion.py sets
+# ClassicElements.AN/.AP, neither a real slot on that class -- see
+# engine.service._osculating_elements's matching comment/fix), so it
+# crashes with AttributeError instead of returning a clean NaN result --
+# and an exception escaping a SWIG director callback (UpdateState()
+# itself) is undefined behavior, not a clean Python exception. These
+# tests confirm UpdateState() never reaches that call with non-finite
+# input in the first place.
+
+def _write_sc_state(msg, r_bn_n, v_bn_n, time_ns=0):
+    from Basilisk.architecture import messaging
+
+    payload = messaging.SCStatesMsgPayload()
+    payload.r_BN_N = list(r_bn_n)
+    payload.v_BN_N = list(v_bn_n)
+    msg.write(payload, time_ns, -1)
+
+
+def test_station_keeping_skips_thrust_on_nan_state():
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import StationKeepingController
+
+    controller = StationKeepingController(
+        name="sk", mu=3.986004418e14, nominal_alt_m=550e3, deadband_m=2e3, r_planet_m=6378137.0,
+        thrust_n=0.05, isp_s=1500.0, dry_mass_kg=400.0, propellant_kg=5.0,
+    )
+    controller.extForceEffector = extForceTorque.ExtForceTorque()
+    sc_state_msg = messaging.SCStatesMsg()
+    _write_sc_state(sc_state_msg, [np.nan, 0.0, 0.0], [0.0, 7500.0, 0.0])
+    controller.scStateInMsg.subscribeTo(sc_state_msg)
+    controller.Reset(0)
+
+    controller.UpdateState(0)  # must not raise
+
+    assert controller.extForceEffector.extForce_N == [0.0, 0.0, 0.0]
+    assert controller.burnLog[-1] == 0
+    assert np.isnan(controller.altLog[-1])
+
+
+def test_station_keeping_skips_thrust_on_zero_velocity():
+    """A separate degenerate case from NaN -- np.linalg.norm(vVec) below
+    would otherwise divide by zero when computing the thrust direction.
+    """
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import StationKeepingController
+
+    controller = StationKeepingController(
+        name="sk", mu=3.986004418e14, nominal_alt_m=550e3, deadband_m=2e3, r_planet_m=6378137.0,
+        thrust_n=0.05, isp_s=1500.0, dry_mass_kg=400.0, propellant_kg=5.0,
+    )
+    controller.extForceEffector = extForceTorque.ExtForceTorque()
+    sc_state_msg = messaging.SCStatesMsg()
+    _write_sc_state(sc_state_msg, [7000e3, 0.0, 0.0], [0.0, 0.0, 0.0])
+    controller.scStateInMsg.subscribeTo(sc_state_msg)
+    controller.Reset(0)
+
+    controller.UpdateState(0)  # must not raise
+
+    assert controller.extForceEffector.extForce_N == [0.0, 0.0, 0.0]
+
+
+def test_phasing_keeping_skips_thrust_on_nan_state():
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import PhasingKeepingController, SeparationSchedule
+
+    controller = PhasingKeepingController(
+        name="pk", mu=3.986004418e14, nominal_a_m=6928e3,
+        separation_schedule=SeparationSchedule(distances_km=[50.0], interval_days=0.0, semi_major_axis_m=6928e3),
+        tolerance_fraction=0.1, restore_tolerance_fraction=0.5, correction_window_days=1.0,
+        max_drift_days=5.0, max_delta_a_m=1000.0, thrust_n=0.05, isp_s=1500.0, dry_mass_kg=400.0,
+    )
+    controller.extForceEffectorB = extForceTorque.ExtForceTorque()
+    state_a = messaging.SCStatesMsg()
+    state_b = messaging.SCStatesMsg()
+    _write_sc_state(state_a, [7000e3, 0.0, 0.0], [0.0, 7500.0, 0.0])
+    _write_sc_state(state_b, [np.nan, np.nan, np.nan], [np.nan, np.nan, np.nan])
+    controller.scStateInMsgA.subscribeTo(state_a)
+    controller.scStateInMsgB.subscribeTo(state_b)
+    controller.Reset(0)
+
+    controller.UpdateState(0)  # must not raise -- would crash inside orbitalMotion.rv2elem() otherwise
+
+    assert controller.extForceEffectorB.extForce_N == [0.0, 0.0, 0.0]
+    assert np.isnan(controller.errorDegLog[-1])
+
+
+def test_phasing_keeping_runs_normally_with_finite_state():
+    """Confirms the new guard doesn't change behavior for the ordinary,
+    finite-state case -- the state machine still runs its normal IDLE
+    logic (with a huge starting error, immediately transitions to
+    BURN_OUT).
+    """
+    from Basilisk.architecture import messaging
+    from Basilisk.simulation import extForceTorque
+
+    from missionstudio.engine.orbit_maintenance import PhasingKeepingController, SeparationSchedule
+
+    controller = PhasingKeepingController(
+        name="pk", mu=3.986004418e14, nominal_a_m=6928e3,
+        separation_schedule=SeparationSchedule(distances_km=[50.0], interval_days=0.0, semi_major_axis_m=6928e3),
+        tolerance_fraction=0.1, restore_tolerance_fraction=0.5, correction_window_days=1.0,
+        max_drift_days=5.0, max_delta_a_m=1000.0, thrust_n=0.05, isp_s=1500.0, dry_mass_kg=400.0,
+    )
+    controller.extForceEffectorB = extForceTorque.ExtForceTorque()
+    state_a = messaging.SCStatesMsg()
+    state_b = messaging.SCStatesMsg()
+    _write_sc_state(state_a, [7000e3, 0.0, 0.0], [0.0, 7500.0, 0.0])
+    _write_sc_state(state_b, [0.0, 7000e3, 0.0], [-7500.0, 0.0, 0.0])
+    controller.scStateInMsgA.subscribeTo(state_a)
+    controller.scStateInMsgB.subscribeTo(state_b)
+    controller.Reset(0)
+
+    controller.UpdateState(0)
+
+    # The exact control-law numerics aren't what this test is about (see
+    # the *_skips_thrust_on_nan_state tests above for that) -- only that
+    # the new guard doesn't block the ordinary, finite-state path from
+    # running its real logic and logging a real (non-placeholder) value.
+    assert not np.isnan(controller.errorDegLog[-1])
+    assert len(controller.tLog) == 1

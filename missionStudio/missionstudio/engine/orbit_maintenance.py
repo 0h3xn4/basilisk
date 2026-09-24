@@ -203,6 +203,23 @@ class StationKeepingController(sysModel.SysModel):
         scState = self.scStateInMsg()
         rVec = np.array(scState.r_BN_N)  # [m]
         vVec = np.array(scState.v_BN_N)  # [m/s]
+
+        # Same reasoning as PhasingKeepingController.UpdateState()'s own
+        # matching guard: a non-finite (or, for vVec, exactly zero --
+        # np.linalg.norm(vVec) below would divide by it) state must never
+        # be allowed to propagate into a commanded force -- command no
+        # thrust and hold state this tick instead.
+        if not (np.all(np.isfinite(rVec)) and np.all(np.isfinite(vVec)) and np.linalg.norm(vVec) > 0.0):
+            if self.extForceEffector is not None:
+                self.extForceEffector.extForce_N = [0.0, 0.0, 0.0]
+            self.tLog.append(t)
+            self.altLog.append(float("nan"))
+            self.smoothAltLog.append(float("nan"))
+            self.burnLog.append(0)
+            self.propellantLog.append(self.propellant)
+            self.deltaVLog.append(self._cumulativeDv)
+            return
+
         alt = float(np.linalg.norm(rVec) - self.rPlanet)  # [m]
 
         # Orbit-period boxcar smoothing to reject short-period altitude
@@ -406,6 +423,16 @@ class PhasingKeepingController(sysModel.SysModel):
         self.state = self.IDLE
         self._lastT = CurrentSimNanos * macros.NANO2SEC
         self._accumDv = 0.0
+        # Mirrors StationKeepingController.Reset()'s own self._altHistory
+        # clear -- this smoothing window is per-tick algorithmic state, not
+        # cumulative telemetry (unlike tLog/errorDegLog/... below, which
+        # intentionally keep accumulating across a Reset() the same way
+        # every other controller's logs do), so a second Reset() on this
+        # same instance (Basilisk permits calling it more than once, even
+        # though every current caller in this codebase only ever does so
+        # once) must not let stale pre-reset error samples leak into the
+        # smoothed error average computed just after it.
+        self._errorHistory = []
         if self.extForceEffectorB is not None:
             self.extForceEffectorB.extForce_N = [0.0, 0.0, 0.0]
 
@@ -433,6 +460,36 @@ class PhasingKeepingController(sysModel.SysModel):
         stateB = self.scStateInMsgB()
         rA, vA = np.array(stateA.r_BN_N), np.array(stateA.v_BN_N)
         rB, vB = np.array(stateB.r_BN_N), np.array(stateB.v_BN_N)
+
+        # Real crash found on an actual run: orbitalMotion.rv2elem() (called
+        # via _mean_anomaly below) has a genuine bug in ITS OWN NaN-input
+        # guard (src/utilities/orbitalMotion.py sets ClassicElements.AN/.AP,
+        # neither of which is a real slot on that class -- see
+        # engine.service._osculating_elements's matching comment) -- it
+        # crashes with AttributeError instead of returning a clean NaN
+        # result. Reached from here, that AttributeError would escape a
+        # SWIG director callback (UpdateState() itself), which is
+        # undefined behavior, not a clean Python exception -- confirmed by
+        # two DIFFERENT native crash signatures (basic_string::_M_create,
+        # std::bad_alloc) from the exact same scenario on different runs,
+        # the classic symptom of memory corruption rather than a
+        # deterministic failure. Never call it with non-finite input:
+        # command no thrust and hold state this tick instead (the
+        # non-finite state is either read before either spacecraft's
+        # dynamics has published a first real sample yet, or the
+        # simulation has already gone non-physical -- either way, nothing
+        # useful can be computed from it, but there is no safe way to
+        # raise from inside a director callback either).
+        if not (np.all(np.isfinite(rA)) and np.all(np.isfinite(vA))
+                and np.all(np.isfinite(rB)) and np.all(np.isfinite(vB))):
+            if self.extForceEffectorB is not None:
+                self.extForceEffectorB.extForce_N = [0.0, 0.0, 0.0]
+            self.tLog.append(t)
+            self.errorDegLog.append(float("nan"))
+            self.stateLog.append(self.state)
+            self.propellantLog.append(self._propellant_tracker().propellant)
+            self.deltaVLog.append(self._cumulativeDv)
+            return
 
         _, mA = self._mean_anomaly(self.mu, rA, vA)
         _, mB = self._mean_anomaly(self.mu, rB, vB)

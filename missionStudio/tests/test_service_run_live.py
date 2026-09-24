@@ -80,6 +80,51 @@ def test_run_live_rejects_a_duration_too_small_to_simulate():
         service.run_live(lambda partial, fraction: None)
 
 
+def test_run_live_should_cancel_stops_early_and_raises():
+    """The "abort a running simulation" GUI feature (see
+    gui.run_worker.RunWorker.request_cancel): should_cancel is checked
+    after every chunk, and stopping partway through must not lose the
+    data already simulated -- SimulationCancelled carries it.
+    """
+    from missionstudio.engine.service import SimulationCancelled, SimulationService
+
+    scenario = load_scenario(SCENARIO_PATH)
+    sc_name = scenario.spacecraft[0].name
+    duration_s = scenario.sim_settings.duration_days * 86400.0
+
+    calls = []
+
+    def should_cancel():
+        calls.append(1)
+        return len(calls) >= 2  # let one chunk complete, stop after the second
+
+    service = SimulationService(scenario)
+    with pytest.raises(SimulationCancelled) as exc_info:
+        service.run_live(lambda partial, fraction: None, live_step_s=duration_s / 8.0,
+                          should_cancel=should_cancel)
+
+    partial = exc_info.value.partial_result
+    assert partial.series  # some data was simulated before cancelling
+    full_service = SimulationService(load_scenario(SCENARIO_PATH))
+    full_result = full_service.run()
+    partial_samples = len(partial.series[f"{sc_name}.position_N"].time_s)
+    full_samples = len(full_result.series[f"{sc_name}.position_N"].time_s)
+    assert 0 < partial_samples < full_samples
+
+
+def test_run_live_without_should_cancel_runs_to_completion_as_before():
+    """should_cancel=None (the default, matching every pre-existing
+    caller) must not change behavior at all.
+    """
+    from missionstudio.engine.service import SimulationService
+
+    calls = []
+    service = SimulationService(load_scenario(SCENARIO_PATH))
+    service.run_live(lambda partial, fraction: calls.append(fraction))
+
+    assert calls[-1] == 1.0
+
+
 def test_run_live_honors_explicit_step():
     from missionstudio.engine.service import SimulationService
 

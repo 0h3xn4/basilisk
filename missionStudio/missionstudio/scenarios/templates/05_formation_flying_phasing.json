@@ -1,0 +1,197 @@
+{
+  "name": "05 - Formation flying (phasing control)",
+  "epoch_utc": "2030-01-01T00:00:00",
+  "simulation_mode": "orbit_only",
+  "gravity": {
+    "central_body": "earth",
+    "central_body_degree": 0,
+    "third_body_perturbers": [
+      "sun"
+    ]
+  },
+  "spacecraft": [
+    {
+      "name": "chief-1",
+      "orbit": {
+        "type": "classical_elements",
+        "semi_major_axis_km": 6928.0,
+        "eccentricity": 0.0,
+        "inclination_deg": 45.0,
+        "raan_deg": 0.0,
+        "arg_periapsis_deg": 0.0,
+        "anomaly_type": "true",
+        "true_anomaly_deg": 0.0,
+        "mean_anomaly_deg": null,
+        "position_km": null,
+        "velocity_km_s": null,
+        "tle_line1": null,
+        "tle_line2": null
+      },
+      "dry_mass_kg": 400.0,
+      "inertia_kg_m2": [
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0
+      ],
+      "sigma_bn_init": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "omega_bn_b_init_rad_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "enable_drag": false,
+      "drag_coeff": 2.2,
+      "drag_area_m2": 1.0,
+      "enable_srp": false,
+      "srp_coeff": 1.3,
+      "srp_area_m2": 1.0,
+      "sensors": [],
+      "actuators": [],
+      "fsw_mode": null,
+      "fsw_params": {},
+      "control_params": {},
+      "power": null,
+      "rf_link": null,
+      "station_keeping": null,
+      "phasing_keeping": null,
+      "constant_thrust": null,
+      "vizard_model_path": null,
+      "vizard_model_offset_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_rotation_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "follower-1",
+      "orbit": {
+        "type": "classical_elements",
+        "semi_major_axis_km": 6928.0,
+        "eccentricity": 0.0,
+        "inclination_deg": 45.0,
+        "raan_deg": 0.0,
+        "arg_periapsis_deg": 0.0,
+        "anomaly_type": "true",
+        "true_anomaly_deg": -0.5,
+        "mean_anomaly_deg": null,
+        "position_km": null,
+        "velocity_km_s": null,
+        "tle_line1": null,
+        "tle_line2": null
+      },
+      "dry_mass_kg": 400.0,
+      "inertia_kg_m2": [
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0
+      ],
+      "sigma_bn_init": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "omega_bn_b_init_rad_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "enable_drag": false,
+      "drag_coeff": 2.2,
+      "drag_area_m2": 1.0,
+      "enable_srp": false,
+      "srp_coeff": 1.3,
+      "srp_area_m2": 1.0,
+      "sensors": [],
+      "actuators": [],
+      "fsw_mode": null,
+      "fsw_params": {},
+      "control_params": {},
+      "power": null,
+      "rf_link": null,
+      "station_keeping": {
+        "target_altitude_km": 550.0,
+        "deadband_km": 2.0,
+        "thrust_n": 0.05,
+        "isp_s": 1500.0,
+        "propellant_kg": 5.0,
+        "eclipse_sunlit_threshold": 0.99
+      },
+      "phasing_keeping": {
+        "chief_spacecraft": "chief-1",
+        "target_separation_km": [
+          50.0
+        ],
+        "reconfiguration_interval_days": 90.0,
+        "tolerance_fraction": 0.1,
+        "restore_tolerance_fraction": 0.02,
+        "correction_window_days": 21.0,
+        "max_drift_days": 90.0,
+        "max_delta_semi_major_axis_km": 3.0
+      },
+      "constant_thrust": null,
+      "vizard_model_path": null,
+      "vizard_model_offset_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_rotation_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ],
+  "ground_stations": [],
+  "space_weather": {
+    "source": "celestrak",
+    "local_file_path": null,
+    "cache_dir": null
+  },
+  "sim_settings": {
+    "duration_days": 7.0,
+    "dynamics_task_rate_s": 30.0,
+    "integrator": "rkf78"
+  },
+  "monte_carlo": {
+    "enabled": false,
+    "num_runs": 10,
+    "thread_count": 1,
+    "verbose": false,
+    "dispersions": []
+  },
+  "mission_sequence": [],
+  "description": "Two spacecraft in near-identical orbits, 'follower-1' actively holding a fixed in-track separation behind chief 'chief-1' using phasing_keeping -- a closed-loop controller that measures the along-track separation and fires small along-track burns to correct drift, on top of its OWN station_keeping (phasing_keeping always needs station_keeping configured on the same spacecraft -- see PhasingKeepingConfig's own docstring for why: phasing needs altitude held steady first, or a semi-major-axis mismatch would make along-track drift and true phasing error indistinguishable).\n\nWhat to look at: after running, compare 'follower-1.position_N' and 'chief-1.position_N' -- the along-track (velocity-direction) separation should stay near target_separation_km despite neither orbit being perfectly matched to start, a basic model of formation-flying/rendezvous-proximity-operations control (e.g. trailing satellite formations, or a servicer holding station behind a target). 'missionstudio run' also prints a phasing delta-V breakdown in its station-keeping summary (see README, 'Running the CLI').\n\nTry changing: target_separation_km (a schedule -- see PhasingKeepingConfig; a single -element list holds one separation for the whole run, more elements step through a schedule), or chief-1's own orbit to start with a larger initial mismatch and watch follower-1 correct it.",
+  "schema_version": 1
+}

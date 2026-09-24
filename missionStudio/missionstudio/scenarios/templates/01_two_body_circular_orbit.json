@@ -1,0 +1,105 @@
+{
+  "name": "01 - Two-body circular orbit",
+  "epoch_utc": "2030-01-01T00:00:00",
+  "simulation_mode": "orbit_only",
+  "gravity": {
+    "central_body": "earth",
+    "central_body_degree": 0,
+    "third_body_perturbers": []
+  },
+  "spacecraft": [
+    {
+      "name": "sat-1",
+      "orbit": {
+        "type": "classical_elements",
+        "semi_major_axis_km": 6778.0,
+        "eccentricity": 0.0,
+        "inclination_deg": 51.6,
+        "raan_deg": 0.0,
+        "arg_periapsis_deg": 0.0,
+        "anomaly_type": "true",
+        "true_anomaly_deg": 0.0,
+        "mean_anomaly_deg": null,
+        "position_km": null,
+        "velocity_km_s": null,
+        "tle_line1": null,
+        "tle_line2": null
+      },
+      "dry_mass_kg": 500.0,
+      "inertia_kg_m2": [
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0,
+        0.0,
+        0.0,
+        0.0,
+        10.0
+      ],
+      "sigma_bn_init": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "omega_bn_b_init_rad_s": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "enable_drag": false,
+      "drag_coeff": 2.2,
+      "drag_area_m2": 1.0,
+      "enable_srp": false,
+      "srp_coeff": 1.3,
+      "srp_area_m2": 1.0,
+      "sensors": [],
+      "actuators": [],
+      "fsw_mode": null,
+      "fsw_params": {},
+      "control_params": {},
+      "power": null,
+      "rf_link": null,
+      "station_keeping": null,
+      "phasing_keeping": null,
+      "constant_thrust": null,
+      "vizard_model_path": null,
+      "vizard_model_offset_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_rotation_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "vizard_model_scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ],
+  "ground_stations": [],
+  "space_weather": {
+    "source": "celestrak",
+    "local_file_path": null,
+    "cache_dir": null
+  },
+  "sim_settings": {
+    "duration_days": 1.0,
+    "dynamics_task_rate_s": 30.0,
+    "integrator": "rkf78"
+  },
+  "monte_carlo": {
+    "enabled": false,
+    "num_runs": 10,
+    "thread_count": 1,
+    "verbose": false,
+    "dispersions": []
+  },
+  "mission_sequence": [],
+  "description": "The simplest possible orbit: a single spacecraft in a circular low-Earth orbit around a point-mass Earth (no J2, no drag, no third-body gravity, no attitude dynamics -- simulation_mode is 'orbit_only'). This is the orbital-mechanics equivalent of a 'hello world' -- a clean two-body Keplerian orbit with nothing else going on.\n\nWhat to look at: plot 'sat-1.position_N' after running -- it traces a perfect circle in the orbit plane. The orbital period should match Kepler's third law, T = 2*pi*sqrt(a^3/mu), for a = 6778 km and Earth's mu (~398600.4418 km^3/s^2): about 5554 s (~92.6 minutes), so a 1-day run completes about 15.5 orbits.\n\nTry changing: the semi_major_axis_km (higher = slower, longer period), the inclination_deg (watch the ground track in Vizard change), or the eccentricity (still 0 here -- see '02 - Elliptical orbit with perturbations' for a non-circular example).",
+  "schema_version": 1
+}
