@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         self._mc_worker: MonteCarloWorker | None = None
         self._vizard_request = None  # engine.vizard.VizardRequest, or None -- set via the Run menu's "Vizard Configuration..." action
         self._vizard_process = None  # subprocess.Popen, or None -- set via the Run menu's "Launch Vizard" action
+        self._last_run_epoch_utc: str | None = None  # set in on_run(); see its own comment
 
         self.scenario_editor = ScenarioEditorWidget()
         self.scenario_editor.reset_to_default()
@@ -471,6 +472,12 @@ class MainWindow(QMainWindow):
             self.results_widget.set_result(None)
             self.right_tabs.setCurrentWidget(self.results_widget)
         self.mission_output_widget.clear()
+        # Captured now (not read back from self.scenario_editor later,
+        # e.g. in _on_run_finished()): the editor isn't locked while a run
+        # is in flight, so it could hold different, later edits by the
+        # time this run actually finishes. This is the exact epoch that
+        # exact ResultSet's time_s values are relative to.
+        self._last_run_epoch_utc = scenario.epoch_utc
         self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request, live=live)
         self._run_worker.progress.connect(self._on_run_progress)
         self._run_worker.finished_ok.connect(self._on_run_finished)
@@ -478,7 +485,7 @@ class MainWindow(QMainWindow):
         self._run_worker.start()
 
     def _on_run_progress(self, partial_result, fraction: float) -> None:
-        self.results_widget.set_live_result(partial_result)
+        self.results_widget.set_live_result(partial_result, self._last_run_epoch_utc)
         self._busy_progress.setValue(int(round(fraction * 100)))
 
     def _on_run_finished(self, result, command_summary=None) -> None:
@@ -492,7 +499,7 @@ class MainWindow(QMainWindow):
         # is skipped when the series set hasn't changed. Also correct for
         # a non-live run: set_live_result() still rebuilds normally
         # whenever the series set differs from whatever was shown before.
-        self.results_widget.set_live_result(result)
+        self.results_widget.set_live_result(result, self._last_run_epoch_utc)
         if command_summary is not None:
             self.mission_output_widget.set_command_summary(command_summary)
             self.right_tabs.setCurrentWidget(self.mission_output_widget)

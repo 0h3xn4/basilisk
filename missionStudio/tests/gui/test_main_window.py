@@ -386,6 +386,31 @@ def test_run_progress_updates_results_widget_and_busy_bar(window):
     assert window._busy_progress.value() == 50
 
 
+def test_on_run_captures_epoch_and_passes_it_to_results_widget(window, monkeypatch):
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    window.scenario_editor.epoch_edit.setText("2031-05-01T00:00:00")
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)  # don't actually spin up the thread
+
+    window.on_run()
+
+    assert window._last_run_epoch_utc == "2031-05-01T00:00:00"
+
+
+def test_run_finished_passes_captured_epoch_to_results_widget(window):
+    from missionstudio.engine.results import ResultSet, TimeSeries
+
+    window._last_run_epoch_utc = "2032-01-01T00:00:00"
+    result = ResultSet(scenario_name="test")
+    result.add(TimeSeries("sat-1.position_N", [0.0, 1.0], ("x", "y", "z"),
+                           [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], units="m"))
+
+    window._on_run_finished(result)
+
+    assert window.results_widget._epoch_utc == "2032-01-01T00:00:00"
+
+
 def test_run_finished_stops_busy_indicator_and_reenables_actions(window):
     from missionstudio.engine.results import ResultSet
 

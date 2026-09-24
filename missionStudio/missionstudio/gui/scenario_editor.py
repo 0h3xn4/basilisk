@@ -131,7 +131,17 @@ class ScenarioEditorWidget(QWidget):
         form.addRow("Epoch (UTC)", self.epoch_edit)
 
         self.description_edit = QPlainTextEdit()
-        self.description_edit.setFixedHeight(60)
+        # Was 60px (~2 lines) -- nowhere near enough for the built-in
+        # template missions' own multi-paragraph descriptions (see
+        # missionstudio/scenarios/templates/), which needed constant
+        # scrolling just to read a few lines at a time. Tall enough to
+        # show most of one of those at once without letting this one
+        # field dominate the whole scenario form (Propagation setup/
+        # Spacecraft/Ground stations/Mission sequence/Monte Carlo all
+        # need their own visible room below it) -- it still scrolls
+        # internally for anything longer, same as before, just far less
+        # eagerly.
+        self.description_edit.setFixedHeight(220)
         self.description_edit.textChanged.connect(self.changed)
         form.addRow("Description", self.description_edit)
         return group
