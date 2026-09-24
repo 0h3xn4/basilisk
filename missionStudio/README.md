@@ -1374,6 +1374,19 @@ missionStudio/
       run_worker.py                  -- SimulationService/Monte Carlo on a background QThread
     scenarios/
       two_body_validation.json       -- the Phase 0 validation scenario
+      templates/                     -- education/starter-template scenarios -- see that directory's own README
+        README.md                    -- the template catalog: what each one teaches, how to open/run one
+        01_two_body_circular_orbit.json
+        02_elliptical_orbit_with_perturbations.json
+        03_geo_station_keeping.json
+        04_walker_constellation.json
+        05_formation_flying_phasing.json
+        06_attitude_pointing_basic.json
+        07_attitude_pointing_with_adcs_hardware.json
+        08_mission_sequence_orbit_raise.json
+        09_monte_carlo_dispersion_analysis.json
+  scripts/
+    _generate_templates.py            -- regenerates scenarios/templates/*.json from schema dataclasses (not installed/imported elsewhere)
   packaging/                          -- Phase 3: build_wheel.sh / install.sh / .desktop entry -- see packaging/README.md
   tests/
     conftest.py                      -- requires_basilisk / requires_gui auto-skip markers
@@ -1385,10 +1398,12 @@ missionStudio/
     test_results.py
     test_link_budget.py              -- Phase 4
     test_constellation.py            -- Phase 4
+    test_scenario_templates.py       -- load/validate/round-trip every scenarios/templates/*.json
     test_cli.py
     test_two_body_validation.py      -- requires_basilisk
     test_mission_engine.py           -- Phase 6, requires_basilisk
     gui/
+      test_scenario_templates_gui.py -- every template round-trips through ScenarioEditorWidget too
       test_orbit_ic_widget.py
       test_spacecraft_editor.py
       test_sensor_actuator_editor.py
@@ -1548,6 +1563,49 @@ and switches to the Results tab when
 done, with a plot per result series and a CSV export button. Run > Check
 Kernels shows SPICE kernel fetch/cache status. Both Run actions report a
 clear error (not a crash) if Basilisk isn't installed/built.
+
+## Template missions for learning and for starting your own
+
+`missionstudio/scenarios/templates/` has nine ready-to-run scenario
+files, each demonstrating one missionStudio concept in isolation --
+two-body orbits, J2/third-body perturbations, GEO station-keeping,
+a generated Walker constellation, formation-flying phasing control,
+attitude pointing (idealized, then with real ADCS hardware), a Mission
+Sequence-based impulsive orbit raise, and a Monte Carlo dispersion
+analysis. See that directory's own `README.md` for the full catalog and
+what each one teaches -- every file also carries its own extensive
+`description` field (visible in the GUI's scenario form, or by opening
+the `.json` directly) explaining what to look at after running it and
+what to try changing.
+
+They're built through `schema.scenario`'s own dataclasses and
+`Scenario.validate()` (via `scripts/_generate_templates.py`, kept in the
+repository as the regeneration source of truth), not hand-written JSON,
+and every one is covered by `tests/test_scenario_templates.py`
+(schema-level load/validate/round-trip, Basilisk-free) and
+`tests/gui/test_scenario_templates_gui.py` (confirms each one also
+round-trips through the actual `ScenarioEditorWidget` form, the File >
+Open path a user actually takes) -- 50 tests total, all passing before
+this was committed. What's NOT yet verified: an actual Basilisk run of
+any of them (this sandbox has none), so treat the physical numbers
+(propellant use, drift rates, orbital periods) as reasonable
+back-of-the-envelope choices, not independently confirmed results, the
+same caveat every Basilisk-dependent module in this project carries
+until it's been run for real -- see the "Environment honesty note" above.
+
+Open one via File > Open in the GUI, or from the CLI:
+
+```bash
+missionstudio validate missionstudio/scenarios/templates/01_two_body_circular_orbit.json  # no Basilisk needed
+missionstudio run missionstudio/scenarios/templates/01_two_body_circular_orbit.json --out-dir out
+```
+
+To use one as a starting point for your own mission: **Save As...** under
+a new name before editing (so the original template stays intact for
+next time), then layer in whatever additional concepts you need --
+templates/README.md's own closing section has concrete suggestions for
+combining them (e.g. a comms-relay constellation might start from '04'
+and add '07''s ADCS hardware plus a ground station and RF link).
 
 ## Vendoring vs. building Basilisk from source
 
