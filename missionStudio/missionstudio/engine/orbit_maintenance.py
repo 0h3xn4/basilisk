@@ -107,10 +107,11 @@ import numpy as np
 
 from Basilisk.architecture import messaging, sysModel
 from Basilisk.simulation import extForceTorque
-from Basilisk.utilities import macros, orbitalMotion
+from Basilisk.utilities import macros
 
 from ..schema.scenario import ConstantThrustConfig, PhasingKeepingConfig, StationKeepingConfig
 from .constellation import SeparationSchedule
+from .orbital_geometry import argument_of_latitude
 from .propellant_bookkeeping import apply_propellant_burn
 
 
@@ -330,10 +331,14 @@ class PhasingKeepingController(sysModel.SysModel):
 
     Ported from ``../missionAnalysis/constellation_controllers.py``'s
     controller of the same name -- the drift-orbit state machine
-    (IDLE/BURN_OUT/DRIFT/BURN_RESTORE), the mean-anomaly error computation
-    (osculating, smoothed over one orbital period to reject J2
-    short-period noise), and the thruster-arbitration/shared-propellant
-    logic are unchanged. Differs the same two ways
+    (IDLE/BURN_OUT/DRIFT/BURN_RESTORE), the along-track phase-error
+    computation (osculating, smoothed over one orbital period to reject
+    J2 short-period noise), and the thruster-arbitration/shared-propellant
+    logic are unchanged in SHAPE, though the phase-error computation
+    itself no longer goes through ``orbitalMotion.rv2elem()``'s mean
+    anomaly -- see ``engine.orbital_geometry.argument_of_latitude``'s own docstring for a
+    real numerical-instability bug found and fixed here. Differs the same
+    two ways
     :class:`StationKeepingController` differs from its own original (no
     fast-dyn/coarse-ctrl task split, no ``log_decimation``), plus:
     ``thrust_n``/``isp_s``/``dry_mass_kg`` are not schema fields here --
@@ -437,13 +442,6 @@ class PhasingKeepingController(sysModel.SysModel):
             self.extForceEffectorB.extForce_N = [0.0, 0.0, 0.0]
 
     @staticmethod
-    def _mean_anomaly(mu, rVec, vVec):
-        oe = orbitalMotion.rv2elem(mu, rVec, vVec)
-        eccAnom = orbitalMotion.f2E(oe.f, oe.e)
-        meanAnom = orbitalMotion.E2M(eccAnom, oe.e)
-        return oe.a, meanAnom
-
-    @staticmethod
     def _circular_mean(angles_rad):
         # Mean of a circular (wrapped) quantity via the resultant vector,
         # correct near the +/-pi wrap boundary -- a plain arithmetic mean
@@ -461,45 +459,19 @@ class PhasingKeepingController(sysModel.SysModel):
         rA, vA = np.array(stateA.r_BN_N), np.array(stateA.v_BN_N)
         rB, vB = np.array(stateB.r_BN_N), np.array(stateB.v_BN_N)
 
-        # Real crash found on an actual run: orbitalMotion.rv2elem() (called
-        # via _mean_anomaly below) has a genuine bug in ITS OWN NaN-input
-        # guard (src/utilities/orbitalMotion.py sets ClassicElements.AN/.AP,
-        # neither of which is a real slot on that class -- see
-        # engine.service._osculating_elements's matching comment) -- it
-        # crashes with AttributeError instead of returning a clean NaN
-        # result.
-        #
-        # An EARLIER version of this comment claimed that AttributeError
-        # would escape UpdateState() (a SWIG director callback) as
-        # undefined behavior -- wrong, corrected after actually reading
-        # Basilisk's own C++ source (architecture/system_model/sim_model.cpp):
-        # SimThreadExecution's worker loop wraps every tick in `catch (...)`
-        # and cleanly re-throws on the parent thread, so a Python exception
-        # raised from here becomes an ordinary, catchable Python
-        # RuntimeError, not UB. The two different native-looking crash
-        # signatures this scenario produced (basic_string::_M_create,
-        # std::bad_alloc) have a different, now-confirmed cause instead:
-        # once ANY dynamics state goes non-finite (from whatever source),
-        # Basilisk's adaptive integrator (rkf45/rkf78 -- see
-        # simulation/dynamics/_GeneralModuleFiles/svIntegratorAdaptiveRungeKutta.h)
-        # computes a NaN error estimate, and every comparison against NaN
-        # is false -- so its "is this step good enough" check never
-        # succeeds and its integration loop never exits, reallocating
-        # temporaries every iteration until the heap is exhausted. See
+        # A non-finite state must never propagate into a commanded force
+        # -- command no thrust and hold state this tick instead (the
+        # non-finite state read here is either before either spacecraft's
+        # dynamics has published a first real sample yet, or the
+        # simulation has already gone non-physical -- either way, nothing
+        # useful can be computed from it, and np.cross/np.arctan2 below
+        # would silently propagate NaN into everything downstream rather
+        # than raising). This can't catch a state that goes non-finite
+        # entirely INSIDE Basilisk's own EOM/integrator between one
+        # tick's finite read here and the next -- see
         # engine.service.raise_clear_execution_error's own docstring for
-        # the full mechanism and where that's now caught and turned into a
-        # clear error instead of a bare native exception string.
-        #
-        # Guarding this call site never hurts (a non-finite state was
-        # never safe input regardless of what happens after), but it is
-        # NOT sufficient by itself to prevent the crash above -- the state
-        # can go non-finite entirely inside Basilisk's own EOM/integrator,
-        # between one tick's finite read here and the next, with no
-        # Python-level hook in between to catch it. Command no thrust and
-        # hold state this tick instead (the non-finite state read here is
-        # either before either spacecraft's dynamics has published a first
-        # real sample yet, or the simulation has already gone non-physical
-        # -- either way, nothing useful can be computed from it).
+        # that failure mode and where it's now turned into a clear error
+        # instead of a bare native exception string.
         if not (np.all(np.isfinite(rA)) and np.all(np.isfinite(vA))
                 and np.all(np.isfinite(rB)) and np.all(np.isfinite(vB))):
             if self.extForceEffectorB is not None:
@@ -511,8 +483,8 @@ class PhasingKeepingController(sysModel.SysModel):
             self.deltaVLog.append(self._cumulativeDv)
             return
 
-        _, mA = self._mean_anomaly(self.mu, rA, vA)
-        _, mB = self._mean_anomaly(self.mu, rB, vB)
+        mA = argument_of_latitude(rA, vA)
+        mB = argument_of_latitude(rB, vB)
 
         scheduledTargetRad = self.separationSchedule.value_at(t)
         referenceTargetRad = scheduledTargetRad if self.state == self.IDLE else self._activeTargetRad

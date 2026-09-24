@@ -2155,6 +2155,100 @@ confirmation depends on the user reproducing the crash again and sharing
 the new log, which will finally show the exact last-good state rather
 than just which chunk failed.
 
+## Template '05' crash -- actual root cause found and fixed
+
+The last-known-state diagnostic paid off immediately -- the user's next
+crash log showed:
+
+```
+follower-1: last recorded state before failure -- t=30.000 s, r_BN_N=[...] m, v_BN_N=[...] m/s
+follower-1: phasing_keeping last tick -- t=30.000 s, error=-0.0882 deg, state=BURN_OUT, ...
+```
+
+The state at t=30 s (the very FIRST dynamics tick) is completely sane --
+hand-verified against a from-scratch two-body propagation in plain numpy
+(no Basilisk needed) that matched the logged r/v to 6+ significant
+digits. The failure happens between t=30 s and t=60 s -- the SECOND
+tick, as early as this scenario's finest possible resolution can show.
+
+That ruled out slow drift/depletion explanations and pointed at the
+`phasing_keeping` error value itself: -0.0882 degrees, when the actual
+along-track separation between these two near-identical orbits (0.5
+degrees apart by construction) plus the 50 km/6928 km target works out to
+-0.9135 degrees by hand -- a ~10x, suspiciously specific discrepancy.
+Reproducing the exact logged r/v through `orbitalMotion.rv2elem()`'s real
+algorithm (`src/utilities/orbitalMotion.py`) explains it: for a truly
+circular orbit (`e < 1e-11`), `rv2elem()` has a dedicated stable branch
+that measures this angle from the ascending node; but this scenario's
+real eccentricity, perturbed by the sun third-body gravity this project
+added to fix an earlier bug (see "Templates '05'/'07' failing..." above)
+and by the controller's own thrust, only needs to drift a hair above that
+extremely tight threshold to fall back to the UNSTABLE branch, which
+measures the same angle from the eccentricity vector's direction --
+numerically meaningless once eccentricity is near zero, since that
+direction becomes dominated by floating-point noise rather than physics.
+Reproducing the real state through that unstable formula by hand gave
+argument-of-periapsis values 160 vs 184 degrees apart for two spacecraft
+0.5 degrees apart -- a ~24 degree spurious "separation," matching the
+instability's fingerprint exactly (a small, real perturbation-driven
+eccentricity landing this scenario just past a threshold Basilisk itself
+only trusts down to 1e-11).
+
+**Fixed** by no longer going through `rv2elem()`'s eccentricity-dependent
+branch selection at all: new `engine.orbital_geometry.
+argument_of_latitude()` computes the along-track phase angle directly
+from r/v by projecting a fixed inertial reference direction into the
+spacecraft's own orbital plane -- depending only on the orbit-NORMAL
+direction (always well-conditioned for any real, non-degenerate orbit,
+with no fragile eccentricity OR inclination threshold to accidentally
+cross the way Basilisk's own near-circular AND near-equatorial branches
+each have). For a genuinely circular orbit this angle equals mean anomaly
+exactly, so it is a drop-in replacement, not an approximation, for how
+`PhasingKeepingController.UpdateState()` already used the old value (the
+discarded semi-major-axis return value of the old `_mean_anomaly()`
+helper was never used by any caller either). Factored into its own
+`engine/orbital_geometry.py` module -- pure `numpy`, no Basilisk import
+-- mirroring `engine/propellant_bookkeeping.py`'s existing "pure math,
+no Basilisk" split, specifically so this fix could finally be verified
+with real, executable tests in this sandbox instead of only by hand.
+
+**This does not, by itself, prove the crash is fully resolved** -- the
+"wrong but noisy" error value this bug produced still fed into
+`deltaA`/target-delta-v calculations that are independently clamped
+(`max_delta_semi_major_axis_km`), so everything downstream of it stayed
+mathematically finite by construction; there may be a second contributing
+factor this investigation hasn't isolated. But it is a definite, real,
+now-verified bug (not a guess) that made `phasing_keeping`'s control
+error effectively noise for any near-circular formation -- exactly this
+project's own templates' whole use case -- and it is a strong, well
+-evidenced candidate for the actual trigger.
+
+A related, separate (not fixed here) finding from this investigation:
+`PhasingKeepingConfig.target_separation_km` is documented and validated
+as strictly "ahead of the chief" (`> 0` only), but template '05's own
+description and initial conditions (follower's `true_anomaly_deg=-0.5`
+vs chief's `0.0`) explicitly set up and describe a TRAILING formation --
+worth a follow-up (most likely: allow a signed value and update the
+docstring to "positive = ahead, negative = behind").
+
+**Verification:** `tests/test_orbital_geometry.py` (7 tests, no Basilisk
+dependency, run unconditionally) directly verify `argument_of_latitude()`
+against known geometry: a known inclined circular orbit, two inclined
+satellites 0.5 degrees apart (the actual regression case for this bug --
+reads back within 1e-6 degrees, not the ~24-degree spurious separation
+the old formula gave), an equatorial orbit, two equatorial satellites 90
+degrees apart (matching an existing `test_orbit_maintenance.py` fixture's
+geometry), a slightly-eccentric orbit (confirms no blow-up right at the
+old formula's failure mode), a degenerate zero-angular-momentum input
+(returns `0.0`, not `NaN`), and an orbit normal nearly parallel to the
+primary reference axis (exercises the secondary-reference fallback).
+607 passed, 66 skipped in this sandbox (7 more passed, matching the 7 new
+tests; skip count unchanged since none of these needed
+`requires_basilisk`). Not yet confirmed against a real Basilisk build --
+that confirmation depends on the user reproducing template '05' again;
+if it no longer crashes, or crashes with a materially different
+error/last-known-state, that confirms this was the (or a) real cause.
+
 ## Repository layout
 
 ```
