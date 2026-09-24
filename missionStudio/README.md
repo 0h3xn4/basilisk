@@ -1322,6 +1322,130 @@ macOS-bundle-resolution tests in `test_vizard_launcher.py` do cover) is
 unverified against the real thing -- worth confirming Vizard actually
 opens on a real machine with Vizard installed.
 
+## Second round of GUI feedback
+
+Five pieces of direct feedback from a real run against the actual GUI (a
+"Simulation failed" dialog referencing `VizInterface` came with it):
+
+* **Vizard live-stream crash, fixed.** `engine/vizard.py`'s
+  `enable_vizard()` used to keep every `_AccessIndicatorBridge` alive by
+  attaching them to `viz` as `viz._missionstudio_access_indicator_bridges`.
+  `viz` is a SWIG proxy for a C++ `VizInterface`, and SWIG-generated
+  proxy classes raise on any attribute they don't already know about --
+  confirmed against the reported crash, which failed immediately with
+  "You tried to add this variable: ... To this class: <...VizInterface
+  ...>" before a single simulation step ran, whenever a scenario used
+  the Vizard live-stream option. Fixed by having `enable_vizard()` return
+  `access_indicator_bridges` alongside `viz` instead of bolting it onto
+  `viz`, and having `SimulationService` retain both as plain attributes
+  of itself (an ordinary Python object with no such restriction).
+* **Plots now show km/km-s, not raw meters** (`results_widget.py`).
+  Length/length-rate series (`units in {"m", "m/s"}` -- position,
+  velocity, altitude, slant range, delta-V, ...) are converted for
+  display only; a LEO position plot's y-axis used to be in the millions.
+  Deliberately narrow -- everything else (accelerometer m/s^2, torque
+  N*m, angles, ...) is left alone, since km-scale units would be worse
+  there, not better. CSV export (`ResultSet.export_csv()`) is unaffected
+  -- it keeps writing the raw SI units `TimeSeries` already holds, since
+  a CSV handed to another tool should stay unambiguous.
+* **A new X-axis combo** (Elapsed time / Epoch (UTC)) on the Results
+  plot. `MainWindow.on_run()` captures `scenario.epoch_utc` before
+  starting the run (so it reflects the scenario that was actually run,
+  not whatever the editor holds by the time the run finishes) and passes
+  it through `_on_run_progress()`/`_on_run_finished()` into
+  `ResultsWidget.set_live_result()`. `set_result()`/`set_live_result()`
+  both take an optional `epoch_utc` (default `None`), so every existing
+  caller/test keeps working unchanged; "Epoch (UTC)" with no epoch
+  available (or one that fails to parse) falls back to elapsed time
+  rather than raising.
+* **The Description box in the Scenario Editor is bigger**
+  (`scenario_editor.py`'s `description_edit`, `setFixedHeight(60)` ->
+  `220`) -- it needed constant scrolling to read a template's full
+  description at the old size.
+* **Abort a running simulation, without breaking the tool.** See its own
+  section below.
+
+**Verification:** `tests/gui/test_results_widget.py` (km conversion +
+Epoch axis, including the "no epoch given"/"unparseable epoch" fallback
+paths) and `tests/gui/test_main_window.py` (epoch capture/passthrough).
+The Vizard crash fix has no dedicated regression test -- there is no
+Basilisk-free way to construct a real `VizInterface` SWIG proxy to
+assert against -- but it was confirmed against the exact real run that
+originally hit it.
+
+## Abort Simulation
+
+Direct user feedback: "there should also be the option to abort a
+running simulation, if needed, without breaking the tool." Basilisk's
+`SimBaseClass.ExecuteSimulation()` is a single, blocking C++ call with no
+hook to interrupt it mid-flight, and `QThread.terminate()` was
+deliberately never considered -- it could leave Basilisk's C++
+simulation state mid-mutation, exactly the kind of "breaking the tool"
+this was asked to avoid. The design is cooperative cancellation instead,
+checked between simulation chunks or mission-sequence commands -- never
+a forced kill:
+
+* `engine/service.py` -- a new `SimulationCancelled` exception carrying
+  whatever partial `ResultSet` had been produced so far
+  (`.partial_result`). `run_live()` gained an optional
+  `should_cancel: Optional[Callable[[], bool]] = None` parameter, checked
+  once after each chunk's `ExecuteSimulation()` call; when it returns
+  `True`, `run_live()` raises `SimulationCancelled` with that chunk's
+  results rather than silently discarding them. `should_cancel=None` (the
+  default, matching every pre-existing caller) leaves behavior unchanged.
+* `engine/mission_engine.py` -- the mission-sequence equivalent:
+  `MissionEngineCancelled` (carrying both `.partial_result` and
+  `.summary`), and `MissionEngine.__init__` gained the same
+  `should_cancel` parameter, checked once per top-level command in
+  `_run_commands()` -- which also naturally covers `while`-loop
+  iterations, since `_run_while()` re-enters `_run_commands()` once per
+  iteration.
+* `gui/run_worker.py` -- `RunWorker` gained `request_cancel()` (sets a
+  `threading.Event`, safe to call from the GUI thread while `run()` is
+  executing on its own thread) and a new `cancelled` Qt signal
+  (`Signal(object, object)`: partial `ResultSet`, optional
+  `CommandSummary`). The non-`mission_sequence` path now ALWAYS runs
+  through `run_live()` (never the plain, non-chunked `run()`)
+  specifically so it's always cancellable regardless of the Live Plot
+  toggle -- `self.live` now only controls whether the `progress` signal
+  is actually emitted (i.e. whether the plot redraws as the run
+  proceeds), not whether the run is chunked at all;
+  `run_live()`'s own `_LIVE_DEFAULT_FRAMES` (60) bounds this to a small,
+  fixed number of extra `ExecuteSimulation()` calls regardless of run
+  length, negligible next to the actual simulated work either way.
+* `main_window.py` -- a new **Abort Run** `QAction` (Run menu and
+  toolbar, between Run Simulation and Live Plot), disabled except while a
+  single (non-Monte-Carlo) run is actually in flight -- `on_run()`
+  enables it right after starting `RunWorker`, `_stop_busy()` disables it
+  again on any of finished/failed/cancelled. Monte Carlo batches are
+  deliberately out of scope: `engine/monte_carlo.py`'s
+  `Controller.executeSimulations()` uses a different, single-call
+  execution model with no exposed chunking/cancellation hook in this
+  checkout, and adding one would be unverifiable against a real Basilisk
+  build in this development sandbox anyway. `on_abort_run()` calls
+  `RunWorker.request_cancel()` and immediately disables the action (so
+  there's nothing to double-click while waiting for the next
+  checkpoint -- cancellation is cooperative, not instant); a new
+  `_on_run_cancelled()` slot (connected to `RunWorker.cancelled`) shows
+  whatever partial results/command summary had been produced, with
+  "Run cancelled by user." status-bar messaging instead of "Run
+  complete", exactly like a normal finish otherwise.
+
+**Verification:** `tests/test_service_run_live.py` and
+`tests/test_mission_engine.py` gained `should_cancel` tests
+(`requires_basilisk`, auto-skipped in this development sandbox -- see
+the honesty note above); `tests/gui/test_run_worker.py` covers the
+dispatch/cancellation plumbing Basilisk-free by faking
+`engine.service`/`engine.mission_engine` in `sys.modules` (works
+regardless of whether a real Basilisk build is present); and
+`tests/gui/test_main_window.py` covers the `abort_action`
+enable/disable wiring plus an end-to-end real-`QThread` test proving the
+`cancelled` signal is actually connected through to
+`_on_run_cancelled()`. All of it (except the `requires_basilisk`-marked
+engine-level checkpoint tests) was run and confirmed passing in this
+sandbox; the `should_cancel` checkpoint logic itself still needs
+confirming against a real Basilisk build.
+
 ## Repository layout
 
 ```

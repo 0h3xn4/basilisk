@@ -76,7 +76,7 @@ narrowly as the Phase 6 part 1 schema module's own docstring describes.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -136,6 +136,23 @@ class MissionEngineError(Exception):
     """
 
 
+class MissionEngineCancelled(Exception):
+    """Raised by :meth:`MissionEngine.run` when the ``should_cancel``
+    callback it was given starts returning ``True`` between commands (see
+    ``gui.run_worker.RunWorker.request_cancel`` -- the "abort a running
+    simulation" GUI feature; mirrors ``engine.service.SimulationCancelled``,
+    the same idea for a plain (non-mission_sequence) run). Carries
+    ``partial_result``/``summary``, whatever the mission sequence had
+    produced by the time it was cancelled, so the caller can keep/show
+    that instead of losing it.
+    """
+
+    def __init__(self, partial_result: ResultSet, summary: CommandSummary):
+        super().__init__("Mission sequence cancelled by the user")
+        self.partial_result = partial_result
+        self.summary = summary
+
+
 class MissionEngine:
     """Walks ``scenario.mission_sequence`` against a
     :class:`~missionstudio.engine.service.SimulationService`, one
@@ -152,9 +169,11 @@ class MissionEngine:
     :meth:`run`.
     """
 
-    def __init__(self, scenario: Scenario, service: Optional[SimulationService] = None):
+    def __init__(self, scenario: Scenario, service: Optional[SimulationService] = None,
+                 should_cancel: Optional[Callable[[], bool]] = None):
         self.scenario = scenario
         self.service = service or SimulationService(scenario)
+        self._should_cancel = should_cancel
         self._event_counter = 0
         # The cumulative REQUESTED mission time [ns] each propagate command's
         # absolute ConfigureStopTime() target is built from -- deliberately
@@ -189,6 +208,17 @@ class MissionEngine:
         Callers that want the pre-Phase-6 "just propagate for
         ``sim_settings.duration_days``" behavior should keep using
         :meth:`SimulationService.run` directly, not this class.
+
+        Raises :class:`MissionEngineCancelled` (carrying whatever partial
+        ``ResultSet``/``CommandSummary`` exist so far) if this instance
+        was constructed with a ``should_cancel`` callback that starts
+        returning ``True`` -- checked between top-level commands (and,
+        since a ``while`` body re-enters :meth:`_run_commands` once per
+        iteration, between iterations too), never mid-command: there is
+        no hook into the middle of e.g. one long ``propagate``, matching
+        the same chunk-boundary-only granularity
+        ``engine.service.SimulationService.run_live``'s own
+        ``should_cancel`` has.
         """
         if self.service.scSim is None:
             self.service.build()
@@ -200,6 +230,8 @@ class MissionEngine:
 
     def _run_commands(self, commands: List[Command], summary: CommandSummary, path: str) -> None:
         for i, command in enumerate(commands):
+            if self._should_cancel is not None and self._should_cancel():
+                raise MissionEngineCancelled(self.service._extract_results(), summary)
             self._run_command(command, summary, f"{path}[{i}]")
 
     def _run_command(self, command: Command, summary: CommandSummary, path: str) -> None:

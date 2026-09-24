@@ -202,6 +202,22 @@ class SimulationServiceError(Exception):
     """
 
 
+class SimulationCancelled(Exception):
+    """Raised by :meth:`SimulationService.run_live` when the
+    ``should_cancel`` callback it was given starts returning ``True``
+    mid-run (see ``gui.run_worker.RunWorker.request_cancel`` -- the "abort
+    a running simulation" GUI feature). Carries ``partial_result``, the
+    :class:`~missionstudio.engine.results.ResultSet` extracted at the
+    point of cancellation, so the caller can keep/show whatever was
+    simulated before the user aborted instead of losing it -- an aborted
+    run is meant to end cleanly with partial data, not act like a crash.
+    """
+
+    def __init__(self, partial_result: ResultSet):
+        super().__init__("Simulation cancelled by the user")
+        self.partial_result = partial_result
+
+
 def _orbit_ic_to_rv(mu: float, orbit: OrbitIC):
     """(r_N, v_N) [m], [m/s] from a schema.OrbitIC, for any of its three
     forms. ``orbit.validate()`` is assumed to have already been called
@@ -900,7 +916,8 @@ class SimulationService:
         return self._extract_results()
 
     def run_live(self, on_progress: Callable[[ResultSet, float], None],
-                 live_step_s: Optional[float] = None) -> ResultSet:
+                 live_step_s: Optional[float] = None,
+                 should_cancel: Optional[Callable[[], bool]] = None) -> ResultSet:
         """Same as :meth:`run`, except the simulation is executed in small
         time chunks and ``on_progress(partial_result, fraction_complete)``
         is called after each one, so a caller (missionStudio's GUI) can
@@ -939,6 +956,19 @@ class SimulationService:
                 has real per-call overhead, so a sub-tick step would only
                 add Python-loop cost with no extra simulated time to show
                 for it.
+            should_cancel: checked after every chunk (after ``on_progress``
+                runs); if it returns ``True``, raises
+                :class:`SimulationCancelled` (carrying that chunk's
+                ``ResultSet``) instead of continuing to the next one --
+                the "abort a running simulation" GUI feature. There is no
+                way to interrupt ``ExecuteSimulation()`` itself mid-chunk
+                (Basilisk's own C++ loop, no Python-level hook into it),
+                so cancellation always takes effect at the next chunk
+                boundary, not instantly -- this is the same reason
+                ``live_step_s`` matters for responsiveness here as it
+                already does for plot-update smoothness. ``None`` (the
+                default) means never cancel, matching every existing
+                caller's behavior unchanged.
         """
         if self.scSim is None:
             self.build()
@@ -969,7 +999,10 @@ class SimulationService:
             self.scSim.ConfigureStopTime(next_stop_ns)
             self.scSim.ExecuteSimulation()
             fraction_complete = min(1.0, next_stop_ns / stop_time_ns)
-            on_progress(self._extract_results(), fraction_complete)
+            partial_result = self._extract_results()
+            on_progress(partial_result, fraction_complete)
+            if should_cancel is not None and should_cancel():
+                raise SimulationCancelled(partial_result)
             if next_stop_ns >= stop_time_ns:
                 break
             next_stop_ns = min(next_stop_ns + step_ns, stop_time_ns)

@@ -682,4 +682,162 @@ def test_close_with_no_unsaved_changes_does_not_prompt(window, monkeypatch):
     event = QCloseEvent()
     window.closeEvent(event)
     assert event.isAccepted()
-    assert question_calls == []
+
+
+# -- Abort Simulation (direct user feedback: "there should also be the
+# option to abort a running simulation, if needed, without breaking the
+# tool") -- see gui.run_worker.RunWorker's own module docstring for the
+# cooperative-cancellation design these tests exercise the MainWindow
+# wiring for.
+
+def test_abort_action_disabled_until_a_run_starts(window):
+    assert not window.abort_action.isEnabled()
+
+
+def test_on_run_enables_abort_action(window, monkeypatch):
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)  # don't actually spin up the thread
+
+    window.on_run()
+
+    assert window.abort_action.isEnabled()
+
+
+def test_on_run_monte_carlo_never_enables_abort_action(window, monkeypatch):
+    """MonteCarloWorker has no request_cancel() -- see abort_action's own
+    construction comment in main_window.py -- so a Monte Carlo run must
+    never enable it.
+    """
+    from PySide6.QtWidgets import QFileDialog
+    from missionstudio.gui.run_worker import MonteCarloWorker
+    from missionstudio.schema.scenario import MonteCarloConfig
+
+    _add_valid_spacecraft(window)
+    window.scenario_editor.monte_carlo_group.set_spacecraft_names(["sat-1"])
+    window.scenario_editor.monte_carlo_group.from_dataclass(MonteCarloConfig(enabled=True))
+    window.scenario_editor.changed.emit()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "/tmp/mc"))
+    monkeypatch.setattr(MonteCarloWorker, "start", lambda self: None)
+
+    window.on_run_monte_carlo()
+
+    assert not window.abort_action.isEnabled()
+
+
+def test_run_finished_disables_abort_action(window):
+    from missionstudio.engine.results import ResultSet
+
+    window._start_busy("Running test...")
+    window.abort_action.setEnabled(True)
+    window._on_run_finished(ResultSet(scenario_name="test", series={}))
+    assert not window.abort_action.isEnabled()
+
+
+def test_run_failed_disables_abort_action(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+    window._start_busy("Running test...")
+    window.abort_action.setEnabled(True)
+    window._on_run_failed("boom")
+    assert not window.abort_action.isEnabled()
+
+
+def test_on_abort_run_calls_request_cancel_on_the_running_worker(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from missionstudio.gui.run_worker import RunWorker
+
+    # isRunning() is patched to always return True below (to simulate an
+    # in-flight worker without a real thread) -- if that patch is still
+    # in effect when qtbot's teardown closes this window, closeEvent()
+    # would hit its own real, unmocked "run in progress" QMessageBox and
+    # block forever in this offscreen test session waiting for a click
+    # that never comes. Mocked here too, same as
+    # test_close_while_run_in_progress_is_blocked, so teardown can't hang
+    # on it regardless of fixture teardown ordering.
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+
+    _add_valid_spacecraft(window)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)
+    window.on_run()
+    assert window.abort_action.isEnabled()
+
+    cancel_calls = []
+    monkeypatch.setattr(RunWorker, "isRunning", lambda self: True)
+    monkeypatch.setattr(RunWorker, "request_cancel", lambda self: cancel_calls.append(1))
+
+    window.on_abort_run()
+
+    assert cancel_calls == [1]
+    assert not window.abort_action.isEnabled()
+
+
+def test_on_abort_run_is_a_no_op_without_a_running_worker(window):
+    # No run ever started -- window._run_worker is still None -- must not
+    # raise.
+    window.on_abort_run()
+    assert not window.abort_action.isEnabled()
+
+
+def test_run_cancelled_updates_results_widget_and_status(window):
+    from missionstudio.engine.results import ResultSet, TimeSeries
+
+    window._start_busy("Running test...")
+    window.abort_action.setEnabled(True)
+    window._last_run_epoch_utc = "2032-01-01T00:00:00"
+    partial = ResultSet(scenario_name="test")
+    partial.add(TimeSeries("sat-1.position_N", [0.0, 1.0], ("x", "y", "z"),
+                            [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], units="m"))
+
+    window._on_run_cancelled(partial)
+
+    assert not window._busy_timer.isActive()
+    assert not window.abort_action.isEnabled()
+    assert window.run_action.isEnabled()
+    assert window.results_widget.series_combo.count() == 1
+    assert window.results_widget._epoch_utc == "2032-01-01T00:00:00"
+    assert window.right_tabs.currentWidget() is window.results_widget
+    assert window.statusBar().currentMessage() == "Run cancelled by user."
+
+
+def test_run_cancelled_with_command_summary_shows_mission_output_tab(window):
+    from missionstudio.engine.results import CommandSummary, ReportEntry, ResultSet
+
+    summary = CommandSummary(reports=[ReportEntry(label="x", t_s=1.0, values={})], commands_executed=1)
+    window._on_run_cancelled(ResultSet(scenario_name="test", series={}), summary)
+
+    assert window.right_tabs.currentWidget() is window.mission_output_widget
+    assert "1 command(s) executed" in window.mission_output_widget.text_edit.toPlainText()
+
+
+def test_end_to_end_cancel_signal_updates_window_without_crashing(window, qtbot, monkeypatch):
+    """Drives the real signal/slot connection (RunWorker.cancelled ->
+    MainWindow._on_run_cancelled) through a real background QThread,
+    matching test_close_while_run_in_progress_is_blocked's approach for
+    the same reason: this is the one thing a pure method-call test like
+    the ones above can't prove -- that the Signal(object, object) really
+    is connected end to end.
+    """
+    from missionstudio.engine.results import ResultSet
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    partial = ResultSet(scenario_name="test", series={})
+
+    def fake_run(self):
+        self.cancelled.emit(partial, None)
+
+    monkeypatch.setattr(RunWorker, "run", fake_run)
+
+    window.on_run()
+    qtbot.waitUntil(lambda: window._run_worker is not None, timeout=5000)
+    qtbot.waitUntil(lambda: not window._run_worker.isRunning(), timeout=5000)
+    # cancelled is a queued (cross-thread) connection -- the QThread
+    # reporting not-running any more doesn't guarantee the GUI thread has
+    # actually processed the queued slot invocation yet, so wait on the
+    # slot's own observable effect rather than the thread state.
+    qtbot.waitUntil(lambda: not window.abort_action.isEnabled(), timeout=5000)
+
+    assert window.statusBar().currentMessage() == "Run cancelled by user."

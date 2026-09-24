@@ -195,6 +195,20 @@ class MainWindow(QMainWindow):
         run_menu.addAction(run_action)
         self.run_action = run_action
 
+        # "Abort a running simulation, if needed, without breaking the
+        # tool" -- direct user feedback. Only ever enabled while a single
+        # (non-Monte-Carlo) run is actually in flight -- see on_run()/
+        # _stop_busy() for where it's toggled -- since RunWorker is the
+        # only worker with a request_cancel() to call (see its module
+        # docstring for the cooperative-cancellation design; Monte Carlo
+        # batches have no equivalent hook and are out of scope here).
+        abort_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_MediaStop), "&Abort Run", self)
+        abort_action.setToolTip("Abort the running simulation (takes effect at the next checkpoint, not instantly)")
+        abort_action.setEnabled(False)
+        abort_action.triggered.connect(self.on_abort_run)
+        run_menu.addAction(abort_action)
+        self.abort_action = abort_action
+
         live_plot_action = QAction("&Live Plot", self)
         live_plot_action.setCheckable(True)
         live_plot_action.setChecked(True)
@@ -254,6 +268,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.save_action)
         toolbar.addSeparator()
         toolbar.addAction(self.run_action)
+        toolbar.addAction(self.abort_action)
         toolbar.addAction(self.live_plot_action)
         toolbar.addAction(self.monte_carlo_action)
         toolbar.addAction(self.vizard_action)
@@ -401,6 +416,7 @@ class MainWindow(QMainWindow):
 
     def _stop_busy(self, message: str) -> None:
         self._set_running(False)
+        self.abort_action.setEnabled(False)
         self._busy_timer.stop()
         self._busy_label.setVisible(False)
         self._busy_progress.setVisible(False)
@@ -482,7 +498,25 @@ class MainWindow(QMainWindow):
         self._run_worker.progress.connect(self._on_run_progress)
         self._run_worker.finished_ok.connect(self._on_run_finished)
         self._run_worker.failed.connect(self._on_run_failed)
+        self._run_worker.cancelled.connect(self._on_run_cancelled)
         self._run_worker.start()
+        # Only RunWorker has a request_cancel() to call (see on_abort_run
+        # and this action's own construction comment) -- enabled here,
+        # right after start(), rather than lumped into _set_running(),
+        # since on_run_monte_carlo()'s _start_busy() call must NOT enable
+        # it.
+        self.abort_action.setEnabled(True)
+
+    def on_abort_run(self) -> None:
+        if self._run_worker is not None and self._run_worker.isRunning():
+            self._run_worker.request_cancel()
+            # Cancellation is cooperative, not instant (see RunWorker's own
+            # module docstring) -- disabled immediately so the user isn't
+            # tempted to click it again while waiting for the next
+            # checkpoint; _stop_busy() re-disables it anyway once the
+            # worker actually reports back, but that can be a moment away.
+            self.abort_action.setEnabled(False)
+            self.statusBar().showMessage("Aborting... this takes effect at the next checkpoint, not instantly.")
 
     def _on_run_progress(self, partial_result, fraction: float) -> None:
         self.results_widget.set_live_result(partial_result, self._last_run_epoch_utc)
@@ -509,6 +543,21 @@ class MainWindow(QMainWindow):
     def _on_run_failed(self, message: str) -> None:
         self._stop_busy("Run failed.")
         QMessageBox.critical(self, "Simulation failed", message)
+
+    def _on_run_cancelled(self, partial_result, command_summary=None) -> None:
+        """Handles RunWorker.cancelled -- a user-requested abort (see
+        on_abort_run()), not a failure: whatever was already simulated
+        before the cancellation took effect is shown exactly like a
+        normal finish would show it, just with "cancelled" messaging
+        instead of "complete".
+        """
+        self._stop_busy("Run cancelled by user.")
+        self.results_widget.set_live_result(partial_result, self._last_run_epoch_utc)
+        if command_summary is not None:
+            self.mission_output_widget.set_command_summary(command_summary)
+            self.right_tabs.setCurrentWidget(self.mission_output_widget)
+        else:
+            self.right_tabs.setCurrentWidget(self.results_widget)
 
     def on_run_monte_carlo(self) -> None:
         try:
@@ -552,12 +601,14 @@ class MainWindow(QMainWindow):
         # _confirm_discard_unsaved() alone would let the window (and, with
         # it, the whole process, since Qt tears down QApplication.exec()
         # once the last window closes) close right out from under a still
-        # -running worker. Neither worker is parented, and
-        # SimulationService.run()/run_live()/run_monte_carlo() are
-        # synchronous Basilisk calls with no cooperative-cancellation hook
-        # to interrupt, so there is no safe way to stop it early here --
-        # closing must simply wait, same as it would for any other
-        # in-progress, no-undo operation.
+        # -running worker. Neither worker is parented. RunWorker DOES now
+        # have a cooperative-cancellation hook (request_cancel(), see its
+        # own module docstring / on_abort_run() above), but it only takes
+        # effect at the next chunk/command checkpoint, not instantly, and
+        # MonteCarloWorker/run_monte_carlo() still has no such hook at
+        # all -- so closing must simply wait either way, same as it would
+        # for any other in-progress, no-undo operation, rather than firing
+        # an implicit abort the user never asked for.
         for worker, label in ((self._run_worker, "A simulation"), (self._mc_worker, "A Monte Carlo run")):
             if worker is not None and worker.isRunning():
                 QMessageBox.information(

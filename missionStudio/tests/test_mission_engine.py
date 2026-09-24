@@ -472,3 +472,64 @@ def test_nested_if_inside_while_shares_one_command_summary():
     ])
     _, summary = MissionEngine(scenario).run()
     assert [r.label for r in summary.reports] == ["nested", "nested", "nested"]
+
+
+def test_should_cancel_stops_between_commands_and_raises_mission_engine_cancelled():
+    """The "abort a running simulation" GUI feature's mission_sequence
+    path: should_cancel is checked before each top-level command runs
+    (see _run_commands), not mid-command -- here it lets exactly the
+    first of three propagate commands run before reporting cancelled.
+    """
+    from missionstudio.engine.mission_engine import MissionEngine, MissionEngineCancelled
+
+    scenario = _scenario(mission_sequence=[
+        Command(kind="propagate", label="one", params={"stop_condition": "duration", "duration_days": 0.02}),
+        Command(kind="propagate", label="two", params={"stop_condition": "duration", "duration_days": 0.02}),
+        Command(kind="propagate", label="three", params={"stop_condition": "duration", "duration_days": 0.02}),
+    ])
+    calls = []
+
+    def should_cancel():
+        calls.append(1)
+        return len(calls) > 1  # False for the check before "one", True before "two"
+
+    with pytest.raises(MissionEngineCancelled) as exc_info:
+        MissionEngine(scenario, should_cancel=should_cancel).run()
+
+    cancelled = exc_info.value
+    assert cancelled.summary.commands_executed == 1
+    assert cancelled.partial_result.series  # "one" already produced samples
+
+
+def test_should_cancel_checked_between_while_loop_iterations():
+    from missionstudio.engine.mission_engine import MissionEngine, MissionEngineCancelled
+
+    segment_days = 0.01
+    scenario = _scenario(duration_days=segment_days * 10, mission_sequence=[
+        Command(kind="while", params={"condition": "True"}, children=[
+            Command(kind="propagate", params={"stop_condition": "duration", "duration_days": segment_days}),
+        ]),
+    ])
+    calls = []
+
+    def should_cancel():
+        calls.append(1)
+        return len(calls) > 3  # let a few iterations run, then stop
+
+    with pytest.raises(MissionEngineCancelled) as exc_info:
+        MissionEngine(scenario, should_cancel=should_cancel).run()
+
+    assert exc_info.value.summary.commands_executed == 3
+
+
+def test_no_should_cancel_runs_to_completion_as_before():
+    """should_cancel=None (the default, matching every pre-existing
+    caller) must not change behavior at all.
+    """
+    from missionstudio.engine.mission_engine import MissionEngine
+
+    scenario = _scenario(mission_sequence=[
+        Command(kind="propagate", params={"stop_condition": "duration", "duration_days": 0.02}),
+    ])
+    _, summary = MissionEngine(scenario).run()
+    assert summary.commands_executed == 1
