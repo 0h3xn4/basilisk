@@ -70,22 +70,22 @@ def test_vnb_and_rtn_bases_are_orthonormal_and_right_handed(seed):
 
 
 # -- Non-finite/degenerate spacecraft state must never reach
-# engine.orbital_geometry.argument_of_latitude()'s np.cross/np.arctan2
-# math from inside UpdateState() -----------------------
+# orbitalMotion.rv2elem() from inside UpdateState() -----------------------
 #
 # Real crash report: a formation-flying scenario (station_keeping +
 # phasing_keeping) crashed with two DIFFERENT native signatures on
 # different runs ("basic_string::_M_create", "std::bad_alloc") -- the
 # classic symptom of memory corruption, not a deterministic failure.
-# UpdateState() used to compute its along-track phase error via
-# orbitalMotion.rv2elem() (see engine.orbital_geometry.
-# argument_of_latitude's own docstring for why that was replaced -- a
-# genuine numerical-instability bug for near-circular orbits, found and
-# fixed separately from this guard); this guard predates that fix and is
-# unrelated to it -- a non-finite state was never safe input to feed ANY
-# per-tick math here, regardless of which formula computes the phase
-# error. These tests confirm UpdateState() never reaches that math with
-# non-finite input in the first place.
+# Traced to PhasingKeepingController.UpdateState()'s own call to
+# orbitalMotion.rv2elem() (via _mean_anomaly): that function has a real
+# bug in its OWN NaN-input guard (src/utilities/orbitalMotion.py sets
+# ClassicElements.AN/.AP, neither a real slot on that class -- see
+# engine.service._osculating_elements's matching comment/fix), so it
+# crashes with AttributeError instead of returning a clean NaN result --
+# and an exception escaping a SWIG director callback (UpdateState()
+# itself) is undefined behavior, not a clean Python exception. These
+# tests confirm UpdateState() never reaches that call with non-finite
+# input in the first place.
 
 def _write_sc_state(msg, r_bn_n, v_bn_n, time_ns=0):
     from Basilisk.architecture import messaging
@@ -174,7 +174,7 @@ def test_phasing_keeping_skips_thrust_on_nan_state():
     controller.scStateInMsgB.subscribeTo(state_b)
     controller.Reset(0)
 
-    controller.UpdateState(0)  # must not raise -- would otherwise feed NaN into argument_of_latitude()
+    controller.UpdateState(0)  # must not raise -- would crash inside orbitalMotion.rv2elem() otherwise
 
     assert _flat(controller.extForceEffectorB.extForce_N) == [0.0, 0.0, 0.0]
     assert np.isnan(controller.errorDegLog[-1])
