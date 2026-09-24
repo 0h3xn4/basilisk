@@ -56,7 +56,12 @@ from .results_widget import ResultsWidget
 from .run_worker import MonteCarloWorker, RunWorker
 from .scenario_editor import ScenarioEditorWidget
 from .vizard_dialog import VizardDialog
-from .vizard_launcher import find_vizard_executable, launch_vizard, remember_vizard_executable
+from .vizard_launcher import (
+    DEFAULT_LIVE_STREAM_ADDRESS,
+    find_vizard_executable,
+    launch_vizard,
+    remember_vizard_executable,
+)
 
 _FILE_FILTER = "missionStudio scenario (*.json)"
 
@@ -442,30 +447,52 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().showMessage("Vizard enabled for the next run.")
 
-    def on_launch_vizard(self) -> None:
+    def on_launch_vizard(self) -> bool:
         """Starts the external Vizard application -- a no-op if it's
         already running (checked via ``Popen.poll() is None``, since
         ``subprocess`` gives no other way to ask). Distinct from
         :meth:`on_configure_vizard`, which never touches a process at
         all: it only decides how the NEXT run feeds an instance of
         Vizard, wherever/however that instance got started.
+
+        When the current Vizard Configuration is set to live-stream,
+        Vizard is launched with its own ``-directComm`` command-line
+        argument (see ``vizard_launcher.DEFAULT_LIVE_STREAM_ADDRESS``'s
+        own comment) so it connects automatically -- direct user
+        feedback that manually launching Vizard left it sitting on its
+        own "Load Data Using One of the Following" screen, doing
+        nothing, because nobody had typed the socket address in and
+        clicked "Start Visualization" by hand.
+
+        Returns True once Vizard is confirmed running (already was, or
+        was just started) by the end of this call, False if the user
+        cancelled a browse prompt or launching genuinely failed (an
+        error was already shown in that case) -- :meth:`on_run` uses
+        this to decide whether it's safe to start a live-stream run at
+        all.
         """
         if self._vizard_process is not None and self._vizard_process.poll() is None:
             self.statusBar().showMessage("Vizard is already running.")
-            return
+            return True
         executable = find_vizard_executable()
         if executable is None:
             path_str, _selected_filter = QFileDialog.getOpenFileName(self, "Locate the Vizard application")
             if not path_str:
-                return
+                return False
             executable = Path(path_str)
             remember_vizard_executable(executable)
+        direct_comm_address = (
+            DEFAULT_LIVE_STREAM_ADDRESS
+            if self._vizard_request is not None and self._vizard_request.live_stream
+            else None
+        )
         try:
-            self._vizard_process = launch_vizard(executable)
+            self._vizard_process = launch_vizard(executable, direct_comm_address=direct_comm_address)
         except OSError as exc:
             QMessageBox.critical(self, "Could not launch Vizard", f"{executable}: {exc}")
-            return
+            return False
         self.statusBar().showMessage(f"Launched Vizard ({executable}).")
+        return True
 
     def on_run(self) -> None:
         try:
@@ -473,6 +500,30 @@ class MainWindow(QMainWindow):
         except ScenarioValidationError as exc:
             QMessageBox.critical(self, "Cannot run invalid scenario", str(exc))
             return
+
+        if self._vizard_request is not None and self._vizard_request.live_stream:
+            # Basilisk's InitializeSimulation() BLOCKS (inside native
+            # C++, with no Python-level hook -- see RunWorker's own
+            # module docstring on why there's no cancellation checkpoint
+            # reachable here) waiting for Vizard to reply to an initial
+            # handshake ping in live-stream mode -- direct user report:
+            # a run appeared to hang at 0% forever, with Abort having no
+            # effect, because Vizard was never actually connected.
+            # on_launch_vizard() launches Vizard with -directComm when
+            # needed (see its own docstring) so this handshake has
+            # something to actually reply to; if it can't even do that
+            # (Vizard not found/couldn't start), starting the run at all
+            # would just reproduce the same hang, so it's refused here
+            # instead, with a clear reason, rather than silently risking
+            # it.
+            if not self.on_launch_vizard():
+                QMessageBox.critical(
+                    self, "Vizard not connected",
+                    "Vizard Configuration is set to live-stream, but Vizard could not be confirmed running. "
+                    "Starting the run now would hang waiting for a Vizard connection that never arrives, "
+                    "with no way to abort it -- use \"Launch Vizard\" (or fix the live-stream setup) first."
+                )
+                return
 
         # engine.mission_engine.MissionEngine (used when scenario.
         # mission_sequence is non-empty) has no run_live() equivalent --

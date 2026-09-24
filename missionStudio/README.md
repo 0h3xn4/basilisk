@@ -1530,6 +1530,75 @@ the event test's assumption that its chunk size lands comfortably
 inside one ~90-minute orbital period, are worked out by hand in each
 test's own docstring/comments, not confirmed by actually running them.
 
+### Vizard live-stream: auto-connect instead of a manual launcher step
+
+Direct user feedback, with a screenshot: running a live-stream scenario
+showed Vizard just sitting on its own "Load Data Using One of the
+Following" launcher screen doing nothing, while missionStudio itself sat
+at 0% progress, elapsed time climbing, with Abort having no effect at
+all no matter how long it waited.
+
+Root cause, confirmed against `docs/source/Vizard/vizardAdvanced/
+vizardLiveComm.rst` and `vizInterface.cpp` directly: in live-stream mode,
+`SimBaseClass.InitializeSimulation()`'s very first step is a **blocking**
+ZeroMQ handshake -- Basilisk connects out to `tcp://<vizInterface's
+reqComAddress>:<reqPortNumber>` (defaults `0.0.0.0:5556`, i.e.
+`localhost:5556` locally -- never overridden anywhere in this checkout)
+and sends a PING it waits for Vizard to reply to, before a single
+simulation step ever runs. Vizard only replies once its OWN launcher
+screen has been told what to connect to (typing the address into
+"Socket Address") and "Start Visualization" has actually been clicked --
+skip that manual step (as our own "Launch Vizard" button previously
+did -- it just started the bare app with no arguments) and that PING
+never gets a reply, so `InitializeSimulation()` blocks forever. This is
+native C++ with no Python-level hook at all -- not even the Abort
+feature's own chunk-boundary checkpoints are reachable yet, since this
+happens before the first chunk.
+
+Fixed by never requiring that manual step in the first place: Vizard's
+own `-directComm <address>` command-line flag (`docs/source/Vizard/
+vizardAdvanced/vizardCommandLine.rst`) makes it connect automatically on
+launch, with nothing to type or click.
+
+* `gui/vizard_launcher.py` -- new `DEFAULT_LIVE_STREAM_ADDRESS =
+  "tcp://localhost:5556"` (matching vizInterface's own unmodified
+  defaults). `launch_vizard()` gained an optional `direct_comm_address`
+  parameter, appended as `-directComm <address>` to the launched
+  process's arguments when given.
+* `main_window.py` -- `on_launch_vizard()` now passes
+  `DEFAULT_LIVE_STREAM_ADDRESS` whenever Vizard Configuration is set to
+  live-stream (`None`, i.e. no flag at all, otherwise -- a save-file run
+  still launches Vizard exactly as before), and returns `True`/`False`
+  instead of nothing, so a caller can tell whether Vizard is actually
+  confirmed running. `on_run()` calls it FIRST, before starting a
+  live-stream run's `RunWorker` at all, refusing to start (with a clear
+  explanation, never a silent hang) if Vizard couldn't be confirmed --
+  an ordinary (non-live-stream) run never touches Vizard at all, so this
+  adds no new behavior there.
+
+**Known residual gap, by design, not fully closed:** if Vizard is
+already running (from an earlier, non-`-directComm` launch, or started
+by the user outside missionStudio entirely) when a live-stream run
+starts, `on_launch_vizard()` -- matching its pre-existing "never
+relaunch while already running" behavior -- trusts it and does not
+relaunch it with `-directComm`, so the same hang can still happen if
+that existing instance was never told to connect. There is no reliable
+way to ask Vizard "are you actually connected" from outside it, so this
+edge case is accepted rather than guessed around.
+
+**Verification:** `tests/gui/test_vizard_launcher.py` gained two new
+`launch_vizard()` tests (the flag is appended when given, omitted when
+not); `tests/gui/test_main_window.py` gained five new tests covering
+`on_launch_vizard()`'s address selection and `on_run()`'s new
+Vizard-confirmation gate (including that an ordinary run never calls
+`on_launch_vizard()` at all). All pass in this sandbox (577 passed, 53
+skipped). Like the Vizard crash fix earlier in this document, there is
+no way to exercise a real Vizard connection handshake without an actual
+Vizard binary and display, so the `-directComm` flag's effect on Vizard
+itself (as opposed to the argument list missionStudio constructs) is
+unverified here -- report back if a live-stream run still doesn't
+connect after this.
+
 ## Repository layout
 
 ```

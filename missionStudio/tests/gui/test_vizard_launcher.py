@@ -115,6 +115,40 @@ def test_launch_starts_the_given_executable_directly_on_non_macos(tmp_path, monk
     assert result.pid == 4242
 
 
+def test_launch_appends_direct_comm_flag_when_given(tmp_path, monkeypatch):
+    """See DEFAULT_LIVE_STREAM_ADDRESS's own comment: -directComm is what
+    makes Vizard connect to a live-stream run automatically instead of
+    sitting on its own manual launcher screen.
+    """
+    from missionstudio.gui import vizard_launcher
+
+    monkeypatch.setattr(vizard_launcher.sys, "platform", "linux")
+    exe = tmp_path / "Vizard.x86_64"
+    exe.write_bytes(b"")
+
+    captured = {}
+    monkeypatch.setattr(vizard_launcher.subprocess, "Popen", lambda args: captured.setdefault("args", args))
+
+    vizard_launcher.launch_vizard(exe, direct_comm_address="tcp://localhost:5556")
+
+    assert captured["args"] == [str(exe), "-directComm", "tcp://localhost:5556"]
+
+
+def test_launch_omits_direct_comm_flag_when_not_given(tmp_path, monkeypatch):
+    from missionstudio.gui import vizard_launcher
+
+    monkeypatch.setattr(vizard_launcher.sys, "platform", "linux")
+    exe = tmp_path / "Vizard.x86_64"
+    exe.write_bytes(b"")
+
+    captured = {}
+    monkeypatch.setattr(vizard_launcher.subprocess, "Popen", lambda args: captured.setdefault("args", args))
+
+    vizard_launcher.launch_vizard(exe)
+
+    assert captured["args"] == [str(exe)]
+
+
 def test_launch_resolves_macos_app_bundle_to_its_inner_binary(tmp_path, monkeypatch):
     from missionstudio.gui import vizard_launcher
 

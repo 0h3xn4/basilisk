@@ -241,11 +241,18 @@ def test_configure_vizard_cancel_leaves_request_unchanged(window, monkeypatch):
 
 
 def test_run_passes_vizard_request_to_worker(window, monkeypatch):
+    from missionstudio.gui.main_window import MainWindow
     from missionstudio.gui.run_worker import RunWorker
     from missionstudio.engine.vizard import VizardRequest
 
     _add_valid_spacecraft(window)
     window._vizard_request = VizardRequest(live_stream=True)
+    # on_run() now confirms Vizard is connected before starting a
+    # live-stream run (see its own comment) -- stubbed out here since
+    # this test is about vizard_request passthrough, not the Vizard
+    # process itself (see test_run_ensures_vizard_is_running_before_a_
+    # live_stream_run for that).
+    monkeypatch.setattr(MainWindow, "on_launch_vizard", lambda self: True)
 
     captured = {}
     original_init = RunWorker.__init__
@@ -567,7 +574,8 @@ def test_launch_vizard_starts_it_when_not_running(window, monkeypatch):
 
     calls = []
     monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
-    monkeypatch.setattr(main_window, "launch_vizard", lambda path: calls.append(path) or _FakeVizardProcess())
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: calls.append(path) or _FakeVizardProcess())
 
     window.on_launch_vizard()
 
@@ -585,7 +593,8 @@ def test_launch_vizard_does_not_relaunch_while_already_running(window, monkeypat
 
     calls = []
     monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
-    monkeypatch.setattr(main_window, "launch_vizard", lambda path: calls.append(path) or _FakeVizardProcess())
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: calls.append(path) or _FakeVizardProcess())
 
     window.on_launch_vizard()
     window.on_launch_vizard()
@@ -602,7 +611,7 @@ def test_launch_vizard_relaunches_after_the_process_exits(window, monkeypatch):
 
     processes = [_FakeVizardProcess(pid=111), _FakeVizardProcess(pid=222)]
     monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
-    monkeypatch.setattr(main_window, "launch_vizard", lambda path: processes.pop(0))
+    monkeypatch.setattr(main_window, "launch_vizard", lambda path, direct_comm_address=None: processes.pop(0))
 
     window.on_launch_vizard()
     first = window._vizard_process
@@ -624,7 +633,7 @@ def test_launch_vizard_not_found_falls_back_to_browse(window, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(picked), "")))
     remembered = []
     monkeypatch.setattr(main_window, "remember_vizard_executable", lambda path: remembered.append(path))
-    monkeypatch.setattr(main_window, "launch_vizard", lambda path: _FakeVizardProcess())
+    monkeypatch.setattr(main_window, "launch_vizard", lambda path, direct_comm_address=None: _FakeVizardProcess())
 
     window.on_launch_vizard()
 
@@ -642,7 +651,8 @@ def test_launch_vizard_not_found_and_browse_cancelled_does_nothing(window, monke
     monkeypatch.setattr(main_window, "find_vizard_executable", lambda: None)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
     launch_calls = []
-    monkeypatch.setattr(main_window, "launch_vizard", lambda path: launch_calls.append(path))
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: launch_calls.append(path))
 
     window.on_launch_vizard()
 
@@ -659,7 +669,7 @@ def test_launch_vizard_failure_shows_error(window, monkeypatch):
 
     monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
 
-    def raise_oserror(path):
+    def raise_oserror(path, direct_comm_address=None):
         raise OSError("permission denied")
 
     monkeypatch.setattr(main_window, "launch_vizard", raise_oserror)
@@ -670,6 +680,110 @@ def test_launch_vizard_failure_shows_error(window, monkeypatch):
 
     assert len(critical_calls) == 1
     assert window._vizard_process is None
+
+
+def test_launch_vizard_passes_direct_comm_address_when_live_stream_configured(window, monkeypatch):
+    """Direct user feedback: manually launching Vizard for a live-stream
+    run left it sitting on its own manual launcher screen (see
+    on_launch_vizard()'s own docstring) -- it must be started with its
+    -directComm flag whenever Vizard Configuration is set to live-stream.
+    """
+    from pathlib import Path
+
+    from missionstudio.engine.vizard import VizardRequest
+    from missionstudio.gui import main_window
+    from missionstudio.gui.vizard_launcher import DEFAULT_LIVE_STREAM_ADDRESS
+
+    window._vizard_request = VizardRequest(live_stream=True)
+    calls = []
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: calls.append(direct_comm_address)
+                         or _FakeVizardProcess())
+
+    window.on_launch_vizard()
+
+    assert calls == [DEFAULT_LIVE_STREAM_ADDRESS]
+
+
+def test_launch_vizard_passes_no_direct_comm_address_without_live_stream(window, monkeypatch):
+    from pathlib import Path
+
+    from missionstudio.gui import main_window
+
+    assert window._vizard_request is None  # save-file mode, or never configured at all
+    calls = []
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: calls.append(direct_comm_address)
+                         or _FakeVizardProcess())
+
+    window.on_launch_vizard()
+
+    assert calls == [None]
+
+
+def test_run_ensures_vizard_is_running_before_a_live_stream_run(window, monkeypatch):
+    """Regression test for a real user report: a live-stream run appeared
+    to hang at 0% with Abort having no effect, because Vizard was never
+    actually connected (see on_run()'s own comment) -- on_run() must
+    confirm Vizard first via on_launch_vizard(), not just hand the
+    request to RunWorker and hope.
+    """
+    from missionstudio.engine.vizard import VizardRequest
+    from missionstudio.gui.main_window import MainWindow
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    window._vizard_request = VizardRequest(live_stream=True)
+    calls = []
+    monkeypatch.setattr(MainWindow, "on_launch_vizard", lambda self: calls.append(1) or True)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)  # don't actually spin up the thread
+
+    window.on_run()
+
+    assert calls == [1]
+    assert window._run_worker is not None  # the run actually proceeded
+
+
+def test_run_refuses_to_start_when_vizard_cannot_be_confirmed(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from missionstudio.engine.vizard import VizardRequest
+    from missionstudio.gui.main_window import MainWindow
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    window._vizard_request = VizardRequest(live_stream=True)
+    monkeypatch.setattr(MainWindow, "on_launch_vizard", lambda self: False)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
+    start_calls = []
+    monkeypatch.setattr(RunWorker, "start", lambda self: start_calls.append(1))
+
+    window.on_run()
+
+    assert len(critical_calls) == 1
+    assert start_calls == []
+    assert window._run_worker is None  # never even constructed
+
+
+def test_run_never_touches_vizard_without_a_live_stream_request(window, monkeypatch):
+    """Vizard Configuration defaults to None (no request at all) --
+    on_run() must not try to launch/confirm Vizard for an ordinary run.
+    """
+    from missionstudio.gui.main_window import MainWindow
+    from missionstudio.gui.run_worker import RunWorker
+
+    _add_valid_spacecraft(window)
+    assert window._vizard_request is None
+    calls = []
+    monkeypatch.setattr(MainWindow, "on_launch_vizard", lambda self: calls.append(1) or True)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)
+
+    window.on_run()
+
+    assert calls == []
 
 
 def test_close_with_no_unsaved_changes_does_not_prompt(window, monkeypatch):

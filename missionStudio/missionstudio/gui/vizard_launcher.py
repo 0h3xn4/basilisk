@@ -47,6 +47,24 @@ from PySide6.QtCore import QSettings
 
 _SETTINGS_KEY = "vizard/executable_path"
 
+# engine.vizard/SimulationService never overrides vizInterface's own
+# reqComProtocol="tcp"/reqComAddress="0.0.0.0"/reqPortNumber="5556"
+# defaults (see docs/source/Vizard/vizardAdvanced/vizardLiveComm.rst) --
+# "0.0.0.0" binds to all interfaces but is reachable locally via
+# "localhost", so this is the address a live-stream run's Vizard
+# instance actually needs to connect to. Passed to :func:`launch_vizard`
+# as its ``-directComm`` command-line argument (see
+# docs/source/Vizard/vizardAdvanced/vizardCommandLine.rst) so Vizard
+# connects automatically instead of sitting on its own manual "Load Data
+# Using One of the Following" launcher screen waiting for the user to
+# type this address in by hand and click "Start Visualization" --
+# direct user feedback: a live-stream run appeared to "do nothing" and
+# then froze with Abort having no effect, because Basilisk's
+# InitializeSimulation() blocks (inside native C++, no Python-level
+# hook -- see gui.main_window.MainWindow.on_run()'s own comment) waiting
+# for exactly that handshake, which never arrived.
+DEFAULT_LIVE_STREAM_ADDRESS = "tcp://localhost:5556"
+
 # The actual launchable binary/bundle name Vizard's own Unity build
 # produces per platform (see VizardDownload.rst's Vizard_<platform>.zip
 # contents) -- used to search candidate directories.
@@ -112,7 +130,7 @@ def remember_vizard_executable(path: Path, settings: Optional[QSettings] = None)
     settings.setValue(_SETTINGS_KEY, str(path))
 
 
-def launch_vizard(executable_path: Path) -> "subprocess.Popen[bytes]":
+def launch_vizard(executable_path: Path, direct_comm_address: Optional[str] = None) -> "subprocess.Popen[bytes]":
     """Starts Vizard as a background process and returns the
     :class:`subprocess.Popen` handle so the caller can poll whether it's
     still running (``.poll() is None``). On macOS this resolves an
@@ -122,6 +140,17 @@ def launch_vizard(executable_path: Path) -> "subprocess.Popen[bytes]":
     command instead would lose the process handle (``open`` exits
     immediately after handing off to the app, so there would be nothing
     left to poll).
+
+    Args:
+        direct_comm_address: when given (typically
+            :data:`DEFAULT_LIVE_STREAM_ADDRESS`), passed as Vizard's own
+            ``-directComm <address>`` command-line argument (see
+            ``docs/source/Vizard/vizardAdvanced/vizardCommandLine.rst``)
+            so it connects to a live-stream automatically instead of
+            sitting on its manual launcher screen -- see this module's
+            own ``DEFAULT_LIVE_STREAM_ADDRESS`` comment for why. ``None``
+            (the default) launches Vizard with no arguments, exactly as
+            before.
     """
     if sys.platform == "darwin" and executable_path.suffix == ".app":
         macos_dir = executable_path / "Contents" / "MacOS"
@@ -132,4 +161,7 @@ def launch_vizard(executable_path: Path) -> "subprocess.Popen[bytes]":
                 f"(no executable found in {macos_dir})"
             )
         executable_path = binaries[0]
-    return subprocess.Popen([str(executable_path)])
+    args = [str(executable_path)]
+    if direct_comm_address:
+        args += ["-directComm", direct_comm_address]
+    return subprocess.Popen(args)
