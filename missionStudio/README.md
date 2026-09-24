@@ -1767,6 +1767,45 @@ do.
 clear error fires instead of the `AttributeError`, alongside a
 finite-input sanity check. 589 passed, 56 skipped in this sandbox
 (three more skipped, matching the three new `requires_basilisk` tests).
+**Confirmed for real** on the user's own real Basilisk build, right
+after this shipped: re-running '06' produced exactly the new message
+("the simulated position/velocity became non-physical (NaN/inf) at
+recorded sample 15 of 73...") instead of the old `AttributeError` --
+the diagnostic works as designed. The underlying divergence itself is
+still open; that sample index/count is the concrete lead needed to
+chase it further, next.
+
+## A toolbar action invisible on one real platform
+
+Direct user report, with a screenshot: the "Launch Vizard" toolbar
+button was simply not there -- while confirmed present in the **Run**
+menu (built from the exact same `QAction` object as the toolbar button),
+ruling out a construction failure. `_build_toolbar()`'s single,
+un-movable `QToolBar` held 9 text-beside-icon buttons plus 2 separators
+-- wide enough that real-world font/DPI rendering on at least one real
+desktop environment ran out of horizontal room before the window itself
+did, something this sandbox's own offscreen-Fusion-style screenshots
+never reproduced (they consistently rendered narrower). Rather than
+chase the platform-specific overflow behavior itself (Qt's overflow
+handling for a fixed single-row toolbar is not obviously predictable
+across styles/platforms), removed the dependency on window width
+entirely: `_build_toolbar()` now builds two shorter, fixed rows (File
+ops + Run ops; Vizard + Check Kernels) via `addToolBarBreak()`, each
+comfortably narrow enough to never need to overflow at all.
+
+**Verification:** confirmed visually with offscreen screenshots at both
+the default window width and a deliberately narrower one (1000px) --
+every button fully visible at both. `tests/gui/test_main_window.py`
+gained `test_toolbar_actions_are_all_visible`, asserting every one of
+this window's actions is present on one of the (now two)
+`QToolBar`s and actually visible, not just constructed as a `QAction`
+object somewhere. 590 passed, 56 skipped in this sandbox. Not
+independently confirmed against the specific real platform/window size
+that originally lost the button (this sandbox has no way to reproduce
+that environment), but the fix removes the mechanism (window-width
+-dependent single-row overflow) entirely rather than patching around a
+guessed cause, so it should hold regardless of the exact platform
+details.
 
 ## Repository layout
 

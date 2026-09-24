@@ -48,6 +48,36 @@ def test_initial_title_is_untitled(window):
     assert window.windowTitle() == "missionStudio -- untitled"
 
 
+def test_toolbar_actions_are_all_visible(window, qtbot):
+    """Regression test for a real user report, with a screenshot: on
+    their platform, one toolbar button ("Launch Vizard") simply wasn't
+    visible in a single, wide, un-movable QToolBar -- confirmed present
+    in the Run menu (so the QAction itself was fine), meaning it was a
+    toolbar-width/overflow rendering issue this sandbox's own offscreen
+    Fusion-style rendering never reproduced. _build_toolbar() now uses
+    two shorter, fixed rows instead of one wide one specifically so no
+    single action's visibility depends on window width/platform toolbar
+    -overflow behavior -- assert every action this window exposes is
+    actually on one of the two toolbars and visible, not just present as
+    a QAction object somewhere.
+    """
+    from PySide6.QtWidgets import QToolBar
+
+    window.show()
+    qtbot.waitExposed(window)
+
+    toolbars = window.findChildren(QToolBar)
+    assert len(toolbars) == 2
+    toolbar_actions = [a for tb in toolbars for a in tb.actions() if not a.isSeparator()]
+
+    for action in (window.new_action, window.open_action, window.save_action, window.run_action,
+                   window.abort_action, window.live_plot_action, window.monte_carlo_action,
+                   window.vizard_action, window.vizard_launch_action, window.check_kernels_action):
+        assert action in toolbar_actions, f"{action.text()!r} is missing from every toolbar"
+        widget = next(tb.widgetForAction(action) for tb in toolbars if tb.widgetForAction(action) is not None)
+        assert widget.isVisibleTo(window), f"{action.text()!r}'s toolbar button is not visible"
+
+
 def test_editing_marks_dirty(window):
     assert not window._dirty
     _add_valid_spacecraft(window)

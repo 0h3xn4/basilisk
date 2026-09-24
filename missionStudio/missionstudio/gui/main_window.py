@@ -277,34 +277,59 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
 
     def _build_toolbar(self) -> None:
-        """Puts the SAME QAction instances the menu bar uses onto a
-        QToolBar -- one signal connection per action, both surfaces always
-        agree (enabled/disabled state included, e.g. while a run is in
-        flight -- see :meth:`_set_running`).
-        """
-        toolbar = QToolBar("Main", self)
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.addToolBar(toolbar)
+        """Puts the SAME QAction instances the menu bar uses onto two
+        QToolBars, one below the other -- one signal connection per
+        action, both surfaces always agree (enabled/disabled state
+        included, e.g. while a run is in flight -- see
+        :meth:`_set_running`).
 
-        toolbar.addAction(self.new_action)
-        toolbar.addAction(self.open_action)
-        toolbar.addAction(self.save_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.run_action)
-        toolbar.addAction(self.abort_action)
-        toolbar.addAction(self.live_plot_action)
-        toolbar.addAction(self.monte_carlo_action)
-        toolbar.addAction(self.vizard_action)
-        toolbar.addAction(self.vizard_launch_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.check_kernels_action)
+        Two rows, not one: direct user report (with a screenshot) that
+        one button ("Launch Vizard") simply wasn't visible on their
+        platform -- a single row of 9 text-beside-icon buttons plus 2
+        separators is wide enough that real-world font/DPI rendering
+        (this was never actually exercised outside this project's own
+        offscreen-Fusion-style screenshots, which render narrower than
+        at least one real desktop environment does) can run out of
+        horizontal room before the window's own natural width does, and
+        an un-movable single-row QToolBar's overflow handling in that
+        case is not reliably "show a chevron with everything still
+        reachable" across platforms/styles. Splitting into two fixed
+        rows removes the dependency on window width entirely -- both
+        rows fit comfortably at this window's own default size, and nothing
+        can silently drop off given how few actions are on each one, no
+        matter how any given platform handles toolbar overflow.
+        """
+        primary = QToolBar("Main", self)
+        primary.setMovable(False)
+        primary.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(primary)
+
+        primary.addAction(self.new_action)
+        primary.addAction(self.open_action)
+        primary.addAction(self.save_action)
+        primary.addSeparator()
+        primary.addAction(self.run_action)
+        primary.addAction(self.abort_action)
+        primary.addAction(self.live_plot_action)
+        primary.addAction(self.monte_carlo_action)
+
+        self.addToolBarBreak()
+
+        secondary = QToolBar("Vizard/Kernels", self)
+        secondary.setMovable(False)
+        secondary.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(secondary)
+
+        secondary.addAction(self.vizard_action)
+        secondary.addAction(self.vizard_launch_action)
+        secondary.addSeparator()
+        secondary.addAction(self.check_kernels_action)
 
         # "Run Simulation" is the app's primary call-to-action -- visually
         # distinguished with the accent color (see theme.py's
         # QToolButton#primaryToolButton rule), same idea as a web app's
         # primary button.
-        run_button = toolbar.widgetForAction(self.run_action)
+        run_button = primary.widgetForAction(self.run_action)
         if run_button is not None:
             run_button.setObjectName("primaryToolButton")
 
