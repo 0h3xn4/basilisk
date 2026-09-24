@@ -524,7 +524,7 @@ def test_power_and_rf_link_default_to_none():
 
 
 def test_power_config_round_trips_through_save_load(tmp_path):
-    sc = _minimal_scenario()
+    sc = _minimal_scenario(gravity=GravityConfig(third_body_perturbers=["sun"]))
     sc.spacecraft[0].power = PowerConfig(panel_area_m2=1.2, panel_efficiency=0.29,
                                           bus_idle_power_w=25.0, battery_capacity_wh=120.0,
                                           battery_initial_soc=0.9)
@@ -591,7 +591,7 @@ def test_station_keeping_defaults_to_none():
 
 
 def test_station_keeping_round_trips_through_save_load(tmp_path):
-    sc = _minimal_scenario()
+    sc = _minimal_scenario(gravity=GravityConfig(third_body_perturbers=["sun"]))
     sc.spacecraft[0].station_keeping = StationKeepingConfig(
         target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
     )
@@ -650,6 +650,45 @@ def test_station_keeping_rejects_out_of_range_eclipse_threshold():
     )
     with pytest.raises(ScenarioValidationError, match="eclipse_sunlit_threshold"):
         sc.validate()
+
+
+@pytest.mark.parametrize("configure", [
+    lambda sc: setattr(sc.spacecraft[0], "power", PowerConfig(panel_area_m2=1.0, panel_efficiency=0.29)),
+    lambda sc: setattr(sc.spacecraft[0], "station_keeping", StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0)),
+    lambda sc: setattr(sc.spacecraft[0], "enable_srp", True),
+], ids=["power", "station_keeping", "enable_srp"])
+def test_power_station_keeping_or_srp_without_sun_third_body_is_rejected(configure):
+    """Mirrors engine.service.SimulationService.build()'s own
+    SimulationServiceError (simpleSolarPanel/the eclipse gate/SRP all
+    need a real eclipse shadow factor, which needs a sun ephemeris) --
+    caught for real against two of this project's own bundled templates
+    (05, 07), which validated cleanly here but failed the moment they
+    were actually run.
+    """
+    sc = _minimal_scenario()
+    assert "sun" not in sc.gravity.third_body_perturbers
+    configure(sc)
+    with pytest.raises(ScenarioValidationError, match="third_body_perturbers"):
+        sc.validate()
+
+
+@pytest.mark.parametrize("configure", [
+    lambda sc: setattr(sc.spacecraft[0], "power", PowerConfig(panel_area_m2=1.0, panel_efficiency=0.29)),
+    lambda sc: setattr(sc.spacecraft[0], "station_keeping", StationKeepingConfig(
+        target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0)),
+    lambda sc: setattr(sc.spacecraft[0], "enable_srp", True),
+], ids=["power", "station_keeping", "enable_srp"])
+def test_power_station_keeping_or_srp_with_sun_third_body_validates(configure):
+    sc = _minimal_scenario(gravity=GravityConfig(third_body_perturbers=["sun"]))
+    configure(sc)
+    sc.validate()  # must not raise
+
+
+def test_no_power_station_keeping_or_srp_does_not_need_sun_third_body():
+    sc = _minimal_scenario()
+    assert "sun" not in sc.gravity.third_body_perturbers
+    sc.validate()  # must not raise -- nothing here needs an eclipse shadow factor
 
 
 def test_constant_thrust_defaults_to_none():
@@ -726,7 +765,7 @@ def test_constant_thrust_allowed_alongside_station_keeping():
     """Independent propellant budgets -- see ConstantThrustConfig's
     docstring -- so both may be set on the same spacecraft at once.
     """
-    sc = _minimal_scenario()
+    sc = _minimal_scenario(gravity=GravityConfig(third_body_perturbers=["sun"]))
     sc.spacecraft[0].station_keeping = StationKeepingConfig(
         target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
     )
@@ -779,7 +818,7 @@ def test_orbit_only_mode_allows_station_keeping_and_constant_thrust():
     """Neither needs an attitude model -- see Scenario.simulation_mode's
     docstring -- so both remain usable in orbit_only mode.
     """
-    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc = _minimal_scenario(simulation_mode="orbit_only", gravity=GravityConfig(third_body_perturbers=["sun"]))
     sc.spacecraft[0].station_keeping = StationKeepingConfig(
         target_altitude_km=500.0, deadband_km=1.0, thrust_n=0.01, isp_s=1500.0, propellant_kg=2.0,
     )
@@ -789,7 +828,7 @@ def test_orbit_only_mode_allows_station_keeping_and_constant_thrust():
 
 
 def test_orbit_only_mode_allows_plain_cannonball_spacecraft():
-    sc = _minimal_scenario(simulation_mode="orbit_only")
+    sc = _minimal_scenario(simulation_mode="orbit_only", gravity=GravityConfig(third_body_perturbers=["sun"]))
     sc.spacecraft[0].enable_drag = True
     sc.spacecraft[0].drag_area_m2 = 2.5
     sc.spacecraft[0].enable_srp = True
@@ -812,7 +851,12 @@ def _chief_and_follower_scenario(**follower_overrides):
     )
     follower_kwargs.update(follower_overrides)
     follower = SpacecraftConfig(**follower_kwargs)
-    return Scenario(name="phasing test", epoch_utc="2030-01-01T00:00:00", spacecraft=[chief, follower])
+    # station_keeping (set on `follower` by default above -- phasing_keeping
+    # always needs it on the same spacecraft) needs a sun ephemeris for its
+    # eclipse-gated reboost burn -- see Scenario.validate()'s own mirrored
+    # check of engine.service.SimulationService.build()'s requirement.
+    return Scenario(name="phasing test", epoch_utc="2030-01-01T00:00:00", spacecraft=[chief, follower],
+                     gravity=GravityConfig(third_body_perturbers=["sun"]))
 
 
 def test_phasing_keeping_defaults_to_none():

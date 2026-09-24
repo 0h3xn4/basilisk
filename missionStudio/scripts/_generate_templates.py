@@ -233,7 +233,13 @@ def build_05_formation_flying_phasing() -> Scenario:
         ),
         epoch_utc="2030-01-01T00:00:00",
         simulation_mode="orbit_only",
-        gravity=GravityConfig(central_body="earth", central_body_degree=0),
+        # third_body_perturbers=["sun"]: follower-1's station_keeping (below,
+        # required by phasing_keeping) needs the real eclipse shadow factor
+        # for its eclipse-gated reboost burn, which needs a sun ephemeris --
+        # see engine.service.SimulationService.build()'s own
+        # SimulationServiceError if this is missing (caught on a real run:
+        # this template originally had an empty third_body_perturbers list).
+        gravity=GravityConfig(central_body="earth", central_body_degree=0, third_body_perturbers=["sun"]),
         sim_settings=SimSettings(duration_days=7.0, dynamics_task_rate_s=30.0, integrator="rkf78"),
         spacecraft=[
             SpacecraftConfig(
@@ -324,7 +330,15 @@ def build_07_attitude_pointing_with_adcs_hardware() -> Scenario:
         ),
         epoch_utc="2030-01-01T00:00:00",
         simulation_mode="full_attitude",
-        gravity=GravityConfig(central_body="earth", central_body_degree=0),
+        # third_body_perturbers=["sun"]: sat-1's PowerConfig (below) needs
+        # the real eclipse shadow factor for its solar-panel power
+        # generation, which needs a sun ephemeris -- same reasoning as '05'
+        # -- and sunSafePoint's own sun-pointing already conceptually wants
+        # a real sun to point at. See engine.service.SimulationService.
+        # build()'s own SimulationServiceError if this is missing (caught
+        # on a real run: this template originally had an empty
+        # third_body_perturbers list).
+        gravity=GravityConfig(central_body="earth", central_body_degree=0, third_body_perturbers=["sun"]),
         sim_settings=SimSettings(duration_days=0.05, dynamics_task_rate_s=1.0, integrator="rkf78"),
         spacecraft=[
             SpacecraftConfig(

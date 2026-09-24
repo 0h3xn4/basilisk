@@ -284,6 +284,20 @@ def _osculating_elements(mu: float, r_bn_n: np.ndarray, v_bn_n: np.ndarray) -> D
     (flat at 0, or a discontinuity) for a near-circular/near-equatorial
     scenario. This is inherent to osculating classical elements, not
     something a per-sample computation could avoid.
+
+    A genuinely non-physical (NaN/inf) recorded sample -- the propagated
+    dynamics itself having gone numerically unstable, not anything about
+    this function -- is checked for explicitly and reported with a clear,
+    actionable :class:`SimulationServiceError` instead of being handed to
+    ``rv2elem``. Real bug found on an actual run: ``rv2elem``'s own
+    NaN-input guard (``src/utilities/orbitalMotion.py``) sets
+    ``elements.AN``/``elements.AP``, but ``ClassicElements.__slots__``
+    only defines ``Omega``/``omega`` (no ``AN``/``AP`` at all) -- so
+    instead of returning a clean all-NaN element set, it crashes with
+    ``AttributeError: 'ClassicElements' object has no attribute 'AN'``,
+    which is what a spacecraft whose translational state actually
+    diverged used to surface as (an upstream Basilisk bug, not fixed
+    here, but worked around so it never gets reached).
     """
     n = r_bn_n.shape[0]
     a = np.empty(n)
@@ -293,6 +307,15 @@ def _osculating_elements(mu: float, r_bn_n: np.ndarray, v_bn_n: np.ndarray) -> D
     argp = np.empty(n)
     true_anomaly = np.empty(n)
     for k in range(n):
+        if not (np.all(np.isfinite(r_bn_n[k])) and np.all(np.isfinite(v_bn_n[k]))):
+            raise SimulationServiceError(
+                f"the simulated position/velocity became non-physical (NaN/inf) at recorded sample "
+                f"{k} of {n} -- the propagated dynamics went numerically unstable partway through this "
+                f"run. Common causes: attitude control gains too aggressive for the spacecraft's "
+                f"inertia/initial body rates, an actuator commanding excessive torque/thrust, or "
+                f"sim_settings.dynamics_task_rate_s too coarse for how fast the dynamics involved "
+                f"actually evolve -- not a bug in osculating-element extraction itself."
+            )
         oe = orbitalMotion.rv2elem(mu, r_bn_n[k], v_bn_n[k])
         a[k] = oe.a
         e[k] = oe.e

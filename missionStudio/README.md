@@ -1656,6 +1656,118 @@ existing tests that trigger a real live-stream launch had
 no way to confirm the dialog's wording matches what a user actually
 needs without a real Vizard binary and display to try it against.
 
+## Three more real-run bugs, caught by the user testing templates
+
+All three were caught by the user actually clicking through the bundled
+templates one by one, with screenshots -- not found by this sandbox's
+own (Basilisk-free) test suite, which had no way to catch any of them.
+
+**1. Templates '05' and '07' failed to run: missing sun ephemeris.**
+`SimulationService.build()` raises a clear `SimulationServiceError` when
+any spacecraft has `power`/`station_keeping`/`enable_srp` configured but
+`'sun'` isn't in `gravity.third_body_perturbers` (`simpleSolarPanel`/the
+eclipse gate/SRP all need a real eclipse shadow factor, which needs a
+sun ephemeris) -- exactly the error the user hit on both '05' (formation
+flying, `station_keeping` required by `phasing_keeping`) and '07'
+(attitude pointing with ADCS hardware, has a `PowerConfig`). Both
+templates' own `scripts/_generate_templates.py` builder functions
+simply never included `third_body_perturbers=["sun"]` in their
+`GravityConfig` -- a real bug in this project's own bundled templates,
+not a user configuration mistake. Fixed at the source (the generator
+functions, each with a comment explaining why) and regenerated both
+JSON files (`python3 scripts/_generate_templates.py`, run from
+`missionStudio/`) -- every other template was already correct, so only
+these two files changed.
+
+Also promoted to a **schema-level check**: `Scenario.validate()` gained
+a mirror of this same engine-layer condition, following the exact
+precedent `GravityConfig.validate()` already set for the
+`central_body_degree`/`central_body` mismatch (see its own comment) --
+without this, `missionstudio validate`/the GUI's live "valid" indicator
+(both Basilisk-independent) would keep reporting a clean bill of health
+for a scenario guaranteed to fail the moment it's actually run, exactly
+as it did here. Now caught immediately in the editor, not after
+clicking Run.
+
+**Verification:** a scan of all 9 bundled templates (any spacecraft with
+`power`/`station_keeping`/`enable_srp` but no `'sun'` third-body
+perturber) confirms only '05'/'07' were affected and both are now
+clean. `tests/test_scenario_schema.py` gained
+`test_power_station_keeping_or_srp_without_sun_third_body_is_rejected`/
+`..._with_sun_third_body_validates`/
+`test_no_power_station_keeping_or_srp_does_not_need_sun_third_body`
+(parametrized over all three triggering fields), plus fixed seven
+existing tests whose own fixtures had exactly this same gap (legitimate
+staleness this new check exposed, not false positives -- those fixtures
+would already have failed at `SimulationService.build()` if ever run
+for real). 588 passed, 53 skipped in this sandbox.
+
+**2. Load Scenario's description text was unreadable.** Screenshot:
+near-invisible light-gray-on-white text. Root cause: several widgets'
+own inline stylesheets use `"color: palette(mid);"` for muted hint/
+description text (`LoadScenarioWidget`'s template description,
+`SpacecraftTemplateDialog`'s description, several "how to use this
+field" hints across the spacecraft/sensor/mission-sequence editors) --
+`QPalette.Mid` was never explicitly set by `gui/theme.py`'s
+`apply_theme()`, so it stayed at Qt's own computed default (a subtle
+3D-bevel shading tone meant for shadow lines, not body text), which
+reads as near-invisible against this theme's light background. Fixed
+with a single one-line change in `theme.py` -- `QPalette.Mid` mapped to
+the same `text_muted` color the theme already uses for
+`PlaceholderText` -- which fixes every `"palette(mid)"` usage across the
+whole app at once, not just `LoadScenarioWidget`. Confirmed visually
+with an offscreen-rendered screenshot of both `LoadScenarioWidget` and
+`SpacecraftTemplateDialog` before considering this done, not just by
+reading the CSS.
+
+**Verification:** `tests/gui/test_theme.py` gained
+`test_mid_palette_role_is_readable_not_left_at_qt_default`. 589 passed,
+53 skipped in this sandbox.
+
+**3. Template '06' crashed with a confusing internal error.**
+`'ClassicElements' object has no attribute 'AN'`. Traced directly (not
+guessed) to a genuine bug in Basilisk's OWN `src/utilities/
+orbitalMotion.py`: `rv2elem()`'s NaN-input guard sets `elements.AN`/
+`elements.AP`, but `ClassicElements.__slots__` only defines `Omega`/
+`omega` (no `AN`/`AP` at all) -- so instead of returning a clean all-NaN
+element set for a non-physical (NaN) position/velocity sample, it
+crashes with that `AttributeError`. `engine.service._osculating_elements`
+calls `rv2elem()` once per recorded sample (to plot how the orbit's
+shape/orientation evolves over the run) -- reaching this crash means the
+spacecraft's OWN propagated position/velocity had already gone
+non-physical partway through the run, an actual numerical instability
+this sandbox has no Basilisk build to reproduce or trace further (inertia
+`_INERTIA_MEDIUM` and `mrpFeedback` gains `K=3.5`/`P=30` both look like
+reasonable, standard-example-scale values on inspection, not an obvious
+mismatch, but that's as far as static inspection alone can go).
+
+Fixed what's actually fixable from here: `_osculating_elements` now
+checks each sample for `NaN`/`inf` itself, before ever calling the
+buggy `rv2elem()`, and raises a clear, actionable
+`SimulationServiceError` naming the sample index and likely causes
+(control gains too aggressive for the inertia/rates involved, excessive
+actuator torque, too coarse a `dynamics_task_rate_s`) instead of that
+confusing `AttributeError` -- turning an inscrutable crash into a
+diagnosable one. The Basilisk-side bug itself is not patched here (out
+of scope for this checkout's own code); this is a defensive workaround
+on the missionStudio side.
+
+**This does NOT fix why template '06' actually diverges** -- only makes
+the failure mode legible instead of cryptic. If it still fails after
+this, the new error message will say which recorded sample first went
+non-physical (and, from `sim_settings.dynamics_task_rate_s`, roughly
+what elapsed time that corresponds to) -- that detail would help narrow
+down the real cause on a real Basilisk build, which this sandbox cannot
+do.
+
+**Verification:** new `tests/test_osculating_elements.py`
+(`requires_basilisk`, auto-skipped in this development sandbox --
+`engine.service` imports Basilisk at module level) directly exercises
+`_osculating_elements` with a synthetic NaN/inf sample, confirming the
+clear error fires instead of the `AttributeError`, alongside a
+finite-input sanity check. 589 passed, 56 skipped in this sandbox
+(three more skipped, matching the three new `requires_basilisk` tests).
+
 ## Repository layout
 
 ```
