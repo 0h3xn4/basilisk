@@ -2377,9 +2377,56 @@ crash**, that rules core dynamics out and points the investigation back
 at the force-effector wiring itself -- e.g. `StationKeepingController`'s
 own burn, or two controllers sharing one `ExtForceTorque` object.
 
+**Result, confirmed by the user: this diagnostic ran the FULL 7 days with
+no crash at all** (`run_live: 100.0% complete`, no error). Conclusive:
+the crash is NOT in core gravity/integrator/two-spacecraft setup -- it
+requires a force effector actually being active on follower-1. Rules out
+an entire class of hypothesis (sun ephemeris timing, task priority
+ordering, generic two-spacecraft interaction) and narrows the
+investigation specifically to `engine.orbit_maintenance`'s force
+-effector wiring or control logic.
+
+## Second diagnostic: isolating which part of orbit_maintenance is responsible
+
+Both real crashes so far had SOME `orbit_maintenance` controller
+actively commanding nonzero thrust through follower-1's `ExtForceTorque`
+effector at the failing tick (phasing's `BURN_OUT` state in the first
+crash, station-keeping's altitude burn in the second) -- but those two
+controllers share more than just "a force": the same propellant/mass
+-bookkeeping pattern (`engine.propellant_bookkeeping.
+apply_propellant_burn`, which writes `scObject.hub.mHub` every tick,
+including on non-thrusting ticks), the same `ExtForceTorque` effector
+object (phasing shares station-keeping's), and each has its OWN extra
+logic on top (station-keeping's altitude-deadband/smoothing/eclipse
+gating; phasing's drift-orbit state machine and thruster arbitration).
+
+New `missionstudio/scenarios/diagnostic_05b_constant_thrust_only.json`
+(same non-template placement as the first diagnostic) isolates which
+part: identical orbits/duration/rate/integrator/gravity, but follower-1
+has ONLY `constant_thrust` configured (a small constant 0.05 N prograde
+burn -- same magnitude used elsewhere in this template) instead of
+`station_keeping`/`phasing_keeping`. `ConstantFrameThrustController` is
+about as simple as a force effector in this codebase gets: no state
+machine, no altitude smoothing, no thruster arbitration, no eclipse
+gating -- just a fixed-direction force and the same shared
+mass-bookkeeping write every tick.
+
+**If this ALSO crashes**, the trigger is in the shared force-effector/
+mass-bookkeeping mechanism common to all three controllers (most likely
+suspect: the every-tick `scObject.hub.mHub` write, possibly interacting
+with the RK78 adaptive integrator's own internal substepping in a way
+that's fine for `missionAnalysis`'s original, coarser-task-rate version
+of this pattern but not for running it on the SAME task as the dynamics
+integration itself, which is what `engine.orbit_maintenance`'s own
+module docstring already flags as the one deliberate difference from the
+ported original). **If it does NOT crash**, the trigger is specifically
+in `StationKeepingController`'s or `PhasingKeepingController`'s own extra
+logic, not the shared mechanism -- narrowing to the altitude-smoothing/
+thruster-arbitration/eclipse-gating code neither shares with
+`ConstantFrameThrustController`.
+
 Not yet confirmed either way -- this depends entirely on the user running
-this diagnostic scenario and sharing the result (crash or no crash, plus
-the log either way).
+this second diagnostic scenario and sharing the result.
 
 ## Repository layout
 
