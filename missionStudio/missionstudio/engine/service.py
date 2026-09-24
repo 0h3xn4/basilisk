@@ -996,6 +996,7 @@ class SimulationService:
         try:
             self.scSim.ExecuteSimulation()
         except RuntimeError as exc:
+            self.log_last_known_state()
             raise_clear_execution_error(exc)
         return self._extract_results()
 
@@ -1095,6 +1096,7 @@ class SimulationService:
                     "run_live: ExecuteSimulation failed at t=%.1f s of %.1f s (%.1f%% complete)",
                     next_stop_ns * macros.NANO2SEC, stop_time_s, 100.0 * next_stop_ns / stop_time_ns,
                 )
+                self.log_last_known_state()
                 raise_clear_execution_error(exc)
             fraction_complete = min(1.0, next_stop_ns / stop_time_ns)
             _logger.info(
@@ -1241,3 +1243,62 @@ class SimulationService:
                     result, gs_config.name, sc_config.name, sc_config.rf_link, gs_config
                 ))
         return result
+
+    def log_last_known_state(self) -> None:
+        """Best-effort diagnostic, called right before
+        :func:`raise_clear_execution_error` re-raises a caught
+        ``ExecuteSimulation()`` failure: logs (``ERROR``) the LAST
+        successfully recorded state for every spacecraft, straight from
+        each handle's own recorder/controller logs -- deliberately NOT
+        through :meth:`_extract_results`/``_osculating_elements`` (which
+        would itself raise on a non-finite sample -- see that function's
+        own finite-check), since the whole point here is to see the state
+        even if it's already non-finite.
+
+        The dynamics tick that actually triggered the failure never
+        finishes and is never recorded at all (see
+        :func:`raise_clear_execution_error`'s own docstring for why), so
+        this is the LAST GOOD tick right before whatever went wrong --
+        the most direct diagnostic available for narrowing down a
+        divergence without a debugger, especially combined with
+        :meth:`run_live`'s own per-chunk progress log (this method reports
+        the exact time within that chunk, not just which chunk failed).
+
+        Never raises itself -- a diagnostic that can fail must never mask
+        the real error it was trying to help explain.
+        """
+        for name, handle in self._handles.items():
+            try:
+                t_ns = handle.recorder.times()
+                if len(t_ns) == 0:
+                    _logger.error("%s: no samples recorded yet at failure time", name)
+                    continue
+                last_t_s = float(t_ns[-1]) * macros.NANO2SEC
+                last_r = np.asarray(handle.recorder.r_BN_N)[-1].tolist()
+                last_v = np.asarray(handle.recorder.v_BN_N)[-1].tolist()
+                _logger.error(
+                    "%s: last recorded state before failure -- t=%.3f s, r_BN_N=%s m, v_BN_N=%s m/s",
+                    name, last_t_s, last_r, last_v,
+                )
+            except Exception:
+                _logger.exception("%s: failed to read last recorded position/velocity for diagnostics", name)
+
+            controller = handle.station_keeping_controller
+            if controller is not None and controller.tLog:
+                _logger.error(
+                    "%s: station_keeping last tick -- t=%.3f s, alt=%.1f m (smoothed %.1f m), burn_on=%s, "
+                    "propellant=%.4f kg, cumulative_dv=%.4f m/s",
+                    name, controller.tLog[-1], controller.altLog[-1], controller.smoothAltLog[-1],
+                    bool(controller.burnLog[-1]), controller.propellantLog[-1], controller.deltaVLog[-1],
+                )
+
+            phase_controller = handle.phasing_keeping_controller
+            if phase_controller is not None and phase_controller.tLog:
+                state_names = {0: "IDLE", 1: "BURN_OUT", 2: "DRIFT", 3: "BURN_RESTORE"}
+                _logger.error(
+                    "%s: phasing_keeping last tick -- t=%.3f s, error=%.4f deg, state=%s, propellant=%.4f kg, "
+                    "cumulative_dv=%.4f m/s",
+                    name, phase_controller.tLog[-1], phase_controller.errorDegLog[-1],
+                    state_names.get(phase_controller.stateLog[-1], phase_controller.stateLog[-1]),
+                    phase_controller.propellantLog[-1], phase_controller.deltaVLog[-1],
+                )

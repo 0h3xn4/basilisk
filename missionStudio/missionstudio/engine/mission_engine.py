@@ -325,6 +325,7 @@ class MissionEngine:
             try:
                 self.service.scSim.ExecuteSimulation()
             except RuntimeError as exc:
+                self.service.log_last_known_state()
                 raise_clear_execution_error(exc)
             self._elapsed_ns = target_ns
             return
@@ -353,6 +354,7 @@ class MissionEngine:
                     "_advance_to: ExecuteSimulation failed at t=%.1f s (target %.1f s)",
                     next_stop_ns * macros.NANO2SEC, target_ns * macros.NANO2SEC,
                 )
+                self.service.log_last_known_state()
                 raise_clear_execution_error(exc)
             self._elapsed_ns = next_stop_ns
             if self._should_cancel():
@@ -423,6 +425,7 @@ class MissionEngine:
             try:
                 self.service.scSim.ExecuteSimulation()
             except RuntimeError as exc:
+                self.service.log_last_known_state()
                 raise_clear_execution_error(exc)
         else:
             # Same reasoning as _advance_to() -- the safety cap above can
@@ -460,6 +463,7 @@ class MissionEngine:
                         "_run_propagate_event: ExecuteSimulation failed at t=%.1f s (cap %.1f s)",
                         next_stop_ns * macros.NANO2SEC, cap_ns * macros.NANO2SEC,
                     )
+                    self.service.log_last_known_state()
                     raise_clear_execution_error(exc)
                 if self.service.scSim.eventMap[event_name].occurCounter > 0:
                     break

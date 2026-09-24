@@ -2085,6 +2085,76 @@ instead (whose message still contains the clear "non-physical"
 explanation). `SimulationService.run()`/`run_live()`'s own two tests,
 which are not wrapped by anything, passed as written the first time.
 
+## Template '05' crash, narrowed further -- last-known-state diagnostic
+
+The clear-error fix above paid off immediately: the user reproduced the
+crash again, and the new error and log showed something genuinely
+useful for the first time --
+
+```
+run_live: ExecuteSimulation failed at t=10080.0 s of 604800.0 s (1.7% complete)
+```
+
+The failure is in the very FIRST live chunk (`run_live`'s default chunk
+size for this scenario -- `max(dynamics_task_rate_s, duration_days*86400
+/60)` -- works out to 10080 s, about 336 dynamics ticks). 10080 s is
+under two orbital periods for this scenario's ~550 km circular orbit
+(period ≈ 5740 s) -- so whatever drives the state non-finite happens
+almost immediately, not from a slow multi-day drift. That rules out a
+large class of otherwise-plausible explanations (e.g. propellant
+depletion, a multi-day accumulated phasing error) -- there simply isn't
+enough elapsed time for those.
+
+Reasoning through `orbit_maintenance.py`'s actual numbers for this
+template by hand (`target_altitude_km=550`, `thrust_n=0.05`,
+`target_separation_km=50`, `max_delta_semi_major_axis_km=3.0`) suggests
+the commanded maneuvers themselves are tiny (a back-of-envelope
+phasing correction here works out to on the order of tens of METERS of
+semi-major-axis change, a few cm/s of delta-v) -- nowhere near large
+enough on their own to explain a near-instant divergence. One real,
+separate finding from this exercise: `PhasingKeepingConfig.
+target_separation_km`'s docstring and validation (`schema/scenario.py`)
+define it as a distance strictly "ahead of the chief" (validated `> 0`
+only, no way to express "behind"), but template '05's own description
+and initial conditions (follower's `true_anomaly_deg=-0.5` vs chief's
+`0.0`) explicitly set up and describe a TRAILING formation. Worth fixing
+as its own follow-up (either allowing a signed value, or documenting
+that "ahead"/"behind" is just a label and the schedule is always
+interpreted as the magnitude of `mB - mA`), but the hand-computed
+maneuver size shows this specific mismatch is not large enough to be
+what crashes here.
+
+Without a local Basilisk build to actually step through this, further
+narrowing by hand-reasoning about the physics has reached its limit --
+what's actually needed is the state at the exact moment it goes
+non-finite, which no existing diagnostic captured (the failing tick
+itself is never recorded at all -- see `raise_clear_execution_error`'s
+own docstring for why). New `SimulationService.log_last_known_state()`,
+called right before `raise_clear_execution_error` re-raises at all four
+`ExecuteSimulation()` call sites, logs (`ERROR`) the LAST successfully
+recorded sample for every spacecraft straight from each handle's own
+recorder/controller logs -- position/velocity, and (when configured)
+station-keeping's altitude/burn-on/propellant and phasing-keeping's
+separation error/state-machine state -- deliberately bypassing
+`_extract_results()`/`_osculating_elements()` (which would itself raise
+on a non-finite sample) so this works even if the last state is already
+bad. This is the closest thing to a debugger breakpoint available
+without one: the next crash's log file will show exactly where each
+spacecraft was, what each controller was doing, and how far each
+propellant tank had been drawn down, one tick before Basilisk's own
+stepping failed.
+
+**Verification:** two new tests in `tests/test_service_execution_errors.py`
+(`requires_basilisk`, auto-skipped in this sandbox) -- one confirms the
+method doesn't raise before any tick has completed (logs "no samples
+recorded yet" instead), the other runs a few real dynamics ticks first
+and confirms the logged text actually contains `r_BN_N=`/`v_BN_N=` data.
+600 passed, 66 skipped in this sandbox (2 more skipped, matching the 2
+new tests). Not yet confirmed against a real Basilisk build -- that
+confirmation depends on the user reproducing the crash again and sharing
+the new log, which will finally show the exact last-good state rather
+than just which chunk failed.
+
 ## Repository layout
 
 ```

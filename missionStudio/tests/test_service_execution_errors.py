@@ -68,3 +68,50 @@ def test_run_live_translates_execute_simulation_runtime_error(monkeypatch):
 
     with pytest.raises(SimulationServiceError, match="non-physical"):
         service.run_live(lambda partial, fraction: None)
+
+
+def test_log_last_known_state_with_no_samples_does_not_raise(caplog):
+    """The diagnostic that runs right before raise_clear_execution_error --
+    see its own docstring on service.SimulationService.log_last_known_state
+    -- must be safe to call even before a single dynamics tick has ever
+    completed (build() alone, no ExecuteSimulation() at all yet): a
+    diagnostic that itself crashes would mask the real error it exists to
+    help explain.
+    """
+    import logging
+
+    from missionstudio.engine.service import SimulationService
+
+    service = SimulationService(load_scenario(SCENARIO_PATH))
+    service.build()
+
+    with caplog.at_level(logging.ERROR, logger="missionstudio.engine.service"):
+        service.log_last_known_state()  # must not raise
+
+    assert "no samples recorded yet" in caplog.text
+
+
+def test_log_last_known_state_reports_the_last_real_sample(caplog):
+    """After some real dynamics ticks have actually run, the diagnostic
+    must report an actual r_BN_N/v_BN_N sample (not just the
+    no-samples-yet fallback) -- this is the whole point: the exact
+    position/velocity right before a later failure, for the user's next
+    crash report.
+    """
+    import logging
+
+    from missionstudio.engine.service import SimulationService
+
+    scenario = load_scenario(SCENARIO_PATH)
+    service = SimulationService(scenario)
+    service.build()
+    step_s = scenario.sim_settings.dynamics_task_rate_s * 5
+    service.scSim.ConfigureStopTime(int(step_s * 1e9))
+    service.scSim.ExecuteSimulation()
+
+    with caplog.at_level(logging.ERROR, logger="missionstudio.engine.service"):
+        service.log_last_known_state()
+
+    assert "last recorded state before failure" in caplog.text
+    assert "r_BN_N=" in caplog.text
+    assert "v_BN_N=" in caplog.text
