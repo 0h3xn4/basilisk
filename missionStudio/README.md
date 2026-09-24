@@ -1454,13 +1454,12 @@ inside `_run_while()`, inside the enclosing `_run_command()`'s `try`
 block) -- masking a clean, user-requested abort as a simulation
 failure. Fixed by re-raising `MissionEngineCancelled` unchanged before
 the generic `except Exception` clause runs (see its own comment in
-`mission_engine.py`); `612 passed, 8 skipped` on that same real build
-before this fix, with only `test_should_cancel_checked_between_while_
-loop_iterations` failing -- the fix has not yet been re-run against
-that real build to confirm it, only against this sandbox's
-Basilisk-free suite (570 passed, 51 skipped, including the fix's
-control-flow logic exercised indirectly by every other passing
-`requires_basilisk`-independent test).
+`mission_engine.py`): `612 passed, 8 skipped, 1 failed` on that real
+build before the fix (only `test_should_cancel_checked_between_while_
+loop_iterations` failing), `613 passed, 8 skipped` on the same real
+build after it -- the whole Abort Simulation feature, cancellation
+inside a `while` loop included, is now confirmed against a real
+Basilisk build, not just this sandbox's Basilisk-free suite.
 
 ## Repository layout
 
