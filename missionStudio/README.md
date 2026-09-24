@@ -1443,8 +1443,24 @@ enable/disable wiring plus an end-to-end real-`QThread` test proving the
 `cancelled` signal is actually connected through to
 `_on_run_cancelled()`. All of it (except the `requires_basilisk`-marked
 engine-level checkpoint tests) was run and confirmed passing in this
-sandbox; the `should_cancel` checkpoint logic itself still needs
-confirming against a real Basilisk build.
+sandbox; the `requires_basilisk` tests were then run for real, on an
+actual Basilisk build, which caught one genuine bug:
+`_run_command()` wrapped every non-`MissionEngineError` exception a
+handler raised into a `MissionEngineError`, including a
+`MissionEngineCancelled` bubbling up from several levels down the
+command tree (e.g. cancelling mid-`while`-loop, where the cancellation
+is raised inside the loop body's own nested `_run_commands()` call,
+inside `_run_while()`, inside the enclosing `_run_command()`'s `try`
+block) -- masking a clean, user-requested abort as a simulation
+failure. Fixed by re-raising `MissionEngineCancelled` unchanged before
+the generic `except Exception` clause runs (see its own comment in
+`mission_engine.py`); `612 passed, 8 skipped` on that same real build
+before this fix, with only `test_should_cancel_checked_between_while_
+loop_iterations` failing -- the fix has not yet been re-run against
+that real build to confirm it, only against this sandbox's
+Basilisk-free suite (570 passed, 51 skipped, including the fix's
+control-flow logic exercised indirectly by every other passing
+`requires_basilisk`-independent test).
 
 ## Repository layout
 

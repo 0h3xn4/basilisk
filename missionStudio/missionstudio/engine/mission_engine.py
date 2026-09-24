@@ -251,6 +251,16 @@ class MissionEngine:
             handler(command, summary, path)
         except MissionEngineError:
             raise
+        except MissionEngineCancelled:
+            # Raised by a should_cancel() checkpoint possibly several
+            # levels down the command tree (e.g. inside a `while` loop's
+            # children -- see _run_commands()) -- must propagate to run()
+            # unchanged, not get wrapped into a MissionEngineError by the
+            # generic handler below, or RunWorker's
+            # `except MissionEngineCancelled` would never see it and a
+            # user-requested abort would be reported as a simulation
+            # failure instead of a clean cancellation.
+            raise
         except Exception as exc:
             raise MissionEngineError(f"{path} ({command.kind}): {exc}") from exc
 
