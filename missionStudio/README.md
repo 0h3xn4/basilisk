@@ -1620,6 +1620,42 @@ constructs, and the process-tracking logic around it) is unverified
 here -- report back if a live-stream run still doesn't
 connect after this.
 
+**One remaining click, made obvious instead of silent** (further direct
+user feedback, after the fix above): `-directComm` pre-fills Vizard's
+socket address field and pre-selects DirectComm/Live Display, but does
+NOT click Vizard's own "Start Visualization" button -- confirmed by
+this same user actually running it, contradicting `vizardLiveComm.rst`'s
+more optimistic-sounding wording. Checked directly against
+`vizardCommandLine.rst` for an alternative: the only documented flag
+combination that skips this click entirely is `-batchmode -noDisplay`,
+which is headless OpNav mode -- it renders nothing to the screen at all,
+which defeats the entire point of a LIVE VISUALIZATION. No flag exists
+(documented, at least) that both skips the click and keeps the visible
+3D view, so this one click could not be eliminated outright.
+
+Made unmissable instead: `MainWindow.__init__` gained
+`self._vizard_live_stream_hint_shown = False`. The first time
+`on_launch_vizard()` actually starts a NEW Vizard process with a
+`-directComm` address in a given session, it shows a one-time
+`QMessageBox.information` explaining exactly this -- that the address is
+already filled in, but "Start Visualization" still needs one click in
+Vizard's own window before the run can proceed -- rather than leaving
+the user to wonder (again) why the run looks stuck. Every launch (not
+just the first) also gets an updated status-bar message saying the same
+thing more briefly, for when the hint dialog isn't shown again. The
+dialog deliberately fires only once per session, not once per
+launch/run, so it doesn't turn into a repeated interruption once the
+user already knows what to do.
+
+**Verification:** `tests/gui/test_main_window.py` gained
+`test_launch_vizard_shows_the_one_click_hint_once_per_session` (fires
+exactly once even across repeated `on_launch_vizard()` calls); the four
+existing tests that trigger a real live-stream launch had
+`QMessageBox.information` mocked so the new dialog doesn't block them.
+581 passed, 53 skipped in this sandbox. As with the fix above, there is
+no way to confirm the dialog's wording matches what a user actually
+needs without a real Vizard binary and display to try it against.
+
 ## Repository layout
 
 ```

@@ -703,6 +703,8 @@ def test_launch_vizard_passes_direct_comm_address_when_live_stream_configured(wi
     """
     from pathlib import Path
 
+    from PySide6.QtWidgets import QMessageBox
+
     from missionstudio.engine.vizard import VizardRequest
     from missionstudio.gui import main_window
     from missionstudio.gui.vizard_launcher import DEFAULT_LIVE_STREAM_ADDRESS
@@ -713,10 +715,50 @@ def test_launch_vizard_passes_direct_comm_address_when_live_stream_configured(wi
     monkeypatch.setattr(main_window, "launch_vizard",
                          lambda path, direct_comm_address=None: calls.append(direct_comm_address)
                          or _FakeVizardProcess())
+    # A real launch with a -directComm address shows a one-time
+    # "needs one click" info dialog (see on_launch_vizard()'s own
+    # comment) -- mocked here since this test is about the address
+    # passed to launch_vizard(), not that dialog itself (see
+    # test_launch_vizard_shows_the_one_click_hint_once_per_session for
+    # that).
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
 
     window.on_launch_vizard()
 
     assert calls == [DEFAULT_LIVE_STREAM_ADDRESS]
+
+
+def test_launch_vizard_shows_the_one_click_hint_once_per_session(window, monkeypatch):
+    """-directComm pre-fills Vizard's socket address but (confirmed by
+    direct user report) does not click "Start Visualization" for the
+    user -- shown once per session as an info dialog so that one
+    remaining click isn't a silent surprise, but not repeated on every
+    single subsequent live-stream launch/run.
+    """
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from missionstudio.engine.vizard import VizardRequest
+    from missionstudio.gui import main_window
+
+    window._vizard_request = VizardRequest(live_stream=True)
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    monkeypatch.setattr(main_window, "launch_vizard",
+                         lambda path, direct_comm_address=None: _FakeVizardProcess())
+    info_calls = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: info_calls.append(a)))
+
+    assert not window._vizard_live_stream_hint_shown
+    window.on_launch_vizard()
+    assert len(info_calls) == 1
+    assert "Start Visualization" in info_calls[0][2]
+    assert window._vizard_live_stream_hint_shown
+
+    # Vizard process still running -> "already running" early return,
+    # no relaunch, no repeated dialog.
+    window.on_launch_vizard()
+    assert len(info_calls) == 1
 
 
 def test_launch_vizard_passes_no_direct_comm_address_without_live_stream(window, monkeypatch):
@@ -747,6 +789,8 @@ def test_launch_vizard_relaunches_a_mismatched_already_running_instance(window, 
     """
     from pathlib import Path
 
+    from PySide6.QtWidgets import QMessageBox
+
     from missionstudio.engine.vizard import VizardRequest
     from missionstudio.gui import main_window
     from missionstudio.gui.vizard_launcher import DEFAULT_LIVE_STREAM_ADDRESS
@@ -756,6 +800,7 @@ def test_launch_vizard_relaunches_a_mismatched_already_running_instance(window, 
     monkeypatch.setattr(main_window, "launch_vizard",
                          lambda path, direct_comm_address=None: launch_calls.append(direct_comm_address)
                          or _FakeVizardProcess())
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
 
     # First launch: no live-stream configured yet.
     window.on_launch_vizard()
@@ -779,6 +824,8 @@ def test_launch_vizard_keeps_a_live_stream_ready_instance_for_a_later_save_file_
     """
     from pathlib import Path
 
+    from PySide6.QtWidgets import QMessageBox
+
     from missionstudio.engine.vizard import VizardRequest
     from missionstudio.gui import main_window
 
@@ -787,6 +834,7 @@ def test_launch_vizard_keeps_a_live_stream_ready_instance_for_a_later_save_file_
     monkeypatch.setattr(main_window, "launch_vizard",
                          lambda path, direct_comm_address=None: launch_calls.append(direct_comm_address)
                          or _FakeVizardProcess())
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
 
     window._vizard_request = VizardRequest(live_stream=True)
     window.on_launch_vizard()
@@ -810,6 +858,8 @@ def test_launch_vizard_never_touches_an_instance_it_did_not_itself_launch(window
     """
     from pathlib import Path
 
+    from PySide6.QtWidgets import QMessageBox
+
     from missionstudio.engine.vizard import VizardRequest
     from missionstudio.gui import main_window
     from missionstudio.gui.vizard_launcher import DEFAULT_LIVE_STREAM_ADDRESS
@@ -821,6 +871,7 @@ def test_launch_vizard_never_touches_an_instance_it_did_not_itself_launch(window
     monkeypatch.setattr(main_window, "launch_vizard",
                          lambda path, direct_comm_address=None: launch_calls.append(direct_comm_address)
                          or _FakeVizardProcess())
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
 
     window.on_launch_vizard()
 

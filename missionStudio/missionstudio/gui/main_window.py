@@ -92,6 +92,17 @@ class MainWindow(QMainWindow):
         # process regardless of how it was started. See on_launch_vizard()'s
         # own docstring.
         self._vizard_direct_comm_address = None
+        # -directComm pre-fills Vizard's own socket address field and
+        # selects DirectComm/Live Display for the user, but -- confirmed
+        # by direct user report -- does NOT click its "Start
+        # Visualization" button for them; that one click is still needed
+        # every time Vizard is (re)launched this way, and no documented
+        # command-line flag skips it while keeping the visible live view
+        # (see on_launch_vizard()'s own comment). Shown once per session
+        # (not on every single launch/run) so the user isn't stuck
+        # wondering why the run is "stuck" without knowing this, but
+        # also isn't nagged repeatedly once they do.
+        self._vizard_live_stream_hint_shown = False
         self._last_run_epoch_utc: str | None = None  # set in on_run(); see its own comment
 
         self.scenario_editor = ScenarioEditorWidget()
@@ -465,11 +476,20 @@ class MainWindow(QMainWindow):
         When the current Vizard Configuration is set to live-stream,
         Vizard is launched with its own ``-directComm`` command-line
         argument (see ``vizard_launcher.DEFAULT_LIVE_STREAM_ADDRESS``'s
-        own comment) so it connects automatically -- direct user
-        feedback that manually launching Vizard left it sitting on its
-        own "Load Data Using One of the Following" screen, doing
-        nothing, because nobody had typed the socket address in and
-        clicked "Start Visualization" by hand.
+        own comment) -- direct user feedback that manually launching
+        Vizard left it sitting on its own "Load Data Using One of the
+        Following" screen, doing nothing, because nobody had typed the
+        socket address in by hand. ``-directComm`` pre-fills that
+        address and selects DirectComm/Live Display, but -- confirmed by
+        a further direct user report -- does NOT click Vizard's own
+        "Start Visualization" button; no documented command-line flag
+        does that while keeping the visible live view (the fully
+        headless ``-batchmode -noDisplay`` combination skips it, but
+        also skips rendering anything at all, defeating the point of a
+        LIVE VISUALIZATION). That one click is therefore still needed
+        each time Vizard is (re)launched this way -- see
+        ``self._vizard_live_stream_hint_shown`` for how that's
+        communicated instead of silently left for the user to discover.
 
         A previously-tracked ``self._vizard_process`` (one THIS method
         itself launched earlier, in this same session -- see
@@ -525,7 +545,28 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not launch Vizard", f"{executable}: {exc}")
             return False
         self._vizard_direct_comm_address = direct_comm_address
-        self.statusBar().showMessage(f"Launched Vizard ({executable}).")
+        if direct_comm_address:
+            self.statusBar().showMessage(
+                f"Launched Vizard ({executable}) -- click \"Start Visualization\" in the Vizard window to connect."
+            )
+            if not self._vizard_live_stream_hint_shown:
+                # Once per session, not once per launch/run -- see
+                # self._vizard_live_stream_hint_shown's own comment. The
+                # status bar message above (shown every time) is easy to
+                # miss/get overwritten by the "Running..." message that
+                # follows moments later when this was triggered from
+                # on_run() -- this dialog can't be missed the first time.
+                QMessageBox.information(
+                    self, "Vizard needs one click to connect",
+                    f"Vizard was launched with its socket address already filled in "
+                    f"({direct_comm_address}), but it still needs \"Start Visualization\" clicked in "
+                    f"its own window before the run can begin -- Vizard has no command-line option to "
+                    f"skip that one click while still showing the live view. missionStudio will wait "
+                    f"for it (this is shown once per session)."
+                )
+                self._vizard_live_stream_hint_shown = True
+        else:
+            self.statusBar().showMessage(f"Launched Vizard ({executable}).")
         return True
 
     def _terminate_vizard_process(self) -> None:
