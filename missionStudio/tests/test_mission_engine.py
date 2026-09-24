@@ -474,38 +474,125 @@ def test_nested_if_inside_while_shares_one_command_summary():
     assert [r.label for r in summary.reports] == ["nested", "nested", "nested"]
 
 
-def test_should_cancel_stops_between_commands_and_raises_mission_engine_cancelled():
+def test_should_cancel_stops_before_the_first_command_and_raises_mission_engine_cancelled():
     """The "abort a running simulation" GUI feature's mission_sequence
     path: should_cancel is checked before each top-level command runs
-    (see _run_commands), not mid-command -- here it lets exactly the
-    first of three propagate commands run before reporting cancelled.
+    too (see _run_commands), not just mid-command (see
+    test_should_cancel_checked_mid_single_long_propagate_command below,
+    the actual bug this whole feature exists to fix) -- here it trips on
+    the very first check, before "one" ever starts, so nothing at all
+    gets simulated.
     """
     from missionstudio.engine.mission_engine import MissionEngine, MissionEngineCancelled
 
     scenario = _scenario(mission_sequence=[
         Command(kind="propagate", label="one", params={"stop_condition": "duration", "duration_days": 0.02}),
         Command(kind="propagate", label="two", params={"stop_condition": "duration", "duration_days": 0.02}),
-        Command(kind="propagate", label="three", params={"stop_condition": "duration", "duration_days": 0.02}),
+    ])
+
+    with pytest.raises(MissionEngineCancelled) as exc_info:
+        MissionEngine(scenario, should_cancel=lambda: True).run()
+
+    cancelled = exc_info.value
+    assert cancelled.summary.commands_executed == 0
+    # Same reasoning as test_empty_mission_sequence_executes_nothing:
+    # InitializeSimulation() alone (no propagate command ever ran)
+    # produces zero recorded samples.
+    assert len(cancelled.partial_result.series["sat-1.position_N"].time_s) == 0
+
+
+def test_should_cancel_checked_mid_single_long_propagate_command():
+    """Regression test for a real user report: aborting a mission
+    sequence with one long propagate command froze for minutes with no
+    effect, because should_cancel used to only be checked BETWEEN
+    top-level commands (see the test above) -- a single command's own
+    ExecuteSimulation() call ran straight through to completion
+    regardless. _advance_to() now chunks it (mirroring
+    engine.service.run_live()'s already-existing chunking for the
+    non-mission_sequence path), so cancelling partway through one
+    command must leave a partial result strictly short of what letting
+    it finish would have produced.
+    """
+    from missionstudio.engine.mission_engine import MissionEngine, MissionEngineCancelled
+    from missionstudio.engine.service import SimulationService
+
+    duration_days = 0.1
+    scenario = _scenario(duration_days=duration_days, mission_sequence=[
+        Command(kind="propagate", params={"stop_condition": "duration", "duration_days": duration_days}),
     ])
     calls = []
 
     def should_cancel():
         calls.append(1)
-        return len(calls) > 1  # False for the check before "one", True before "two"
+        return len(calls) >= 3  # False before the command starts, then a couple of chunks in
+
+    with pytest.raises(MissionEngineCancelled) as exc_info:
+        MissionEngine(scenario, should_cancel=should_cancel).run()
+
+    cancelled = exc_info.value
+    assert cancelled.summary.commands_executed == 1  # incremented when the command started, not when it finishes
+    partial_samples = len(cancelled.partial_result.series["sat-1.position_N"].time_s)
+    assert partial_samples > 0  # some chunks did run before cancelling
+
+    full_result = SimulationService(_scenario(duration_days=duration_days)).run()
+    full_samples = len(full_result.series["sat-1.position_N"].time_s)
+    assert partial_samples < full_samples, (
+        "cancelling mid-command must not let the propagate command run to completion"
+    )
+
+
+def test_should_cancel_checked_mid_propagate_event_command():
+    """Same bug, same fix, for propagate.stop_condition == "event": its
+    safety-capped ExecuteSimulation() call is chunked exactly like
+    _advance_to() now chunks duration/epoch, so cancelling before the
+    event actually fires must still report a clean MissionEngineCancelled
+    (not, e.g., the "did not occur within the safety cap"
+    MissionEngineError a real completion failure would raise).
+    """
+    from missionstudio.engine.mission_engine import MissionEngine, MissionEngineCancelled
+
+    scenario = _scenario(
+        duration_days=1.0, dynamics_task_rate_s=1.0, orbit=_circular_orbit(eccentricity=0.05),
+        mission_sequence=[
+            Command(kind="propagate", params={
+                "stop_condition": "event", "event_kind": "periapsis", "spacecraft": "sat-1",
+            }),
+        ],
+    )
+    calls = []
+
+    def should_cancel():
+        calls.append(1)
+        return len(calls) >= 3  # well before a full orbital period (~90 min) has been simulated
 
     with pytest.raises(MissionEngineCancelled) as exc_info:
         MissionEngine(scenario, should_cancel=should_cancel).run()
 
     cancelled = exc_info.value
     assert cancelled.summary.commands_executed == 1
-    assert cancelled.partial_result.series  # "one" already produced samples
+    assert len(cancelled.partial_result.series["sat-1.position_N"].time_s) > 0
 
 
 def test_should_cancel_checked_between_while_loop_iterations():
+    """should_cancel is checked before each while-loop iteration's child
+    command starts (_run_commands, re-entered once per iteration by
+    _run_while) -- here with each iteration's propagate sized to finish
+    in exactly one _advance_to() chunk (duration_s well under
+    dynamics_task_rate_s), so should_cancel is called exactly twice per
+    iteration: once before the child starts, once right after its one
+    chunk finishes (see test_should_cancel_checked_mid_single_long_
+    propagate_command for the case where a single command spans many
+    chunks instead). commands_executed also counts the "while" command
+    itself (incremented once, before the loop's first iteration even
+    starts), so 2 full iterations plus that one "while" node's own count
+    totals 3.
+    """
     from missionstudio.engine.mission_engine import MissionEngine, MissionEngineCancelled
 
-    segment_days = 0.01
-    scenario = _scenario(duration_days=segment_days * 10, mission_sequence=[
+    dynamics_task_rate_s = 10.0
+    segment_days = (dynamics_task_rate_s / 2.0) / 86400.0  # well under one tick -> always exactly one chunk
+    scenario = _scenario(duration_days=segment_days * 10, dynamics_task_rate_s=dynamics_task_rate_s,
+                          mission_sequence=[
         Command(kind="while", params={"condition": "True"}, children=[
             Command(kind="propagate", params={"stop_condition": "duration", "duration_days": segment_days}),
         ]),
@@ -514,7 +601,11 @@ def test_should_cancel_checked_between_while_loop_iterations():
 
     def should_cancel():
         calls.append(1)
-        return len(calls) > 3  # let a few iterations run, then stop
+        # call1: before the "while" command itself starts
+        # call2/3: before/after iteration 0's propagate
+        # call4/5: before/after iteration 1's propagate
+        # call6: before iteration 2's propagate -- trips here
+        return len(calls) > 5
 
     with pytest.raises(MissionEngineCancelled) as exc_info:
         MissionEngine(scenario, should_cancel=should_cancel).run()

@@ -1399,7 +1399,11 @@ a forced kill:
   `should_cancel` parameter, checked once per top-level command in
   `_run_commands()` -- which also naturally covers `while`-loop
   iterations, since `_run_while()` re-enters `_run_commands()` once per
-  iteration.
+  iteration -- AND, since then (see "Abort during a single long
+  propagate command, fixed" below), mid-command too: a single
+  `propagate` command's own `ExecuteSimulation()` call is chunked via
+  `_advance_to()`/the chunked branch of `_run_propagate_event()`, not
+  just between top-level commands.
 * `gui/run_worker.py` -- `RunWorker` gained `request_cancel()` (sets a
   `threading.Event`, safe to call from the GUI thread while `run()` is
   executing on its own thread) and a new `cancelled` Qt signal
@@ -1460,6 +1464,71 @@ loop_iterations` failing), `613 passed, 8 skipped` on the same real
 build after it -- the whole Abort Simulation feature, cancellation
 inside a `while` loop included, is now confirmed against a real
 Basilisk build, not just this sandbox's Basilisk-free suite.
+
+### Abort during a single long propagate command, fixed
+
+More direct user feedback, on the real build: clicking Abort mid-run
+showed "Aborting... this takes effect at the next checkpoint, not
+instantly" and then simply never finished -- minutes of waiting, no
+effect. Root cause: a single `propagate` command's own
+`ExecuteSimulation()` call ran straight through to its requested target
+in ONE unchunked call, so `should_cancel` (only checked BETWEEN
+top-level commands, per `run()`'s own docstring at the time) had no
+opportunity to fire at all until that one command finished on its own --
+for a mission sequence with one long `propagate` (duration/epoch/event),
+that's the entire run.
+
+Fixed the same way `engine.service.run_live()` already fixes it for the
+non-mission_sequence path: chunk it.
+
+* `_advance_to()` (new) -- runs the simulation from `self._elapsed_ns`
+  to a target time, in one unchunked `ConfigureStopTime()`/
+  `ExecuteSimulation()` pair when `should_cancel is None` (unchanged
+  behavior, zero extra overhead), or in roughly
+  `_PROPAGATE_CANCEL_CHECK_FRAMES` (60, mirroring
+  `engine.service._LIVE_DEFAULT_FRAMES`) pieces otherwise, checking
+  `should_cancel()` after each one and raising `MissionEngineCancelled`
+  if it fires. `_run_propagate`'s `"duration"`/`"epoch"` branches now
+  both call it instead of executing straight to their target.
+* `_run_propagate_event()`'s safety-capped search (periapsis/apoapsis)
+  got the same treatment: chunked when `should_cancel` is set, checking
+  both the registered Basilisk event's own `occurCounter` (so a real
+  periapsis/apoapsis crossing mid-chunk still stops the search exactly
+  as before -- chunking never delays detecting it) and `should_cancel()`
+  after each chunk. Its chunk size is deliberately based on the
+  scenario's own `duration_days`, not `cap_days` (`duration_days *
+  _EVENT_PROPAGATE_SAFETY_MULTIPLIER` -- a rarely-hit upper bound on the
+  search, not a meaningful step size): sizing off `cap_days` would make
+  each chunk roughly `_EVENT_PROPAGATE_SAFETY_MULTIPLIER` (10x) too
+  coarse relative to how soon the event realistically fires in a real
+  mission, right back to the same problem.
+* `run()`'s own docstring updated to describe the new mid-command
+  checkpoint, alongside the existing between-commands one.
+
+**Verification:** two new `tests/test_mission_engine.py` cases
+(`test_should_cancel_checked_mid_single_long_propagate_command`,
+`test_should_cancel_checked_mid_propagate_event_command`) assert a
+cancelled run's partial result is strictly shorter than letting the
+same command finish would have produced -- the actual behavior this bug
+report was about. The existing
+`test_should_cancel_checked_between_while_loop_iterations` and the
+renamed `test_should_cancel_stops_before_the_first_command_and_raises_
+mission_engine_cancelled` (previously named
+"...stops_between_commands..." -- its own duration was short enough
+that it used to complete in a single old-style unchunked call, so
+"between commands" and "before the first command" were the same thing;
+now that a command can itself be chunked, the name says precisely which
+checkpoint it exercises) were reworked to keep testing the
+between-commands/between-iterations checkpoint specifically, now that a
+command can also be interrupted mid-way. **This round has NOT yet been
+re-run against a real Basilisk build** -- only this sandbox's
+Basilisk-free suite (570 passed, 53 skipped, two more than before for
+the two new `requires_basilisk` tests) confirms the plumbing compiles
+and the untouched paths still pass; the chunk-timing arithmetic behind
+the `while`-loop test's exact `commands_executed == 3` expectation, and
+the event test's assumption that its chunk size lands comfortably
+inside one ~90-minute orbital period, are worked out by hand in each
+test's own docstring/comments, not confirmed by actually running them.
 
 ## Repository layout
 
