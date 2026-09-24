@@ -162,10 +162,22 @@ Python ``SysModel`` in this codebase (this module's own
 ``../missionAnalysis``'s ``PowerLoadGate``/``InstrumentEclipseGate``) is
 deliberately kept alive by its caller storing the returned object
 somewhere persistent; this bridge class was the one place that pattern
-was broken. Fixed by attaching every bridge instance to ``viz`` itself
-(``viz._missionstudio_access_indicator_bridges``) and having
-``engine.service`` retain the returned ``viz`` (previously discarded) for
-the ``SimulationService`` instance's lifetime.
+was broken.
+
+First fix attempt -- also broken, caught on the next real run: attaching
+every bridge instance to ``viz`` itself as ``viz._missionstudio_access_
+indicator_bridges``. ``viz`` is a SWIG proxy for a C++ ``VizInterface``,
+and SWIG-generated proxy classes raise (not silently ignore) an attempt
+to set any attribute they don't already know about -- confirmed against
+a real run, which failed immediately with "You tried to add this
+variable: _missionstudio_access_indicator_bridges To this class:
+<...VizInterface ...>" before a single simulation step ran. Fixed for
+real by returning ``access_indicator_bridges`` alongside ``viz`` instead
+of bolting it onto ``viz`` (see :func:`enable_vizard`'s own Returns
+docs) and having ``engine.service`` retain BOTH (previously just
+``viz``, and before that, neither) as plain attributes of its own
+``SimulationService`` instance -- an ordinary Python object with no such
+restriction -- for that instance's lifetime.
 """
 
 from __future__ import annotations
@@ -215,6 +227,15 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
     this run has been added to ``scSim`` and BEFORE ``InitializeSimulation()``
     (matches every ``vizSupport.enableUnityVisualization`` call site in
     this checkout's own examples).
+
+    Returns:
+        ``(viz, access_indicator_bridges)`` -- the ``vizInterface.VizInterface``
+        instance ``vizSupport.enableUnityVisualization()`` built, and the
+        (possibly empty) list of ``_AccessIndicatorBridge`` ``SysModel``
+        instances this function registered on ``scSim``'s task. The
+        caller MUST keep both alive (e.g. as attributes on a
+        long-lived object) for as long as the simulation runs -- see
+        ``access_indicator_bridges``' own comment below for exactly why.
 
     Args:
         sc_objects: every ``spacecraft.Spacecraft`` in this run, in the
@@ -368,10 +389,6 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
     except Exception as exc:  # noqa: BLE001 -- report ANY Vizard setup failure with a specific message
         raise VizardError(f"vizSupport.enableUnityVisualization failed: {exc}") from exc
 
-    # Keep the access-indicator bridges alive for as long as ``viz`` is --
-    # see the comment where access_indicator_bridges is created above.
-    viz._missionstudio_access_indicator_bridges = access_indicator_bridges
-
     # Phase 5: custom CAD models -- purely cosmetic (see this function's
     # docstring), applied after enableUnityVisualization() itself per
     # createCustomModel()'s own docstring ("This method creates a
@@ -424,4 +441,14 @@ def enable_vizard(scSim, task_name: str, sc_objects: List, request: VizardReques
             kwargs["showGenericSensorLabels"] = True
         vizSupport.setInstrumentGuiSetting(viz, spacecraftName=sc_name, **kwargs)
 
-    return viz
+    # Returned alongside viz (not attached to it as an attribute -- viz is
+    # a SWIG proxy for a C++ VizInterface, and SWIG-generated proxy
+    # classes reject assigning any attribute they don't already know
+    # about; this was tried, and every real run of the live-stream path
+    # raised exactly that "You tried to add this variable ... To this
+    # class" error before initialization ever got as far as running a
+    # single step) so the caller (engine.service.SimulationService.build())
+    # can retain both for the instance's lifetime -- see this function's
+    # docstring and access_indicator_bridges' own comment above for why
+    # these specifically need a persistent Python reference at all.
+    return viz, access_indicator_bridges
