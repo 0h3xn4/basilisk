@@ -821,18 +821,28 @@ class SpacecraftListWidget(QWidget):
         self.list_widget = QListWidget()
         layout.addWidget(self.list_widget)
 
+        # Two rows, not one: all 5 buttons in a single QHBoxLayout needed
+        # ~700px to avoid truncating/hiding the last one or two -- more
+        # than this panel reliably gets now that MainWindow's splitter
+        # gives the left pane less width than the right (see that
+        # change's own comment). Row 1 is the everyday list-editing
+        # actions; row 2 is the one-off bulk-generation action.
         button_row = QHBoxLayout()
         self.add_button = QPushButton("Add...")
         self.edit_button = QPushButton("Edit...")
         self.remove_button = QPushButton("Remove")
-        self.generate_constellation_button = QPushButton("Generate Walker constellation...")
         self.new_from_template_button = QPushButton("New from template...")
         button_row.addWidget(self.add_button)
         button_row.addWidget(self.new_from_template_button)
         button_row.addWidget(self.edit_button)
         button_row.addWidget(self.remove_button)
-        button_row.addWidget(self.generate_constellation_button)
         layout.addLayout(button_row)
+
+        second_button_row = QHBoxLayout()
+        self.generate_constellation_button = QPushButton("Generate Walker constellation...")
+        second_button_row.addWidget(self.generate_constellation_button)
+        second_button_row.addStretch(1)
+        layout.addLayout(second_button_row)
 
         self.add_button.clicked.connect(self._on_add)
         self.new_from_template_button.clicked.connect(self._on_new_from_template)

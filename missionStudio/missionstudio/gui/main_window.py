@@ -64,7 +64,14 @@ _FILE_FILTER = "missionStudio scenario (*.json)"
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.resize(1200, 800)
+        # Wider default than before: the scenario form's own natural
+        # content width (~576px, e.g. the "Full attitude (sensors,
+        # actuators, FSW, power)" mode combo) needs a genuinely wide left
+        # pane, and giving the left pane a smaller SHARE of the window
+        # (see the splitter setup below) without also growing the window
+        # itself would starve that content back down to where it needed
+        # its own horizontal scrollbar.
+        self.resize(1400, 850)
 
         self._current_path: Path | None = None
         self._dirty = False
@@ -103,8 +110,15 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.left_tabs)
         splitter.addWidget(self.right_tabs)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        # Left (scenario form/template picker) is narrower than right
+        # (results plots/mission output/kernel status) by design -- an
+        # even 50/50 split left the form looking oversized relative to
+        # what it actually needs, and shortchanged the plots/text on the
+        # right. setSizes() fixes the initial split; the stretch factors
+        # keep that same ~3:5 ratio if the user resizes the window.
+        splitter.setSizes([580, 820])
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
         self.setCentralWidget(splitter)
 
         self._build_menu()

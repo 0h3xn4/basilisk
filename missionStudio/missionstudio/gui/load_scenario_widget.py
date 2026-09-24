@@ -81,8 +81,16 @@ class LoadScenarioWidget(QWidget):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        # No stretch factor: with one, this list claims and keeps every
+        # pixel of extra vertical space the pane has, whether or not it
+        # has enough rows to use it -- 9 short rows in a tall pane left a
+        # few hundred pixels of visibly empty white box. Sized to its own
+        # content instead (see _size_list_to_contents(), called once
+        # populated below), with the leftover space collected in one
+        # addStretch(1) at the very bottom -- ordinary, expected blank
+        # space below a compact form, not an oversized near-empty widget.
         self.list_widget = QListWidget()
-        layout.addWidget(self.list_widget, 1)
+        layout.addWidget(self.list_widget)
 
         self.description_label = QLabel()
         self.description_label.setWordWrap(True)
@@ -99,11 +107,31 @@ class LoadScenarioWidget(QWidget):
         button_row.addWidget(self.browse_button)
         button_row.addStretch(1)
         layout.addLayout(button_row)
+        layout.addStretch(1)
 
         self.list_widget.currentItemChanged.connect(self._on_selection_changed)
         self.list_widget.itemDoubleClicked.connect(lambda _item: self._on_open_template_clicked())
 
         self._populate_templates()
+        self._size_list_to_contents()
+
+    def _size_list_to_contents(self) -> None:
+        count = self.list_widget.count()
+        if count == 0:
+            return
+        row_height = self.list_widget.sizeHintForRow(0)
+        frame = 2 * self.list_widget.frameWidth()
+        # setFixedHeight(), not setMaximumHeight(): QListWidget's own
+        # sizeHint() is a generic Qt default, NOT based on its actual
+        # item count, and the layout's trailing addStretch(1) greedily
+        # claims every pixel beyond whatever sizeHint() this widget
+        # reports (stretch=0 items are pinned at their sizeHint, not
+        # grown toward their maximumHeight, when a sibling stretch item
+        # is competing for the same leftover space) -- so a maximum
+        # alone was silently never reached. +2 rows of slack so the list
+        # doesn't need its own scrollbar for a couple of future additions
+        # to the bundled template set.
+        self.list_widget.setFixedHeight(row_height * (count + 2) + frame)
 
     def _populate_templates(self) -> None:
         if not TEMPLATES_DIR.is_dir():
