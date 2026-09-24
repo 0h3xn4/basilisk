@@ -1265,14 +1265,18 @@ flag.
 
 ## Launching Vizard from the GUI
 
-A **Vizard** tab in `MainWindow.right_tabs` (alongside Results/Mission
-Output/Kernel Status), added in response to a direct request: "when
-clicking on the Vizard tab, I want Vizard to start". Previously the
-only Vizard-related GUI surface was the Run menu's **Vizard...** action
-(`gui/vizard_dialog.py`), which only configures how the *next
-simulation run* feeds an already-running Vizard instance (a playback
-`.bin` file or a live stream) -- nothing anywhere actually started the
-external application itself.
+A **Launch Vizard** action in the Run menu/toolbar starts the external
+Vizard application, added in response to a direct request. Previously
+the only Vizard-related GUI surface was the Run menu's **Vizard...**
+action -- renamed to **Vizard Configuration...** here to keep the two
+apart -- which only configures how the *next simulation run* feeds an
+already-running Vizard instance (a playback `.bin` file or a live
+stream); nothing anywhere actually started the external application
+itself. (An earlier version of this feature added a whole extra
+"Vizard" status tab next to Results/Mission Output/Kernel Status --
+scrapped after user feedback that a plain menu/toolbar action next to
+the existing Vizard Configuration one, not a new persistent tab, was
+what was actually wanted.)
 
 * `gui/vizard_launcher.py` -- Basilisk-free (launching an external
   process needs no Basilisk build) module with `find_vizard_executable()`,
@@ -1290,20 +1294,16 @@ external application itself.
   than shelling out to `open`, which would hand off and exit
   immediately, losing any way to track whether Vizard is still running)
   and returns the live `Popen` handle.
-* `gui/vizard_status_widget.py` -- `VizardStatusWidget`, the tab itself:
-  a status label (running/not-running/not-found), a Launch/Relaunch
-  button, and a "Browse for Vizard..." button for when auto-detection
-  comes up empty (remembers the choice via `remember_vizard_executable()`
-  so it's asked at most once). `ensure_launched()` -- what selecting the
-  tab calls -- is a no-op while Vizard is already running (checked via
-  `Popen.poll() is None`, polled once a second so the button/label
-  recover promptly if the user closes Vizard themselves), so tabbing
-  back and forth never spawns a second instance; the button's own click
-  handler bypasses that guard, since an explicit "Relaunch" click should
-  always actually relaunch.
-* `main_window.py` -- `right_tabs.currentChanged` calls
-  `vizard_status_widget.ensure_launched()` whenever the newly-selected
-  tab is the Vizard one (and is a no-op for every other tab change).
+* `main_window.py` -- a new **Launch Vizard** `QAction`
+  (`self.vizard_launch_action`, distinct from the renamed
+  `self.vizard_action` "Vizard Configuration..."), wired to
+  `on_launch_vizard()`: a no-op while Vizard is already running (checked
+  via `Popen.poll() is None` on `self._vizard_process`, the last handle
+  `launch_vizard()` returned), otherwise looks the executable up via
+  `find_vizard_executable()` and launches it -- falling back to a
+  `QFileDialog` browse prompt (remembered via
+  `remember_vizard_executable()`, so asked at most once) when it can't
+  be found automatically.
 * `app.py` -- gained `app.setOrganizationName("AVSLab")`, needed for
   `QSettings()` (used above with no explicit org/app name) to resolve to
   a stable per-platform settings location.
@@ -1311,16 +1311,16 @@ external application itself.
 **Verification:** `tests/gui/test_vizard_launcher.py` (path search/
 persistence, all real filesystem/`QSettings` I/O redirected into
 `tmp_path` -- never touches the developer machine's real Vizard
-install or settings) and `tests/gui/test_vizard_status_widget.py`
-(status/launch/relaunch/browse behavior, `find_vizard_executable`/
-`launch_vizard` monkeypatched so nothing spawns a real process), plus
-two `test_main_window.py` additions confirming tab-selection launches
-Vizard once and re-selecting the tab doesn't relaunch it. This sandbox
-has no real Vizard binary to launch against, so `launch_vizard()`'s
-actual `subprocess.Popen` call itself (as opposed to its argument
--construction logic, which the macOS-bundle-resolution tests do cover)
-is unverified against the real thing -- worth confirming Vizard
-actually opens on a real machine with Vizard installed.
+install or settings), plus `test_main_window.py` additions covering
+`on_launch_vizard()`'s launch/no-relaunch-while-running/relaunch-after
+-exit/browse-fallback/browse-cancelled/launch-failure paths
+(`find_vizard_executable`/`launch_vizard` monkeypatched so nothing
+spawns a real process). This sandbox has no real Vizard binary to
+launch against, so `launch_vizard()`'s actual `subprocess.Popen` call
+itself (as opposed to its argument-construction logic, which the
+macOS-bundle-resolution tests in `test_vizard_launcher.py` do cover) is
+unverified against the real thing -- worth confirming Vizard actually
+opens on a real machine with Vizard installed.
 
 ## Repository layout
 
@@ -1364,7 +1364,6 @@ missionStudio/
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
       vizard_dialog.py               -- Phase 2: "enable Vizard for the next run" dialog
       vizard_launcher.py             -- find/launch the external Vizard application (no Basilisk needed)
-      vizard_status_widget.py        -- "Vizard" tab: launches Vizard on tab-select, shows running/not-found status
       monte_carlo_editor.py          -- Phase 3: Monte Carlo settings + dispersion list editor
       ground_station_editor.py       -- ground station list + add/edit/remove dialog
       orbit_ic_widget.py             -- classical-elements (true/mean anomaly)/Cartesian/TLE orbit editor
@@ -1395,7 +1394,6 @@ missionStudio/
       test_sensor_actuator_editor.py
       test_vizard_dialog.py
       test_vizard_launcher.py
-      test_vizard_status_widget.py
       test_monte_carlo_editor.py
       test_ground_station_editor.py
       test_constellation_dialog.py   -- Phase 4

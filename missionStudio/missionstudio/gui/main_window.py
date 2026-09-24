@@ -55,7 +55,7 @@ from .results_widget import ResultsWidget
 from .run_worker import MonteCarloWorker, RunWorker
 from .scenario_editor import ScenarioEditorWidget
 from .vizard_dialog import VizardDialog
-from .vizard_status_widget import VizardStatusWidget
+from .vizard_launcher import find_vizard_executable, launch_vizard, remember_vizard_executable
 
 _FILE_FILTER = "missionStudio scenario (*.json)"
 
@@ -69,7 +69,8 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._run_worker: RunWorker | None = None
         self._mc_worker: MonteCarloWorker | None = None
-        self._vizard_request = None  # engine.vizard.VizardRequest, or None -- set via the Run menu's "Vizard..." action
+        self._vizard_request = None  # engine.vizard.VizardRequest, or None -- set via the Run menu's "Vizard Configuration..." action
+        self._vizard_process = None  # subprocess.Popen, or None -- set via the Run menu's "Launch Vizard" action
 
         self.scenario_editor = ScenarioEditorWidget()
         self.scenario_editor.reset_to_default()
@@ -78,20 +79,11 @@ class MainWindow(QMainWindow):
         self.results_widget = ResultsWidget()
         self.mission_output_widget = MissionOutputWidget()
         self.kernel_status_widget = KernelStatusWidget()
-        self.vizard_status_widget = VizardStatusWidget()
 
         self.right_tabs = QTabWidget()
         self.right_tabs.addTab(self.results_widget, "Results")
         self.right_tabs.addTab(self.mission_output_widget, "Mission Output")
         self.right_tabs.addTab(self.kernel_status_widget, "Kernel Status")
-        self.right_tabs.addTab(self.vizard_status_widget, "Vizard")
-        # "click the Vizard tab to have Vizard start" -- launches the
-        # external app if it isn't already running; a no-op re-selection
-        # (e.g. tabbing back to Vizard after checking Results) never
-        # relaunches an already-running instance, only a genuinely closed
-        # one. Fires for every tab change, not just Vizard's, but
-        # ensure_launched() itself is the guard, not this connection.
-        self.right_tabs.currentChanged.connect(self._on_right_tab_changed)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.scenario_editor)
@@ -189,11 +181,23 @@ class MainWindow(QMainWindow):
         run_menu.addAction(check_kernels_action)
         self.check_kernels_action = check_kernels_action
 
-        vizard_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DesktopIcon), "&Vizard...", self)
+        vizard_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_DesktopIcon),
+                                 "Vizard &Configuration...", self)
         vizard_action.setToolTip("Configure Vizard visualization for the next run")
         vizard_action.triggered.connect(self.on_configure_vizard)
         run_menu.addAction(vizard_action)
         self.vizard_action = vizard_action
+
+        # Distinct from "Vizard Configuration..." above (which only
+        # decides how the NEXT run feeds Vizard, e.g. a live stream or a
+        # playback file) -- this one actually starts the separate Vizard
+        # application, so live-stream mode has something to connect to.
+        vizard_launch_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
+                                        "&Launch Vizard", self)
+        vizard_launch_action.setToolTip("Start the external Vizard application")
+        vizard_launch_action.triggered.connect(self.on_launch_vizard)
+        run_menu.addAction(vizard_launch_action)
+        self.vizard_launch_action = vizard_launch_action
 
         monte_carlo_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward),
                                       "Run &Monte Carlo...", self)
@@ -223,6 +227,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.live_plot_action)
         toolbar.addAction(self.monte_carlo_action)
         toolbar.addAction(self.vizard_action)
+        toolbar.addAction(self.vizard_launch_action)
         toolbar.addSeparator()
         toolbar.addAction(self.check_kernels_action)
 
@@ -233,10 +238,6 @@ class MainWindow(QMainWindow):
         run_button = toolbar.widgetForAction(self.run_action)
         if run_button is not None:
             run_button.setObjectName("primaryToolButton")
-
-    def _on_right_tab_changed(self, index: int) -> None:
-        if self.right_tabs.widget(index) is self.vizard_status_widget:
-            self.vizard_status_widget.ensure_launched()
 
     def _update_window_title(self) -> None:
         name = self._current_path.name if self._current_path else "untitled"
@@ -333,7 +334,7 @@ class MainWindow(QMainWindow):
         losing track of it. One run at a time.
         """
         for action in (self.run_action, self.live_plot_action, self.monte_carlo_action, self.vizard_action,
-                       self.check_kernels_action):
+                       self.vizard_launch_action, self.check_kernels_action):
             action.setEnabled(not running)
 
     def _start_busy(self, message: str, determinate: bool = False) -> None:
@@ -380,6 +381,31 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Vizard disabled for the next run.")
             else:
                 self.statusBar().showMessage("Vizard enabled for the next run.")
+
+    def on_launch_vizard(self) -> None:
+        """Starts the external Vizard application -- a no-op if it's
+        already running (checked via ``Popen.poll() is None``, since
+        ``subprocess`` gives no other way to ask). Distinct from
+        :meth:`on_configure_vizard`, which never touches a process at
+        all: it only decides how the NEXT run feeds an instance of
+        Vizard, wherever/however that instance got started.
+        """
+        if self._vizard_process is not None and self._vizard_process.poll() is None:
+            self.statusBar().showMessage("Vizard is already running.")
+            return
+        executable = find_vizard_executable()
+        if executable is None:
+            path_str, _selected_filter = QFileDialog.getOpenFileName(self, "Locate the Vizard application")
+            if not path_str:
+                return
+            executable = Path(path_str)
+            remember_vizard_executable(executable)
+        try:
+            self._vizard_process = launch_vizard(executable)
+        except OSError as exc:
+            QMessageBox.critical(self, "Could not launch Vizard", f"{executable}: {exc}")
+            return
+        self.statusBar().showMessage(f"Launched Vizard ({executable}).")
 
     def on_run(self) -> None:
         try:

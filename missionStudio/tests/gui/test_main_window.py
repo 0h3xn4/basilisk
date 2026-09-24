@@ -469,45 +469,128 @@ def test_run_finished_without_command_summary_shows_results_tab(window):
     assert window.right_tabs.currentWidget() is window.results_widget
 
 
-def test_selecting_vizard_tab_launches_vizard(window, monkeypatch):
-    from missionstudio.gui import vizard_status_widget
+class _FakeVizardProcess:
+    def __init__(self, pid=999):
+        self.pid = pid
+        self._alive = True
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def kill_for_test(self):
+        self._alive = False
+
+
+def test_launch_vizard_starts_it_when_not_running(window, monkeypatch):
+    from pathlib import Path
+
+    from missionstudio.gui import main_window
 
     calls = []
-    monkeypatch.setattr(vizard_status_widget, "find_vizard_executable", lambda: "/fake/Vizard")
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    monkeypatch.setattr(main_window, "launch_vizard", lambda path: calls.append(path) or _FakeVizardProcess())
 
-    class _FakeProcess:
-        pid = 999
+    window.on_launch_vizard()
 
-        def poll(self):
-            return None
-
-    monkeypatch.setattr(vizard_status_widget, "launch_vizard", lambda path: calls.append(path) or _FakeProcess())
-
-    window.right_tabs.setCurrentWidget(window.vizard_status_widget)
-
-    assert calls == ["/fake/Vizard"]
-    assert window.vizard_status_widget.is_running()
+    assert calls == [Path("/fake/Vizard")]
+    assert "Launched Vizard" in window.statusBar().currentMessage()
 
 
-def test_reselecting_vizard_tab_does_not_relaunch(window, monkeypatch):
-    from missionstudio.gui import vizard_status_widget
+def test_launch_vizard_does_not_relaunch_while_already_running(window, monkeypatch):
+    """The exact behavior the "Launch Vizard" action depends on: clicking
+    it again while Vizard is still open must not spawn a second instance.
+    """
+    from pathlib import Path
+
+    from missionstudio.gui import main_window
 
     calls = []
-    monkeypatch.setattr(vizard_status_widget, "find_vizard_executable", lambda: "/fake/Vizard")
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    monkeypatch.setattr(main_window, "launch_vizard", lambda path: calls.append(path) or _FakeVizardProcess())
 
-    class _FakeProcess:
-        pid = 999
-
-        def poll(self):
-            return None
-
-    monkeypatch.setattr(vizard_status_widget, "launch_vizard", lambda path: calls.append(path) or _FakeProcess())
-
-    window.right_tabs.setCurrentWidget(window.vizard_status_widget)
-    window.right_tabs.setCurrentWidget(window.results_widget)
-    window.right_tabs.setCurrentWidget(window.vizard_status_widget)
+    window.on_launch_vizard()
+    window.on_launch_vizard()
+    window.on_launch_vizard()
 
     assert len(calls) == 1
+    assert "already running" in window.statusBar().currentMessage().lower()
+
+
+def test_launch_vizard_relaunches_after_the_process_exits(window, monkeypatch):
+    from pathlib import Path
+
+    from missionstudio.gui import main_window
+
+    processes = [_FakeVizardProcess(pid=111), _FakeVizardProcess(pid=222)]
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+    monkeypatch.setattr(main_window, "launch_vizard", lambda path: processes.pop(0))
+
+    window.on_launch_vizard()
+    first = window._vizard_process
+    first.kill_for_test()
+
+    window.on_launch_vizard()
+    assert window._vizard_process.pid == 222
+
+
+def test_launch_vizard_not_found_falls_back_to_browse(window, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    from pathlib import Path
+
+    from missionstudio.gui import main_window
+
+    picked = Path("/picked/Vizard")
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(picked), "")))
+    remembered = []
+    monkeypatch.setattr(main_window, "remember_vizard_executable", lambda path: remembered.append(path))
+    monkeypatch.setattr(main_window, "launch_vizard", lambda path: _FakeVizardProcess())
+
+    window.on_launch_vizard()
+
+    assert remembered == [picked]
+    assert window._vizard_process is not None
+
+
+def test_launch_vizard_not_found_and_browse_cancelled_does_nothing(window, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    from pathlib import Path
+
+    from missionstudio.gui import main_window
+
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    launch_calls = []
+    monkeypatch.setattr(main_window, "launch_vizard", lambda path: launch_calls.append(path))
+
+    window.on_launch_vizard()
+
+    assert launch_calls == []
+    assert window._vizard_process is None
+
+
+def test_launch_vizard_failure_shows_error(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from pathlib import Path
+
+    from missionstudio.gui import main_window
+
+    monkeypatch.setattr(main_window, "find_vizard_executable", lambda: Path("/fake/Vizard"))
+
+    def raise_oserror(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(main_window, "launch_vizard", raise_oserror)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
+
+    window.on_launch_vizard()
+
+    assert len(critical_calls) == 1
+    assert window._vizard_process is None
 
 
 def test_close_with_no_unsaved_changes_does_not_prompt(window, monkeypatch):
