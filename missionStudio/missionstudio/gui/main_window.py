@@ -55,6 +55,7 @@ from .results_widget import ResultsWidget
 from .run_worker import MonteCarloWorker, RunWorker
 from .scenario_editor import ScenarioEditorWidget
 from .vizard_dialog import VizardDialog
+from .vizard_status_widget import VizardStatusWidget
 
 _FILE_FILTER = "missionStudio scenario (*.json)"
 
@@ -77,11 +78,20 @@ class MainWindow(QMainWindow):
         self.results_widget = ResultsWidget()
         self.mission_output_widget = MissionOutputWidget()
         self.kernel_status_widget = KernelStatusWidget()
+        self.vizard_status_widget = VizardStatusWidget()
 
         self.right_tabs = QTabWidget()
         self.right_tabs.addTab(self.results_widget, "Results")
         self.right_tabs.addTab(self.mission_output_widget, "Mission Output")
         self.right_tabs.addTab(self.kernel_status_widget, "Kernel Status")
+        self.right_tabs.addTab(self.vizard_status_widget, "Vizard")
+        # "click the Vizard tab to have Vizard start" -- launches the
+        # external app if it isn't already running; a no-op re-selection
+        # (e.g. tabbing back to Vizard after checking Results) never
+        # relaunches an already-running instance, only a genuinely closed
+        # one. Fires for every tab change, not just Vizard's, but
+        # ensure_launched() itself is the guard, not this connection.
+        self.right_tabs.currentChanged.connect(self._on_right_tab_changed)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.scenario_editor)
@@ -223,6 +233,10 @@ class MainWindow(QMainWindow):
         run_button = toolbar.widgetForAction(self.run_action)
         if run_button is not None:
             run_button.setObjectName("primaryToolButton")
+
+    def _on_right_tab_changed(self, index: int) -> None:
+        if self.right_tabs.widget(index) is self.vizard_status_widget:
+            self.vizard_status_widget.ensure_launched()
 
     def _update_window_title(self) -> None:
         name = self._current_path.name if self._current_path else "untitled"

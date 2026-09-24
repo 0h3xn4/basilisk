@@ -469,6 +469,47 @@ def test_run_finished_without_command_summary_shows_results_tab(window):
     assert window.right_tabs.currentWidget() is window.results_widget
 
 
+def test_selecting_vizard_tab_launches_vizard(window, monkeypatch):
+    from missionstudio.gui import vizard_status_widget
+
+    calls = []
+    monkeypatch.setattr(vizard_status_widget, "find_vizard_executable", lambda: "/fake/Vizard")
+
+    class _FakeProcess:
+        pid = 999
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(vizard_status_widget, "launch_vizard", lambda path: calls.append(path) or _FakeProcess())
+
+    window.right_tabs.setCurrentWidget(window.vizard_status_widget)
+
+    assert calls == ["/fake/Vizard"]
+    assert window.vizard_status_widget.is_running()
+
+
+def test_reselecting_vizard_tab_does_not_relaunch(window, monkeypatch):
+    from missionstudio.gui import vizard_status_widget
+
+    calls = []
+    monkeypatch.setattr(vizard_status_widget, "find_vizard_executable", lambda: "/fake/Vizard")
+
+    class _FakeProcess:
+        pid = 999
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(vizard_status_widget, "launch_vizard", lambda path: calls.append(path) or _FakeProcess())
+
+    window.right_tabs.setCurrentWidget(window.vizard_status_widget)
+    window.right_tabs.setCurrentWidget(window.results_widget)
+    window.right_tabs.setCurrentWidget(window.vizard_status_widget)
+
+    assert len(calls) == 1
+
+
 def test_close_with_no_unsaved_changes_does_not_prompt(window, monkeypatch):
     from PySide6.QtGui import QCloseEvent
     from PySide6.QtWidgets import QMessageBox
