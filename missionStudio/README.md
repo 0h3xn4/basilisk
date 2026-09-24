@@ -2425,8 +2425,44 @@ logic, not the shared mechanism -- narrowing to the altitude-smoothing/
 thruster-arbitration/eclipse-gating code neither shares with
 `ConstantFrameThrustController`.
 
-Not yet confirmed either way -- this depends entirely on the user running
-this second diagnostic scenario and sharing the result.
+**Result, confirmed by the user: this diagnostic ALSO ran the full 7 days
+with no crash.** Rules out the shared mass-bookkeeping mechanism -- the
+trigger is specifically in `StationKeepingController`'s and/or
+`PhasingKeepingController`'s own extra logic (eclipse-gating,
+altitude/error-smoothing history, or the two-controllers-sharing-one
+-thruster arbitration), none of which `ConstantFrameThrustController`
+has.
+
+## Third diagnostic: station-keeping alone, no sharing with a second controller
+
+One structural difference between the two clean diagnostics and the real
+crash stands out: template '05' has TWO controllers
+(`StationKeepingController` + `PhasingKeepingController`) sharing ONE
+`ExtForceTorque` effector and one propellant tank, with explicit
+thruster-arbitration logic (`thrusterHeldByAltCtrl`) deciding which one's
+`extForce_N` write wins each tick -- neither of the two clean diagnostics
+tested that sharing at all (constant_thrust is the only controller on its
+spacecraft). Comparing `build_station_keeping()`/`build_constant_thrust()`
+directly shows their `ExtForceTorque` wiring is otherwise structurally
+identical (same `addDynamicEffector`/`AddModelToTask` pattern, no
+priority difference) -- ruling out a wiring bug as the remaining
+explanation.
+
+New `missionstudio/scenarios/diagnostic_05c_station_keeping_only.json`
+isolates the sharing question directly: identical to the real template
+except `phasing_keeping` is removed from follower-1 entirely --
+`station_keeping` alone, with its own eclipse-gating and
+altitude-smoothing history intact, but no second controller and no
+thruster arbitration.
+
+**If this crashes**, the trigger is in `station_keeping`'s own logic
+(eclipse-gating and/or altitude-smoothing), independent of any sharing.
+**If it does NOT crash**, that implicates the two-controllers-sharing-one
+-effector/arbitration mechanism specifically -- something about
+`phasing_keeping` being present and sharing `station_keeping`'s effector,
+not either controller's logic in isolation.
+
+Not yet confirmed -- depends on the user running this third diagnostic.
 
 ## Repository layout
 
