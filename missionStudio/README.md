@@ -1838,9 +1838,21 @@ station-keeping, zero-velocity) state, call `UpdateState()` directly,
 and confirm it returns cleanly with zero commanded thrust instead of
 reaching `rv2elem()` -- plus one confirming the guard doesn't change
 behavior for the ordinary finite-state path. 590 passed, 60 skipped in
-this sandbox (four more skipped, matching the four new tests). Not
-independently confirmed against the user's own real Basilisk build yet
--- next step is asking them to retry template '05'.
+this sandbox (four more skipped, matching the four new tests).
+
+**Confirmed for real** on the user's own Basilisk build: the fix itself
+worked first try -- `UpdateState()` returned cleanly with no crash on
+every non-finite/degenerate-state test, exactly as designed. Three of
+the four new tests still failed, but only on an assertion detail: a
+real `ExtForceTorque`'s `extForce_N` reads back as a nested `[[0.0],
+[0.0], [0.0]]` column-vector shape, not the flat `[0.0, 0.0, 0.0]` list
+these tests assumed -- fixed with a small `_flat()` helper. That same
+real run also re-confirmed every other fix from this session still
+holds: both sun-ephemeris-validation directions, all four
+`should_cancel` checkpoints, `run_live` cancellation, the toolbar split,
+and templates '05'/'06'/'07' all loading/validating/round-tripping
+cleanly (639 passed, 8 skipped, only the three assertion-shape failures
+above, now fixed).
 
 ## A toolbar action invisible on one real platform
 
