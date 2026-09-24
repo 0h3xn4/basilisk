@@ -1247,14 +1247,21 @@ calling `MissionEngine` directly.
 **Verification:** every new/changed GUI file above has direct
 `pytest-qt` coverage in `tests/gui/` (`test_mission_sequence_editor.py`,
 `test_mission_output_widget.py`, plus additions to
-`test_scenario_editor.py`/`test_main_window.py`) -- the full suite
-(461 passed, 45 skipped in this Basilisk-free sandbox) only grows,
-matching every earlier Phase 6 stage's own discipline. This stage has
-NOT yet been exercised against a real Basilisk build by actually
-drawing a `mission_sequence` in the GUI and clicking Run -- every prior
-Phase 6 stage (the execution engine especially) turned up real bugs
-that only reproduced against an actual Basilisk install, so treat this
-GUI wiring the same way until it's been run for real.
+`test_scenario_editor.py`/`test_main_window.py`). Confirmed against a
+real Basilisk build (`pytest tests/ -v`): **501 passed, 8 skipped** --
+the 8 skips are exclusively the "Basilisk is not installed" error
+-path tests, which correctly skip once Basilisk *is* installed; every
+other test in the suite ran for real, including all 23
+`test_mission_engine.py` tests and this stage's own GUI tests. One
+thing that pass doesn't cover: `test_main_window.py`'s
+mission-sequence-dispatch tests monkeypatch `RunWorker.start` to avoid
+spinning up a real thread, so no automated test yet drives a genuine
+GUI click-through (build a `mission_sequence` in the running app,
+click Run, watch the "Mission Output" tab populate from a live
+`RunWorker` thread executing `MissionEngine.run()`) -- worth doing
+once, since every prior Phase 6 stage turned up real bugs only
+reachable that way, but no longer the open question this note used to
+flag.
 
 ## Repository layout
 
