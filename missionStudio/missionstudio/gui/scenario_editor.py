@@ -52,6 +52,7 @@ from ..schema.scenario import (
     SpaceWeatherConfig,
 )
 from .ground_station_editor import GroundStationListWidget
+from .mission_sequence_editor import MissionSequenceEditorWidget
 from .monte_carlo_editor import MonteCarloGroupWidget
 from .spacecraft_editor import SpacecraftListWidget
 
@@ -81,6 +82,7 @@ class ScenarioEditorWidget(QWidget):
         layout.addWidget(self._build_propagation_group())
         layout.addWidget(self._build_spacecraft_group())
         layout.addWidget(self._build_ground_station_group())
+        layout.addWidget(self._build_mission_sequence_group())
         layout.addWidget(self._build_monte_carlo_group())
         layout.addStretch(1)
 
@@ -207,6 +209,17 @@ class ScenarioEditorWidget(QWidget):
         layout.addWidget(self.ground_station_list)
         return group
 
+    def _build_mission_sequence_group(self) -> QGroupBox:
+        group = QGroupBox("Mission sequence")
+        layout = QVBoxLayout(group)
+        self.mission_sequence_editor = MissionSequenceEditorWidget()
+        self.mission_sequence_editor.set_spacecraft_names_provider(
+            lambda: [sc.name for sc in self.spacecraft_list.to_list()]
+        )
+        self.mission_sequence_editor.changed.connect(self.changed)
+        layout.addWidget(self.mission_sequence_editor)
+        return group
+
     def _build_monte_carlo_group(self) -> MonteCarloGroupWidget:
         self.monte_carlo_group = MonteCarloGroupWidget()
         self.monte_carlo_group.changed.connect(self.changed)
@@ -233,6 +246,7 @@ class ScenarioEditorWidget(QWidget):
             spacecraft=self.spacecraft_list.to_list(),
             ground_stations=self.ground_station_list.to_list(),
             monte_carlo=self.monte_carlo_group.to_dataclass(),
+            mission_sequence=self.mission_sequence_editor.to_command_list(),
         )
         scenario.validate()
         return scenario
@@ -254,6 +268,7 @@ class ScenarioEditorWidget(QWidget):
         self.ground_station_list.from_list(scenario.ground_stations)
         self._refresh_monte_carlo_spacecraft_names()
         self.monte_carlo_group.from_dataclass(scenario.monte_carlo)
+        self.mission_sequence_editor.from_command_list(scenario.mission_sequence)
 
         self.revalidate()
 

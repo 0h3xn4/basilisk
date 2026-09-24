@@ -423,6 +423,52 @@ def test_run_monte_carlo_cancel_dialog_does_not_start_worker(window, monkeypatch
     assert window._mc_worker is None
 
 
+def test_run_with_mission_sequence_ignores_live_flag_and_shows_mission_output(window, monkeypatch):
+    from missionstudio.gui.run_worker import RunWorker
+    from missionstudio.schema.command import Command
+
+    _add_valid_spacecraft(window)
+    window.scenario_editor.mission_sequence_editor.from_command_list([
+        Command(kind="script_block", params={"code": "pass"}),
+    ])
+    window.scenario_editor.changed.emit()
+
+    captured = {}
+    original_init = RunWorker.__init__
+
+    def spy_init(self, scenario, vizard_request=None, live=False, parent=None):
+        captured["live"] = live
+        original_init(self, scenario, vizard_request=vizard_request, live=live, parent=parent)
+
+    monkeypatch.setattr(RunWorker, "__init__", spy_init)
+    monkeypatch.setattr(RunWorker, "start", lambda self: None)
+
+    window.live_plot_action.setChecked(True)
+    window.on_run()
+
+    # MissionEngine has no run_live() equivalent (see RunWorker.run()) --
+    # a mission_sequence run always ignores the live-plot toggle.
+    assert captured["live"] is False
+
+
+def test_run_finished_with_command_summary_shows_mission_output_tab(window):
+    from missionstudio.engine.results import CommandSummary, ReportEntry, ResultSet
+
+    summary = CommandSummary(reports=[ReportEntry(label="x", t_s=1.0, values={})], commands_executed=1)
+    window._on_run_finished(ResultSet(scenario_name="test", series={}), summary)
+
+    assert window.right_tabs.currentWidget() is window.mission_output_widget
+    assert "1 command(s) executed" in window.mission_output_widget.text_edit.toPlainText()
+
+
+def test_run_finished_without_command_summary_shows_results_tab(window):
+    from missionstudio.engine.results import ResultSet
+
+    window.right_tabs.setCurrentWidget(window.kernel_status_widget)
+    window._on_run_finished(ResultSet(scenario_name="test", series={}))
+    assert window.right_tabs.currentWidget() is window.results_widget
+
+
 def test_close_with_no_unsaved_changes_does_not_prompt(window, monkeypatch):
     from PySide6.QtGui import QCloseEvent
     from PySide6.QtWidgets import QMessageBox

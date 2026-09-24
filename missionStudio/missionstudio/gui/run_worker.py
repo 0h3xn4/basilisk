@@ -24,6 +24,14 @@ Basilisk build; when it's missing, each worker reports that clearly via
 its own ``failed`` signal -- there is only one error-reporting path for
 the caller (``MainWindow``) to handle per worker, whether the problem is
 "no Basilisk", a bad scenario, or a Basilisk-internal error.
+
+``RunWorker.run()`` dispatches on ``scenario.mission_sequence`` exactly
+like ``cli.py``'s ``cmd_run()`` does: a non-empty sequence runs through
+``engine.mission_engine.MissionEngine`` instead of
+``SimulationService.run()``/``run_live()`` directly, and ``finished_ok``
+always carries both the :class:`engine.results.ResultSet` and (when a
+``mission_sequence`` ran) its :class:`engine.results.CommandSummary`, or
+``None`` for the summary otherwise.
 """
 
 from __future__ import annotations
@@ -37,7 +45,7 @@ from ..schema.scenario import MonteCarloConfig, Scenario
 
 
 class RunWorker(QThread):
-    finished_ok = Signal(object)  # engine.results.ResultSet
+    finished_ok = Signal(object, object)  # engine.results.ResultSet, Optional[engine.results.CommandSummary]
     failed = Signal(str)
     progress = Signal(object, float)  # engine.results.ResultSet (partial), fraction_complete in [0, 1]
 
@@ -48,10 +56,15 @@ class RunWorker(QThread):
         # When True, runs via SimulationService.run_live() instead of
         # run(), emitting `progress` after each chunk so a connected
         # ResultsWidget can redraw as the simulation goes -- see
-        # MainWindow.on_run()/the "Live plot" toggle. Qt signals emitted
-        # from a QThread are queued to the receiver's own thread
-        # automatically (the default AutoConnection), so this is safe to
-        # connect straight to GUI-thread slots without extra locking.
+        # MainWindow.on_run()/the "Live plot" toggle. Ignored when
+        # scenario.mission_sequence is non-empty: engine.mission_engine.
+        # MissionEngine.run() has no run_live() equivalent (it has no
+        # per-command progress callback to drive one), same as cli.py's
+        # cmd_run() dispatch never offers a live mode for a mission
+        # sequence either. Qt signals emitted from a QThread are queued to
+        # the receiver's own thread automatically (the default
+        # AutoConnection), so this is safe to connect straight to
+        # GUI-thread slots without extra locking.
         self.live = live
 
     def run(self) -> None:
@@ -65,14 +78,19 @@ class RunWorker(QThread):
             return
         try:
             service = SimulationService(self.scenario, vizard_request=self.vizard_request)
-            if self.live:
+            command_summary = None
+            if self.scenario.mission_sequence:
+                from ..engine.mission_engine import MissionEngine
+
+                result, command_summary = MissionEngine(self.scenario, service=service).run()
+            elif self.live:
                 result = service.run_live(lambda partial, fraction: self.progress.emit(partial, fraction))
             else:
                 result = service.run()
         except Exception as exc:  # noqa: BLE001 -- surface ANY failure to the GUI, never crash the worker silently
             self.failed.emit(str(exc))
             return
-        self.finished_ok.emit(result)
+        self.finished_ok.emit(result, command_summary)
 
 
 class MonteCarloWorker(QThread):

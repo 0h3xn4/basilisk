@@ -188,3 +188,42 @@ def test_reset_to_default_clears_spacecraft(widget):
     assert len(widget.spacecraft_list.to_list()) == 1
     widget.reset_to_default()
     assert widget.spacecraft_list.to_list() == []
+
+
+def test_mission_sequence_round_trips(widget):
+    from missionstudio.schema.command import Command
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    widget.spacecraft_list.from_list([
+        SpacecraftConfig(name="sat-1", orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0],
+                                                       velocity_km_s=[0, 7.5, 0]))
+    ])
+    widget.mission_sequence_editor.from_command_list([
+        Command(kind="propagate", label="coast", params={"stop_condition": "duration", "duration_days": 1.0}),
+    ])
+
+    got = widget.to_scenario()
+    assert len(got.mission_sequence) == 1
+    assert got.mission_sequence[0].label == "coast"
+
+
+def test_mission_sequence_spacecraft_provider_tracks_spacecraft_list(widget):
+    from missionstudio.schema.scenario import OrbitIC, SpacecraftConfig
+
+    assert widget.mission_sequence_editor._spacecraft_names() == []
+    widget.spacecraft_list.from_list([
+        SpacecraftConfig(name="sat-1", orbit=OrbitIC(type="cartesian", position_km=[7000, 0, 0],
+                                                       velocity_km_s=[0, 7.5, 0])),
+    ])
+    assert widget.mission_sequence_editor._spacecraft_names() == ["sat-1"]
+
+
+def test_reset_to_default_clears_mission_sequence(widget):
+    from missionstudio.schema.command import Command
+
+    widget.mission_sequence_editor.from_command_list([
+        Command(kind="script_block", params={"code": "pass"}),
+    ])
+    assert len(widget.mission_sequence_editor.to_command_list()) == 1
+    widget.reset_to_default()
+    assert widget.mission_sequence_editor.to_command_list() == []

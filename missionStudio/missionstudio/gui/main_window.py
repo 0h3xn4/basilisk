@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
 from .kernel_status_widget import KernelStatusWidget
+from .mission_output_widget import MissionOutputWidget
 from .results_widget import ResultsWidget
 from .run_worker import MonteCarloWorker, RunWorker
 from .scenario_editor import ScenarioEditorWidget
@@ -74,10 +75,12 @@ class MainWindow(QMainWindow):
         self.scenario_editor.changed.connect(self._mark_dirty)
 
         self.results_widget = ResultsWidget()
+        self.mission_output_widget = MissionOutputWidget()
         self.kernel_status_widget = KernelStatusWidget()
 
         self.right_tabs = QTabWidget()
         self.right_tabs.addTab(self.results_widget, "Results")
+        self.right_tabs.addTab(self.mission_output_widget, "Mission Output")
         self.right_tabs.addTab(self.kernel_status_widget, "Kernel Status")
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -256,6 +259,7 @@ class MainWindow(QMainWindow):
         self.scenario_editor.reset_to_default()
         self._current_path = None
         self.results_widget.set_result(None)
+        self.mission_output_widget.clear()
         self._mark_clean()
         self.statusBar().showMessage("New scenario.")
 
@@ -276,6 +280,7 @@ class MainWindow(QMainWindow):
         self.scenario_editor.from_scenario(scenario)
         self._current_path = path
         self.results_widget.set_result(None)
+        self.mission_output_widget.clear()
         self._mark_clean()
         self.statusBar().showMessage(f"Opened {path}")
 
@@ -369,7 +374,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Cannot run invalid scenario", str(exc))
             return
 
-        live = self.live_plot_action.isChecked()
+        # engine.mission_engine.MissionEngine (used when scenario.
+        # mission_sequence is non-empty) has no run_live() equivalent --
+        # see RunWorker.run()'s docstring -- so live plotting only applies
+        # when there's no mission sequence to execute instead.
+        live = self.live_plot_action.isChecked() and not scenario.mission_sequence
         self._start_busy(f"Running {scenario.name}...", determinate=live)
         if live:
             # Clear any previous run's plot rather than leaving it up
@@ -378,6 +387,7 @@ class MainWindow(QMainWindow):
             # actually does.
             self.results_widget.set_result(None)
             self.right_tabs.setCurrentWidget(self.results_widget)
+        self.mission_output_widget.clear()
         self._run_worker = RunWorker(scenario, vizard_request=self._vizard_request, live=live)
         self._run_worker.progress.connect(self._on_run_progress)
         self._run_worker.finished_ok.connect(self._on_run_finished)
@@ -388,7 +398,7 @@ class MainWindow(QMainWindow):
         self.results_widget.set_live_result(partial_result)
         self._busy_progress.setValue(int(round(fraction * 100)))
 
-    def _on_run_finished(self, result) -> None:
+    def _on_run_finished(self, result, command_summary=None) -> None:
         self._stop_busy(f"Run complete: {len(result.series)} result series.")
         # set_live_result(), not set_result(): a live run's final chunk and
         # its "finished" result always share the same series names, so
@@ -400,7 +410,11 @@ class MainWindow(QMainWindow):
         # a non-live run: set_live_result() still rebuilds normally
         # whenever the series set differs from whatever was shown before.
         self.results_widget.set_live_result(result)
-        self.right_tabs.setCurrentWidget(self.results_widget)
+        if command_summary is not None:
+            self.mission_output_widget.set_command_summary(command_summary)
+            self.right_tabs.setCurrentWidget(self.mission_output_widget)
+        else:
+            self.right_tabs.setCurrentWidget(self.results_widget)
 
     def _on_run_failed(self, message: str) -> None:
         self._stop_busy("Run failed.")

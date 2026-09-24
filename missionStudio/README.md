@@ -928,7 +928,7 @@ Driven directly by feedback from actually using the Phase 4 GUI + engine
     through instead of raising the same clear error every other malformed
     `schema_version` value gets.
 
-## What Phase 6 (Mission Sequence architecture) adds -- in progress
+## What Phase 6 (Mission Sequence architecture) adds -- landed
 
 A GMAT/FreeFlyer-inspired **Resources / Mission Sequence / Output**
 organization, requested directly: separate "what exists" (spacecraft,
@@ -1025,15 +1025,236 @@ passed/22 skipped before -- the 22 skips are unrelated, pre-existing
 `requires_basilisk` tests; zero regressions, zero new skips, since this
 stage adds no Basilisk-dependent code).
 
-**Not yet landed (this phase's remaining stages):** the execution engine
-(`engine.mission_engine`, walking `mission_sequence` against a real
-`SimulationService`, verified against `examples/scenarioOrbitManeuver.py`
--- an official Basilisk example doing exactly this -- and this checkout's
-own `hubEffector`/`spacecraft` C++ source before any of it was written,
-per this project's "no guessing about a Basilisk API" discipline); Command
-Summary capture; the GUI (Resources/Mission/Output dock panels, script
-editor, debug console) -- see this file's own design-discussion notes for
-the detailed staged plan.
+**Execution engine (`engine/mission_engine.py`) -- landed:**
+
+* `MissionEngine(scenario, service=None).run() -> (ResultSet, CommandSummary)`
+  walks `scenario.mission_sequence` against a real `SimulationService`,
+  dispatching each `Command` by `kind`. Every Basilisk call sequence is
+  copied from an actually-running official example or this checkout's own
+  source, not written from memory (see the module's own docstring for the
+  full citation list) -- most notably:
+  * `propagate` (duration/epoch): repeated `ConfigureStopTime()`/
+    `ExecuteSimulation()` pairs, `ConfigureStopTime()` taking an ABSOLUTE
+    cumulative time (not a delta) -- `examples/scenarioOrbitManeuver.py`'s
+    own comment on this, and already exercised by this project's own
+    `SimulationService.run_live()`/`tests/test_service_run_live.py`.
+  * `propagate` (event -- periapsis/apoapsis): Basilisk's native
+    `SimBaseClass.createNewEvent(name, eventRate, eventActive,
+    conditionFunction=..., terminal=True)`, copied from
+    `examples/scenarioDragDeorbit.py`'s own terminal-event block. Detected
+    as a sign change in radial velocity (`dot(r, v) / |r|`) rather than
+    reconstructing true anomaly every check, capped by a generous
+    duration-based safety multiplier so a trajectory that never reaches
+    the event raises a clear `MissionEngineError` instead of hanging.
+  * `maneuver` (impulsive delta-V, inertial/VNB/RTN): `scObject.dynManager.
+    getStateObject(scObject.hub.nameOfHubPosition/nameOfHubVelocity)`
+    fetched once, `simHelpers.EigenVector3d2np(velRef.getState())` to read
+    the current velocity, plain numpy arithmetic (VNB/RTN via
+    `engine.orbit_maintenance`'s already-tested `_vnb_basis`/`_rtn_basis`),
+    `velRef.setState(...)` to apply it -- the exact pattern
+    `examples/scenarioOrbitManeuver.py` itself uses for its two maneuvers.
+* `assignment`/`report`/`if`/`while`/`script_block` have no Basilisk-API
+  precedent -- this project's own design, deliberately narrow: `assignment`
+  only varies a small, hand-listed whitelist of live controller parameters
+  (`thrust_n`/`isp_s` on `station_keeping`/`phasing_keeping`/
+  `constant_thrust`), not generic attribute access; `report` snapshots the
+  CURRENT value of requested series (GMAT `Report`-command semantics, not
+  the whole time history the `ResultSet` already carries) into
+  `CommandSummary.reports`; `if`/`while` conditions and `script_block` code
+  run against a small, explicit namespace (`t_s`, `spacecraft[name].
+  {r_BN_N, v_BN_N, altitude_m, mass_kg}`) -- `script_block` runs full,
+  unrestricted Python (a deliberate trust boundary matching GMAT/FreeFlyer's
+  own script commands and this checkout's own `examples/` scripts: only run
+  a mission file you trust). `while` has a 10,000-iteration safety cap so a
+  condition that never becomes false fails fast with a clear error rather
+  than hanging.
+* Every command failure raises `MissionEngineError` naming the specific
+  command's path (e.g. `"mission_sequence[2].children[0] (maneuver): ..."`)
+  and kind, never a bare exception from inside Basilisk/`eval`/`exec`.
+
+**Verification:** 23 tests (`tests/test_mission_engine.py`,
+`requires_basilisk`-marked like every other `engine.*` test -- this layer
+imports `engine.service`, which itself needs Basilisk at import time), and
+this is the first Phase 6 stage actually RUN against a real Basilisk
+build (by the user, who has a working install this project's own sandbox
+doesn't) rather than only written against verified-but-unexecuted call
+sequences. All 23 pass now, but only after three real bugs the first
+real run surfaced and this project's own "no guessing" discipline caught
+by actually checking rather than assuming:
+
+* `TimeSeries` crashed on a genuinely zero-sample recorder: a
+  `mission_sequence` with no `propagate` command never calls
+  `ExecuteSimulation()`, and Basilisk's own recorder accessor returns a
+  bare 1-D array (losing the column count) rather than an `(0, ncols)`
+  array when nothing was ever logged. Fixed in `engine/results.py`.
+* Chaining each `propagate` command's absolute `ConfigureStopTime()`
+  target off `scSim.TotalSim.CurrentNanos` read back after the previous
+  command compounds rounding loss across segments whenever a requested
+  duration isn't an exact multiple of `dynamics_task_rate_s` -- confirmed
+  directly against `sim_model.cpp`: `CurrentNanos` is set to
+  `NextTaskTime`, i.e. it snaps DOWN to the last task-grid point at or
+  before the actual stop time. Three real chained `propagate` commands
+  ended up 20 s short of one equivalent single `propagate`. Fixed by
+  tracking the cumulative REQUESTED mission time in a separate counter,
+  decoupled from the sim's own grid-snapped clock (`propagate`'s `event`
+  stop condition is the one exception: it re-syncs to the actual,
+  inherently grid-snapped firing time instead, since there's no
+  requested target to track there).
+* `propagate`'s `event` stop condition checked `scSim.terminate` after
+  `ExecuteSimulation()` to tell whether the event fired, always reading
+  `False` and raising a bogus "did not occur" error -- confirmed directly
+  against `SimulationBaseClass.py` (and with a live diagnostic against a
+  real Basilisk build) that `ExecuteSimulation()` unconditionally resets
+  `self.terminate = False` as its own last statement before returning,
+  whether the loop broke early on a terminal event or ran to completion,
+  so that flag can never answer "did a terminal event fire" after the
+  fact. The event mechanism itself was correct the whole time (confirmed
+  by the same diagnostic: the sim genuinely stopped at the exact
+  periapsis crossing, `CurrentNanos` matching the analytically-predicted
+  orbital period to the second). Fixed by checking the fired event's own
+  `occurCounter` via `scSim.eventMap[event_name]` instead.
+
+A fourth finding was a wrong test assumption, not an engine bug:
+`InitializeSimulation()` alone produces ZERO recorder samples (a
+recorder only gets one once `ExecuteSimulation()` has actually ticked),
+not one as originally assumed -- `_run_report` now raises a specific
+`MissionEngineError` naming which series have no samples yet (a
+`report` before any `propagate` has run) instead of a bare `IndexError`.
+
+Test coverage itself: multi-segment `propagate` accumulating rather than
+restarting (matches a single equivalent-duration `run()` bit-for-bit),
+`epoch`/`event` stop conditions, both maneuver frames (checked against
+the LIVE state object directly, not the recorder, since a maneuver alone
+doesn't trigger a new `scStateOutMsg` write), `assignment` mutating a
+live controller, `report` snapshotting the value AT that mission time
+(not the final one), `if`/`while` (including nested, including the
+iteration-cap safety net), `script_block` (including exception
+wrapping), and clear-error cases for every "names something that doesn't
+exist" case.
+
+**File-format/CLI sync (`cli.py`, `engine/results.py`) -- landed:**
+
+The mission-sequence JSON round-trip itself was already complete as of
+the data-model stage (`Command` is a plain dataclass, so it falls out of
+`Scenario.to_dict()`/`from_dict()` for free -- see that stage's own
+notes). What was still missing was a way to actually RUN a
+`mission_sequence` outside of a Python script calling `MissionEngine`
+directly (the tests, in other words) -- there was no CLI or GUI path to
+it at all. Since the GUI doesn't exist yet (Phase 6's last stage), this
+stage closes that gap on the CLI side, the same "headless-first" order
+the rest of this project has followed:
+
+* `missionstudio run` now dispatches on `scenario.mission_sequence`: a
+  non-empty one is executed via `MissionEngine` instead of a single
+  `SimulationService.run()` call. An empty one (still the default)
+  behaves exactly as before -- zero change for every existing scenario
+  file, matching this whole phase's additive design.
+* `engine.results.CommandSummary.export_csv()`: a Command Summary needs a
+  file-format story too, not just an in-memory dataclass -- writes one
+  CSV per run, long format (`report_index, t_s, label, series, component,
+  value`) rather than one column per series, since different `report`
+  commands can request series with different shapes (a position 3-vector
+  alongside a scalar mass, say) and there is no single fixed column set a
+  wide table could use across every row. `missionstudio run` writes it
+  to `<out-dir>/command_summary.csv` alongside the existing per-series
+  CSVs, only when at least one `report` command actually ran.
+* `ReportEntry`/`CommandSummary` moved from `engine/mission_engine.py`
+  (which imports `engine.service` -> Basilisk at module level) to
+  `engine/results.py` (deliberately Basilisk-free, exactly like
+  `TimeSeries`/`ResultSet` already are) -- a design-consistency fix
+  more than new functionality: these are plain data containers with no
+  Basilisk dependency of their own, and belonged with this project's
+  other Basilisk-independent, synthetic-data-testable result types.
+
+**Verification:** 3 new tests in `tests/test_results.py` (Basilisk-free,
+covers the CSV's long-format shape, nested-directory creation, and the
+zero-reports/header-only case). `cli.py`'s actual `run` dispatch logic
+itself is not independently unit-tested (same as its pre-existing
+`SimulationService`-calling code -- this file's tests only cover argument
+parsing and Basilisk-free helper functions, see `tests/test_cli.py`'s own
+scope).
+
+**GUI (`gui/mission_sequence_editor.py`, `gui/mission_output_widget.py`,
+`gui/run_worker.py`, `gui/main_window.py`, `gui/scenario_editor.py`) --
+landed:**
+
+The final Phase 6 stage: a `mission_sequence` is now editable and runnable
+end-to-end from the GUI, not just from a scenario JSON file or a script
+calling `MissionEngine` directly.
+
+* `gui.mission_sequence_editor.MissionSequenceEditorWidget` -- a new
+  "Mission sequence" group box in `ScenarioEditorWidget`, right below
+  Ground stations. This is the first `QTreeWidget` used anywhere in
+  `gui/` (every other list -- spacecraft, sensors/actuators, ground
+  stations -- is flat); `Command` is the first schema type that nests
+  (`if`/`while` carry `children`), so a tree is the first of its shape
+  this app has needed. Add/Edit/Remove mirror
+  `gui.sensor_actuator_editor.SensorActuatorListWidget`'s existing
+  shape; Add Child (enabled only when the current selection is an
+  `if`/`while`) and Move Up/Move Down are new, for nesting and ordering
+  a flat list doesn't need. A tree node's `children` are always taken
+  from the tree's own nesting, never from a stored `Command`'s own
+  `children` field (which is deliberately cleared on every node --
+  see the module's docstring) -- editing a child can never leave a
+  parent's copy stale.
+* `_CommandEditorDialog` -- modeled directly on
+  `gui.sensor_actuator_editor._ItemEditorDialog`'s Kind-combo-plus
+  -conditional-fields shape, with one page per `Command` kind (`if`/
+  `while` share a page -- both are just a `condition` string). Unlike
+  that dialog, this one doesn't hand-check each field: it builds a real
+  `schema.command.Command` and calls its own `validate()`, so the
+  dialog can never drift out of sync with what `Command.validate()`
+  actually requires. `script_block.code` gets a `QPlainTextEdit` in a
+  monospace font -- this is "the script editor" from the original
+  Resources/Mission/Output request. Spacecraft-name fields
+  (`propagate`'s event target, `maneuver`'s target, `assignment`'s
+  target) are `QComboBox`es fed from a snapshot list taken when the
+  dialog opens, via `MissionSequenceEditorWidget.
+  set_spacecraft_names_provider()` -- mirrors
+  `gui.spacecraft_editor.SpacecraftListWidget.
+  set_central_body_provider()`'s existing zero-argument-callable
+  convention. `assignment`'s controller/parameter fields are
+  `QComboBox`es built from a small whitelist duplicated from (not
+  imported from) `engine.mission_engine._ASSIGNMENT_CONTROLLERS`/
+  `_ASSIGNMENT_ATTRIBUTES` -- duplicated because
+  `engine.mission_engine` imports `engine.service` -> Basilisk at
+  module level, and this dialog has to work with no Basilisk installed;
+  kept in sync by hand, same as `_KIND_PARAM_SPECS` already documents
+  doing for `engine.fsw`.
+* `gui.mission_output_widget.MissionOutputWidget` -- the "debug
+  console" from the original request: a new read-only "Mission Output"
+  tab in `MainWindow.right_tabs` (between Results and Kernel Status)
+  that lists every `report` command's `ReportEntry` in execution order
+  once a `mission_sequence` run finishes, plus the total
+  `commands_executed` count from its `CommandSummary`.
+* `gui.run_worker.RunWorker` now dispatches on
+  `scenario.mission_sequence` exactly like `cli.py`'s `cmd_run()`
+  already did: a non-empty sequence runs through `MissionEngine`
+  instead of `SimulationService.run()`/`run_live()` directly, and
+  `finished_ok` now always carries `(ResultSet, Optional[
+  CommandSummary])` instead of just a `ResultSet` -- `None` for every
+  existing (`mission_sequence`-free) scenario, so nothing about the
+  non-mission-sequence path changed. `MissionEngine.run()` has no
+  `run_live()` equivalent (no per-command progress callback to drive
+  one), so `MainWindow.on_run()` ignores the Live Plot toggle whenever
+  `mission_sequence` is non-empty rather than silently hanging a
+  progress bar at 0%.
+* `MainWindow._on_run_finished()` switches `right_tabs` to Mission
+  Output instead of Results when a run produced a `CommandSummary`,
+  and clears the Mission Output tab on New/Open/Run, matching how
+  Results already behaves.
+
+**Verification:** every new/changed GUI file above has direct
+`pytest-qt` coverage in `tests/gui/` (`test_mission_sequence_editor.py`,
+`test_mission_output_widget.py`, plus additions to
+`test_scenario_editor.py`/`test_main_window.py`) -- the full suite
+(461 passed, 45 skipped in this Basilisk-free sandbox) only grows,
+matching every earlier Phase 6 stage's own discipline. This stage has
+NOT yet been exercised against a real Basilisk build by actually
+drawing a `mission_sequence` in the GUI and clicking Run -- every prior
+Phase 6 stage (the execution engine especially) turned up real bugs
+that only reproduced against an actual Basilisk install, so treat this
+GUI wiring the same way until it's been run for real.
 
 ## Repository layout
 
@@ -1063,12 +1284,15 @@ missionStudio/
       propellant_bookkeeping.py      -- Phase 5: shared per-tick mass/propellant delta math (no Basilisk needed)
       constellation.py               -- Phase 4: Walker-pattern constellation generator + SeparationSchedule (no Basilisk needed)
       spacecraft_templates.py        -- Phase 5: reusable spacecraft "bus" templates (no Basilisk needed)
+      mission_engine.py              -- Phase 6: MissionEngine -- walks mission_sequence against a SimulationService (needs Basilisk)
     gui/
       app.py                         -- QApplication entry point
       theme.py                       -- Phase 5: app-wide QSS stylesheet + palette
       icons.py                       -- Phase 5: procedurally-drawn app icon
       main_window.py                 -- MainWindow: File/Run menus + toolbar, ties everything together
       scenario_editor.py             -- the full scenario form + live validation
+      mission_sequence_editor.py     -- Phase 6: mission_sequence tree editor (Command Add/Edit/Remove/nesting)
+      mission_output_widget.py       -- Phase 6: "Mission Output" debug-console tab (CommandSummary/ReportEntry display)
       propagation_setup_dialog.py    -- Phase 5: gravity/perturbations + integrator + space weather, one dedicated window
       spacecraft_editor.py           -- spacecraft list + add/edit/remove dialog (tabbed: orbit, sensors/actuators, FSW, power/propulsion/link budget)
       sensor_actuator_editor.py      -- Phase 2: generic sensor/actuator list + add/edit/remove dialog
@@ -1096,6 +1320,7 @@ missionStudio/
     test_constellation.py            -- Phase 4
     test_cli.py
     test_two_body_validation.py      -- requires_basilisk
+    test_mission_engine.py           -- Phase 6, requires_basilisk
     gui/
       test_orbit_ic_widget.py
       test_spacecraft_editor.py
@@ -1110,6 +1335,8 @@ missionStudio/
       test_kernel_status_widget.py
       test_run_worker.py
       test_main_window.py
+      test_mission_sequence_editor.py -- Phase 6
+      test_mission_output_widget.py  -- Phase 6
 ```
 
 ## Running the tests

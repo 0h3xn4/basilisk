@@ -5,7 +5,7 @@ import csv
 import numpy as np
 import pytest
 
-from missionstudio.engine.results import ResultSet, ResultsError, TimeSeries
+from missionstudio.engine.results import CommandSummary, ReportEntry, ResultSet, ResultsError, TimeSeries
 
 
 def _sample_series(name="s", n=10):
@@ -61,3 +61,45 @@ def test_result_set_rejects_duplicate_series_name():
     rs.add(_sample_series("dup"))
     with pytest.raises(ResultsError, match="already added"):
         rs.add(_sample_series("dup"))
+
+
+def test_command_summary_export_csv_long_format(tmp_path):
+    summary = CommandSummary(reports=[
+        ReportEntry(label="checkpoint", t_s=100.0, values={
+            "sat-1.position_N": np.array([1.0, 2.0, 3.0]),
+            "sat-1.mass_kg": np.array([500.0]),
+        }),
+        ReportEntry(label=None, t_s=200.0, values={"sat-1.position_N": np.array([4.0, 5.0, 6.0])}),
+    ], commands_executed=5)
+
+    path = summary.export_csv(tmp_path / "command_summary.csv")
+    with open(path, newline="") as f:
+        rows = list(csv.reader(f))
+
+    assert rows[0] == ["report_index", "t_s", "label", "series", "component", "value"]
+    # 3 components (position) + 1 (mass) for report 0, 3 components for report 1.
+    assert len(rows) == 1 + 4 + 3
+
+    position_rows = [r for r in rows[1:] if r[0] == "0" and r[3] == "sat-1.position_N"]
+    assert len(position_rows) == 3
+    assert [r[4] for r in position_rows] == ["0", "1", "2"]
+    assert [float(r[5]) for r in position_rows] == pytest.approx([1.0, 2.0, 3.0])
+    assert position_rows[0][2] == "checkpoint"
+
+    unlabeled_rows = [r for r in rows[1:] if r[0] == "1"]
+    assert all(r[2] == "" for r in unlabeled_rows)
+
+
+def test_command_summary_export_csv_creates_parent_dir(tmp_path):
+    summary = CommandSummary(reports=[
+        ReportEntry(label="x", t_s=0.0, values={"s": np.array([1.0])}),
+    ])
+    path = summary.export_csv(tmp_path / "nested" / "dir" / "out.csv")
+    assert path.exists()
+
+
+def test_command_summary_export_csv_with_no_reports_writes_header_only(tmp_path):
+    path = CommandSummary().export_csv(tmp_path / "out.csv")
+    with open(path, newline="") as f:
+        rows = list(csv.reader(f))
+    assert rows == [["report_index", "t_s", "label", "series", "component", "value"]]
