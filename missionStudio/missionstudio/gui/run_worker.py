@@ -63,6 +63,7 @@ applies with no live plot watching just as safely as with one.
 
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Optional
@@ -70,6 +71,8 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from ..schema.scenario import MonteCarloConfig, Scenario
+
+_logger = logging.getLogger(__name__)
 
 
 class RunWorker(QThread):
@@ -137,6 +140,12 @@ class RunWorker(QThread):
                     self.cancelled.emit(exc.partial_result, None)
                     return
         except Exception as exc:  # noqa: BLE001 -- surface ANY failure to the GUI, never crash the worker silently
+            # Full traceback to the log file/terminal -- see
+            # logging_setup's own module docstring for why str(exc) alone
+            # (all the GUI's own error dialog ever shows) can be the ONLY
+            # information anywhere about a genuinely unexpected failure,
+            # with nothing else to go on, unless this is logged here.
+            _logger.exception("RunWorker failed")
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(result, command_summary)
@@ -167,6 +176,7 @@ class MonteCarloWorker(QThread):
             self.failed.emit(str(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- surface ANY failure to the GUI, never crash the worker silently
+            _logger.exception("MonteCarloWorker failed")
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(failures)

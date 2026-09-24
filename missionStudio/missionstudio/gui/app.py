@@ -26,12 +26,17 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from ..logging_setup import configure_logging
 from .icons import app_icon
 from .main_window import MainWindow
 from .theme import apply_theme
 
 
 def main(argv: list | None = None) -> int:
+    # First thing, before anything else can fail -- see logging_setup's
+    # own module docstring for why (direct user feedback: a crash whose
+    # only information anywhere was one bare line in a GUI error dialog).
+    configure_logging()
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("missionStudio")
     # Needed for QSettings() (used by gui.vizard_launcher to remember a

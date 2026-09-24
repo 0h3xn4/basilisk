@@ -58,6 +58,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .logging_setup import configure_logging
 from .schema import ScenarioValidationError, load_scenario
 
 
@@ -417,6 +418,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list | None = None) -> int:
+    # First thing, before anything else can fail -- see logging_setup's
+    # own module docstring for why. Also covers `missionstudio gui`
+    # (cmd_gui() dispatches into gui.app.main(), which calls this same,
+    # idempotent function itself too -- see its own docstring -- so
+    # direct-launching the GUI via `python3 -m missionstudio.gui.app`
+    # gets it either way).
+    configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

@@ -469,6 +469,65 @@ def test_run_failed_stops_busy_indicator_and_reenables_actions(window, monkeypat
     assert window.monte_carlo_action.isEnabled()
 
 
+def test_run_failed_dialog_mentions_the_log_file_when_configured(window, monkeypatch):
+    """Direct user feedback: a bare error message with nothing else to go
+    on (e.g. a raw C++ exception's str()) left no way to actually
+    diagnose an unexpected failure -- see logging_setup's own module
+    docstring. Once logging is configured (real entry points always do
+    this; a bare MainWindow() in a test does not, by default -- see the
+    test right after this one for that case), the error dialog must say
+    where the full traceback landed.
+    """
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from missionstudio.gui import main_window
+
+    fake_log_path = Path("/tmp/fake/missionstudio_20300101T000000Z.log")
+    monkeypatch.setattr(main_window, "get_log_file_path", lambda: fake_log_path)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
+
+    window._on_run_failed("boom")
+
+    assert len(critical_calls) == 1
+    shown_message = critical_calls[0][2]
+    assert "boom" in shown_message
+    assert str(fake_log_path) in shown_message
+
+
+def test_run_failed_dialog_omits_the_log_hint_when_logging_was_never_configured(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from missionstudio.gui import main_window
+
+    monkeypatch.setattr(main_window, "get_log_file_path", lambda: None)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
+
+    window._on_run_failed("boom")
+
+    assert critical_calls[0][2] == "boom"
+
+
+def test_monte_carlo_failed_dialog_mentions_the_log_file_when_configured(window, monkeypatch):
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from missionstudio.gui import main_window
+
+    fake_log_path = Path("/tmp/fake/missionstudio_20300101T000000Z.log")
+    monkeypatch.setattr(main_window, "get_log_file_path", lambda: fake_log_path)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: critical_calls.append(a)))
+
+    window._on_monte_carlo_failed("boom")
+
+    assert str(fake_log_path) in critical_calls[0][2]
+
+
 def test_run_monte_carlo_rejects_disabled_monte_carlo(window, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
 

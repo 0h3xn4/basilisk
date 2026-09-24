@@ -31,8 +31,12 @@ just handled in theory.
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QHeaderView, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+
+_logger = logging.getLogger(__name__)
 
 
 class _KernelFetchWorker(QThread):
@@ -51,6 +55,9 @@ class _KernelFetchWorker(QThread):
         try:
             statuses = kernels.ensure_kernels()
         except Exception as exc:  # noqa: BLE001 -- surface ANY failure, never crash the worker thread silently
+            # Full traceback to the log file/terminal -- see
+            # logging_setup's own module docstring for why.
+            _logger.exception("Kernel fetch failed")
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(statuses)

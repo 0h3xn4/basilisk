@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QToolBar,
 )
 
+from ..logging_setup import get_log_file_path
 from ..schema.scenario import Scenario, ScenarioValidationError, load_scenario
 from .kernel_status_widget import KernelStatusWidget
 from .load_scenario_widget import LoadScenarioWidget
@@ -65,6 +66,21 @@ from .vizard_launcher import (
 )
 
 _FILE_FILTER = "missionStudio scenario (*.json)"
+
+
+def _with_log_file_hint(message: str) -> str:
+    """Appends where the FULL traceback for ``message`` was just logged
+    (see ``logging_setup``'s own module docstring) -- direct user
+    feedback that a bare error message with nothing else to go on
+    (e.g. a raw C++ exception's ``str()``) left no way to actually
+    diagnose an unexpected failure. Falls back to ``message`` unchanged
+    if logging was never configured (e.g. a test constructing
+    MainWindow directly without going through a real entry point).
+    """
+    log_file = get_log_file_path()
+    if log_file is None:
+        return message
+    return f"{message}\n\nFull details logged to:\n{log_file}"
 
 
 class MainWindow(QMainWindow):
@@ -712,7 +728,7 @@ class MainWindow(QMainWindow):
 
     def _on_run_failed(self, message: str) -> None:
         self._stop_busy("Run failed.")
-        QMessageBox.critical(self, "Simulation failed", message)
+        QMessageBox.critical(self, "Simulation failed", _with_log_file_hint(message))
 
     def _on_run_cancelled(self, partial_result, command_summary=None) -> None:
         """Handles RunWorker.cancelled -- a user-requested abort (see
@@ -762,7 +778,7 @@ class MainWindow(QMainWindow):
 
     def _on_monte_carlo_failed(self, message: str) -> None:
         self._stop_busy("Monte Carlo run failed.")
-        QMessageBox.critical(self, "Monte Carlo failed", message)
+        QMessageBox.critical(self, "Monte Carlo failed", _with_log_file_hint(message))
 
     # -- window lifecycle ---------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:

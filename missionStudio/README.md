@@ -1886,6 +1886,87 @@ that environment), but the fix removes the mechanism (window-width
 guessed cause, so it should hold regardless of the exact platform
 details.
 
+## Template '05' crash recurred -- added a debug-logging mode
+
+The "root-caused" fix above turned out not to be the whole story: the user
+hit the **same** `basic_string::_M_create`/`std::bad_alloc` crash again on
+template '05', on a build that already had the `orbit_maintenance.py`
+finiteness guards deployed and confirmed working (per that section's own
+"Confirmed for real" note). That rules out the guarded `rv2elem()` call
+sites as the *only* source -- there is some other path into this crash
+that guarding those two call sites didn't cover, and guessing at more
+call sites blind, the same way the first fix was found, was not working.
+
+What actually blocked root-causing it further: this app had **no
+diagnostic output anywhere**. Every background-thread failure (`RunWorker`,
+`MonteCarloWorker`, the kernel-fetch worker) was caught with a bare
+`except Exception as exc: self.failed.emit(str(exc))` -- the GUI shows a
+one-line message, nothing is logged, and the terminal the user launched
+`missionstudio-gui` from prints nothing but Unity's own startup noise. A
+native crash inside a SWIG director callback (see above) doesn't even
+leave that much -- there is no Python traceback to catch in the first
+place. Direct user request: "would be good, if you could add some kind of
+debug mode, that outputs everything that happens in the terminal and also
+saves it in a log file."
+
+Added `missionstudio/logging_setup.py`: a single `configure_logging()`
+entry point, called once as the very first line of both `cli.main()` and
+`gui.app.main()` (idempotent -- `cli.main()` dispatching into
+`gui.app.main()` for `missionstudio gui` must not double up handlers).
+It attaches two handlers to the root logger -- a `FileHandler` at
+`~/.missionstudio/logs/missionstudio_<UTC timestamp>.log` (`DEBUG` level,
+so nothing is filtered out of the file) and a `StreamHandler` on stderr
+(`INFO` level, so the terminal stays readable) -- and installs
+`sys.excepthook` so an exception that would otherwise just crash silently
+is logged with its full traceback before the process exits. The three
+background-worker `except Exception` catch-alls (`run_worker.py` x2,
+`kernel_status_widget.py`) now call `logger.exception(...)` before
+emitting their `failed` signal, so a worker failure's full traceback lands
+in the log file, not just the one-line message the GUI dialog shows.
+`main_window.py`'s "Simulation failed"/"Monte Carlo failed" dialogs now
+also name the current log file's path directly in the dialog text, so the
+next report doesn't depend on the user knowing where to look.
+
+This does not, by itself, fix the template '05' crash -- a crash
+originating inside a SWIG director callback can still take the whole
+process down before Python-level logging gets a chance to run (the same
+reason `orbit_maintenance.py`'s guards can only degrade gracefully, never
+raise). But it turns every *other* class of failure -- anything that
+raises a normal Python exception anywhere in this app, including on a
+background thread -- into something with an actual traceback to read
+afterward, and it is the only way forward for the next reproduction: if
+the crash again leaves nothing in the log file, that itself narrows it
+back down to "inside Basilisk's C++/SWIG layer, not this app's Python
+code," which the two conflicting crash signatures already suggested but
+didn't confirm.
+
+**Verification:** `tests/test_logging_setup.py` (7 tests, no
+Basilisk/Qt dependency, run unconditionally) cover log-file creation,
+idempotency, an exception logged via `logger.exception()` landing in the
+file with its full traceback, and the `sys.excepthook` install. Three new
+`tests/gui/test_main_window.py` tests confirm the failure dialogs mention
+the log file's path when logging is configured and omit the hint
+otherwise. Running `cli.main()` directly (as `tests/test_cli.py` already
+does, dozens of times, without a subprocess) now triggers a real
+`configure_logging()` call every time this suite runs -- an autouse
+`tests/conftest.py` fixture isolates it per test (resets
+`logging_setup`'s internal state, redirects `Path.home()` to a per-test
+`tmp_path` so nothing touches this machine's real
+`~/.missionstudio/logs`, and restores the root logger's handlers/level
+and `sys.excepthook` afterward) so no test leaks a stale `StreamHandler`
+bound to a since-closed, pytest-captured `stderr` into any later test.
+600 passed, 60 skipped in this sandbox. Not yet confirmed against a real
+Basilisk build -- that confirmation depends on the user reproducing the
+template '05' crash again and sharing the new log file's contents, which
+is the actual blocker on finishing the root-cause fix.
+
+**If you hit this (or any other) crash:** the log file's path is printed
+at GUI/CLI startup and is also named directly in any "Simulation
+failed"/"Monte Carlo failed" dialog. Check
+`~/.missionstudio/logs/missionstudio_<timestamp>.log` (the most recent
+one) for a full traceback before reporting a crash -- it will have far
+more detail than whatever the dialog or terminal showed on their own.
+
 ## Repository layout
 
 ```
