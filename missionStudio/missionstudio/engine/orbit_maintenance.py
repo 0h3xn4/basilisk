@@ -406,6 +406,16 @@ class PhasingKeepingController(sysModel.SysModel):
         self.state = self.IDLE
         self._lastT = CurrentSimNanos * macros.NANO2SEC
         self._accumDv = 0.0
+        # Mirrors StationKeepingController.Reset()'s own self._altHistory
+        # clear -- this smoothing window is per-tick algorithmic state, not
+        # cumulative telemetry (unlike tLog/errorDegLog/... below, which
+        # intentionally keep accumulating across a Reset() the same way
+        # every other controller's logs do), so a second Reset() on this
+        # same instance (Basilisk permits calling it more than once, even
+        # though every current caller in this codebase only ever does so
+        # once) must not let stale pre-reset error samples leak into the
+        # smoothed error average computed just after it.
+        self._errorHistory = []
         if self.extForceEffectorB is not None:
             self.extForceEffectorB.extForce_N = [0.0, 0.0, 0.0]
 
