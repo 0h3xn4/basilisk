@@ -316,8 +316,8 @@ class _CommandEditorDialog(QDialog):
         layout = QVBoxLayout(page)
         hint = QLabel(
             "Condition expression, evaluated against t_s (elapsed mission time [s]) and "
-            "spacecraft['<name>'].{r_BN_N, v_BN_N, altitude_m, mass_kg} -- "
-            "e.g. \"spacecraft['sat-1'].altitude_m < 400000\"."
+            "spacecraft['<name>']['r_BN_N'|'v_BN_N'|'altitude_m'|'mass_kg'] -- "
+            "e.g. \"spacecraft['sat-1']['altitude_m'] < 400000\"."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -390,6 +390,21 @@ class _CommandEditorDialog(QDialog):
     def to_dataclass(self) -> Command:
         kind = self.kind_combo.currentText()
         label = self.label_edit.text().strip() or None
+        # Command.validate()'s "assignment" check only requires a dotted
+        # string (see schema.command.Command._validate_assignment) -- it
+        # doesn't require the spacecraft segment itself to be non-empty,
+        # unlike "maneuver"/propagate "event", which do reject a blank
+        # spacecraft. With no spacecraft defined yet, assignment_spacecraft_
+        # combo has no items and currentText() is "", which would otherwise
+        # build a target like ".station_keeping.thrust_n" that silently
+        # passes both Command.validate() and the scenario-level reference
+        # check (schema.references._command_references skips an empty
+        # name) -- caught only much later, deep into a mission_sequence
+        # run. Reject it here instead, immediately, like the other two
+        # spacecraft-name fields already are.
+        if kind == "assignment" and not self.assignment_spacecraft_combo.currentText():
+            raise ValueError("command: assignment.target must name a spacecraft -- add a spacecraft under "
+                              "Resources first")
         command = Command(kind=kind, label=label, params=self._collect_params(kind))
         errors = command.validate("command")
         if errors:

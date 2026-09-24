@@ -107,6 +107,22 @@ def test_assignment_dialog_prefills_target_from_existing_command(qtbot):
     assert dialog.assignment_value_spin.value() == pytest.approx(220.0)
 
 
+def test_assignment_rejects_missing_spacecraft(qtbot):
+    """Regression guard: Command.validate() alone doesn't reject a blank
+    spacecraft segment in assignment.target (only that the string contains
+    a '.'), unlike maneuver/propagate's explicit spacecraft checks -- so
+    to_dataclass() must reject it itself before it ever reaches
+    Command.validate().
+    """
+    dialog = _dialog(spacecraft_names=[])  # no spacecraft defined yet -- combo stays empty
+    qtbot.addWidget(dialog)
+    index = dialog.kind_combo.findText("assignment")
+    dialog.kind_combo.setCurrentIndex(index)
+
+    with pytest.raises(ValueError, match="spacecraft"):
+        dialog.to_dataclass()
+
+
 def test_report_series_round_trips_as_line_list(qtbot):
     dialog = _dialog()
     qtbot.addWidget(dialog)
